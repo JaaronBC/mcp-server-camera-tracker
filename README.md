@@ -49,26 +49,45 @@ Edit the "mcpServers" list to include the mcp-server-camera-tracker through the 
 
 ### Trace 1: Capture a webcam video
 
-- User prompt: [add the prompt used to request a recording]
+- User prompt: [capture webcam footage using mcp-server-camera-tracker]
 - MCP tool call: `capture_webcam_video(duration_seconds)`
-- Input: [add the duration]
-- Result: [add the generated video path and a screenshot or transcript excerpt]
+- Input: capture webcam footage using mcp-server-camera-tracker for 2 seconds
+- Result: 
+  The webcam capture worked. There were no errors.
+  Result: "Video recorded successfully"
+  Duration requested: 2 seconds
+  Saved to: captures\webcam_1790752985.mp4
 
 ### Trace 2: Detect and track dogs
 
-- User prompt: [add the prompt used to analyze a captured video]
+- User prompt: [detect dogs in video source using mcp-server-camera-tracker]
 - MCP tool call: `detect_and_track_dogs(video_path)`
-- Input: [add the video path]
-- Result: [add the tracking JSON path and a screenshot or transcript excerpt]
+- Input: detect dogs in "local/source/link" using mcp-server-camera-tracker
+- Result: 
+  Dogs detected: 1 (tracked as ID 1)
+  Movement: Stationary
+  Horizontal displacement: 6.2 (a very small shift, likely just minor movement or tracking jitter rather than real travel)
+  Frames tracked: 214
 
 ### Trace 3: Analyze dog movement
 
-- User prompt: [add the prompt used to classify movement]
+- User prompt: [detect dog movement in *json file path* using mcp-server-camera-tracker]
 - MCP tool call: `analyze_dog_movement(tracking_data)`
-- Input: [add the tracking data path or content]
-- Result: [add the movement classification and a screenshot or transcript excerpt]
+- Input: use mcp-server-camera-tracker to analyze the following *json file path*
+- Result: 
+  Dog ID: 1
+  Movement: Stationary
+  Horizontal displacement: 6.2
+  Frames tracked: 214
 
 ## MCP Architecture
 
-The MCP server is the local program that exposes this project's webcam, detection, tracking, and movement-analysis tools. It performs the requested work and returns structured results without deciding what the user should ask next. The MCP client is the host integration, such as Claude Desktop. It connects the LLM to the server, discovers the available tools, sends tool requests, and displays the returned results. The LLM interprets the user's natural-language request, selects an appropriate tool, supplies its arguments, and explains the result in conversational language. In a typical trace, the LLM requests a recording through the client, the client forwards that request to the MCP server, and the server returns the output path. The client passes that result back to the LLM, which may then request tracking or movement analysis as a follow-up step.
+The MCP server is the local program that calls on our yolo api in a multitude of ways. It can use webcam tracking, instance detection, and movement detections all relating to dogs. The server performs the requested work and returns structured results. The entity that decides how to make these structured calls is the LLM.
+
+
+The MCP client is the host integration, and in this instance we use Claude Desktop. The client connects the LLM to the MCP server, and the LLM checks the available tools, and sends requests using them. The LLM then returns the corresponding results back to the user. In this case, the user can submit webcam access, video source links, and data file source links.
+
+
+One limitation we observed when testing is that some devices don’t run the webcam functionality. On one of our devices, the webcam worked fine but on the other it returned an error. This is likely due to different configurations of permissions access which could cause problems for different users.
+
 
