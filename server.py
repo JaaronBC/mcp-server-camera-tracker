@@ -4,8 +4,7 @@ import time
 import json
 from pathlib import Path
 
-mcp = MCPServer("Dog Behavior Assistant")
-
+mcp = MCPServer("Object Behavior Assistant")
 
 @mcp.tool()
 def capture_webcam_video(duration_seconds: int) -> str:
@@ -57,8 +56,8 @@ def capture_webcam_video(duration_seconds: int) -> str:
 
 
 @mcp.tool()
-def detect_and_track_dogs(video_path: str) -> str:
-    """Detect and track dogs in a recorded video."""
+def detect_and_track_objects(video_path: str) -> str:
+    """Detect and track object in a recorded video."""
 
     if not video_path.strip():
         raise ValueError("video_path cannot be empty.")
@@ -75,7 +74,7 @@ def detect_and_track_dogs(video_path: str) -> str:
     results = model.track(
         source=str(video_file),
         tracker="bytetrack.yaml",
-        classes=[16],
+        classes=[0], #0 for person, 39 for watter bottle, 16 for dog
         persist=True,
         stream=True,
         verbose=False,
@@ -117,8 +116,8 @@ def detect_and_track_dogs(video_path: str) -> str:
     return f"Tracking complete. Results saved to: {output_path}"
 
 @mcp.tool()
-def analyze_dog_movement(tracking_data: str) -> str:
-    """Analyze tracked dog positions and determine each dog's movement direction."""
+def analyze_object_movement(tracking_data: str) -> str:
+    """Analyze tracked object positions and determine each object's movement direction."""
 
     if not tracking_data.strip():
         raise ValueError("tracking_data cannot be empty.")
@@ -132,17 +131,17 @@ def analyze_dog_movement(tracking_data: str) -> str:
         data = json.load(file)
 
     if not data:
-        return "No dogs were detected in the tracking data."
+        return "No objects were detected in the tracking data."
 
     results = {}
 
     # Movement threshold in pixels
     movement_threshold = 30
 
-    for dog_id, positions in data.items():
+    for object_id, positions in data.items():
 
         if len(positions) < 2:
-            results[dog_id] = {
+            results[object_id] = {
                 "movement": "insufficient data",
                 "displacement_x": 0,
             }
@@ -162,7 +161,7 @@ def analyze_dog_movement(tracking_data: str) -> str:
         else:
             movement = "stationary"
 
-        results[dog_id] = {
+        results[object_id] = {
             "movement": movement,
             "displacement_x": round(displacement_x, 2),
             "frames_tracked": len(positions),
