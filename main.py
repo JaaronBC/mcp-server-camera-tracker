@@ -1,6 +1,7 @@
 # main.py
 import os
 import asyncio
+import json
 from dotenv import load_dotenv
 from openai import OpenAI
 from mcp import ClientSession, StdioServerParameters
@@ -33,69 +34,134 @@ async def run_agent():
             # List available tools exposed by the MCP server
             mcp_tools = await session.list_tools()
             
-            # 3. Convert MCP tools into OpenAI-compatible function schemas
+            # 3. Convert MCP tools into OpenAI-compatible schemas
             openai_tools = []
+
             for tool in mcp_tools.tools:
                 openai_tools.append({
                     "type": "function",
                     "function": {
                         "name": tool.name,
-                        "description": tool.description,
-                        "parameters": tool.input_schema
-                    }
+                        "description": tool.description or "",
+                        "parameters": tool.input_schema,
+                    },
                 })
-            
-            # 4. Get a prompt from the terminal user
-            user_prompt = input("\nAsk the Agent something (e.g., 'What's the weather like in Honolulu?'): ")
-            
+
+            # 4. Get the user's request
+            user_prompt = input("\nAsk the Agent something: ")
+
             messages = [
-                {"role": "system", "content": "You are a helpful terminal agent. Use your tools to answer questions accurately."},
-                {"role": "user", "content": user_prompt}
+                {
+                    "role": "system",
+                    "content": """
+                    You are a local object-tracking assistant connected
+                    to an MCP server.
+
+                    When the user requests a new webcam behavior analysis:
+                    1. Call capture_webcam_video first, unless the user
+                       explicitly provides an existing video.
+                    2. Pass the exact returned video path to
+                       detect_and_track_objects.
+                    3. Pass the returned JSON path to
+                       analyze_object_movement.
+                    4. Use the actual tool results for your conclusions.
+                    5. Explain any tool errors rather than inventing results.
+                    6. Summarize detected objects, tracking IDs, and movement.
+
+                    Important rules: 
+                    - Complete all three steps when the user requests a complete behavior analysis.
+                    - Never call capture_webcam_video more than once for the same request unless the user explicitly asks for another recording. 
+                    - If a tool fails, explain the error. Do not repeat the same operation automatically. 
+                    - Never invent results or claim analysis succeeded unless the tools returned the relevant results.
+                    """,
+                },
+                {"role": "user", "content": user_prompt},
             ]
-            
-            # 5. First LLM Pass: Decide if a tool is needed
-            response = openai_client.chat.completions.create(
-                model="openai/gpt-oss-120b",
-                messages=messages,
-                tools=openai_tools,
-                tool_choice="auto"
-            )
-            
-            response_message = response.choices[0].message
-            
-            # 6. Execute tool call if requested by the LLM
-            if response_message.tool_calls:
-                messages.append(response_message)
-                
+
+            # 5. LLM tool-calling loop
+            max_rounds = 10
+
+            for round_number in range(max_rounds):
+                print(f"\nLLM round {round_number + 1}...")
+
+                response = openai_client.chat.completions.create(
+                    model="openai/gpt-oss-120b",
+                    messages=messages,
+                    tools=openai_tools,
+                    tool_choice="auto",
+                )
+
+                response_message = response.choices[0].message
+
+                # Save the assistant message, including tool calls.
+                messages.append(
+                    response_message.model_dump(exclude_none=True)
+                )
+
+                # No tool calls means the model has finished.
+                if not response_message.tool_calls:
+                    print(f"\nAgent: {response_message.content}")
+                    return
+
+                # 6. Execute every requested MCP tool.
                 for tool_call in response_message.tool_calls:
                     tool_name = tool_call.function.name
-                    # Arguments are provided as a JSON string from the LLM
-                    tool_args = eval(tool_call.function.arguments) 
-                    
-                    print(f"LLM requested tool execution: {tool_name}({tool_args})")
-                    
-                    # Call the actual Python logic inside server.py across the MCP boundary
-                    result = await session.call_tool(tool_name, arguments=tool_args)
-                    # Pull text out of the content block
-                    tool_output = result.content[0].text 
-                    
-                    # Append the tool result back into the LLM history
+
+                    try:
+                        # Parse JSON safely instead of using eval().
+                        tool_args = json.loads(
+                            tool_call.function.arguments
+                        )
+
+                        print(
+                            f"\nLLM requested tool: {tool_name}"
+                        )
+                        print(f"Arguments: {tool_args}")
+
+                        result = await session.call_tool(
+                            tool_name,
+                            arguments=tool_args,
+                        )
+
+                        # Collect any text returned by the MCP tool.
+                        tool_output = "\n".join(
+                            item.text
+                            for item in (result.content or [])
+                            if hasattr(item, "text")
+                        )
+                        
+                        # Check the error flag used by this MCP SDK.
+                        if getattr(result, "is_error", False):
+                            tool_output = "MCP tool error: " + tool_output
+
+                        if not tool_output:
+                            tool_output = "MCP tool returned no output."
+                        
+                        #Stop the model from retrying a failed tool indefinitely.
+                        if getattr(result, "is_error", False):
+                            tool_output += (
+                                " The tool failed, and the model should not "
+                                "retry this operation automatically. Explain the error to the user instead."
+                            )
+                    except Exception as exc:
+                        tool_output = (
+                            f"Tool {tool_name} failed: {exc}"
+                        )
+
+                    print(f"Tool result: {tool_output}")
+
+                    # 7. Give the result back to the LLM.
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tool_call.id,
-                        "name": tool_name,
-                        "content": tool_output
+                        "content": tool_output,
                     })
-                
-                # 7. Second LLM Pass: Generate final response with tool data loaded
-                final_response = openai_client.chat.completions.create(
-                    model="openai/gpt-oss-120b",
-                    messages=messages
-                )
-                print(f"\nAgent: {final_response.choices[0].message.content}")
-            else:
-                # If no tool was needed, just print the direct output
-                print(f"\nAgent: {response_message.content}")
+
+            print(
+                "\nAgent stopped after reaching the maximum "
+                "number of tool-calling rounds."
+            )
+
 
 if __name__ == "__main__":
     asyncio.run(run_agent())
