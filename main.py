@@ -79,10 +79,10 @@ async def run_agent():
             ]
 
             # 5. LLM tool-calling loop
-            max_rounds = 10
+            max_loops = 10
 
-            for round_number in range(max_rounds):
-                print(f"\nLLM round {round_number + 1}...")
+            for loop_number in range(max_loops):
+                print(f"\nLoop {loop_number + 1}...")
 
                 response = openai_client.chat.completions.create(
                     model="openai/gpt-oss-120b",
