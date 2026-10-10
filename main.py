@@ -46,7 +46,7 @@ async def run_agent():
                 })
             
             # 4. Get a prompt from the terminal user
-            user_prompt = input("\nAsk the Agent something (e.g., 'What's the weather like in Honolulu?'): ")
+            user_prompt = input("\nAsk the Agent something (e.g., 'Take webcam video using mcp server'): ")
             
             messages = [
                 {"role": "system", "content": "You are a helpful terminal agent. Use your tools to answer questions accurately."},
