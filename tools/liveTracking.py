@@ -10,7 +10,11 @@ from .registry import mcp
 def run_live_object_tracking() -> str:
     """Open a live webcam window with YOLO detection and ByteTrack IDs. Press q to stop."""
 
-    script_path = Path(__file__).with_name("liveTrackingDisplay.py")
+    script_path = (
+        Path(__file__).parent
+        / "components"
+        / "liveTrackingDisplay.py"
+    )
 
     try:
         result = subprocess.run(
