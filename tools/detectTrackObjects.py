@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from ultralytics import YOLO
 
 from .registry import mcp
 
@@ -14,8 +15,6 @@ def detect_and_track_objects(video_path: str) -> str:
 
     if not video_file.exists():
         raise ValueError(f"Video file not found: {video_path}")
-
-    from ultralytics import YOLO
 
     model = YOLO("yolo11n.pt")
 

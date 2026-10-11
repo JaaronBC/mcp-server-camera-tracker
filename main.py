@@ -12,7 +12,7 @@ load_dotenv()
 # Ensure you have your OpenAI API key set in your environment
 # or in a .env file: OPENAI_API_KEY="your-key-here"
 openai_client = OpenAI(
-    base_url="https://128.171.10.80:9443/v1",
+    base_url="https://128.171.10.83:9443/v1",
     api_key=os.environ.get("OPENROUTER_API_KEY")
 )
 
