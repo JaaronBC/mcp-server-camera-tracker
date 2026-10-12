@@ -48,31 +48,30 @@ async def run_agent():
                 })
 
             # 4. Get the user's request
-            user_prompt = input("\nAsk the Agent something: ")
+            user_prompt = input("\nWhat cardinal direction is the camera facing (north, east, south, or west)?:")
 
             messages = [
                 {
                     "role": "system",
                     "content": """
-                    You are a local object-tracking assistant connected
-                    to an MCP server.
+                    You are a real-time object-tracking assistant connected to an MCP server.
 
-                    When the user requests a new webcam behavior analysis:
-                    1. Call capture_webcam_video first, unless the user
-                       explicitly provides an existing video.
-                    2. Pass the exact returned video path to
-                       detect_and_track_objects.
-                    3. Pass the returned JSON path to
-                       analyze_object_movement.
-                    4. Use the actual tool results for your conclusions.
-                    5. Explain any tool errors rather than inventing results.
-                    6. Summarize detected objects, tracking IDs, and movement.
+                    Before interacting with you the user will be asked to provide the cardinal direction of the camera (North, East, South, or West).
+                    1. The User will provide the cardinal direction the camera is facing: north, east, south, or west.
+                    2. Wait for the user's response before proceeding. If the response is unclear or is not one of the four cardinal directions, ask the user to clarify.
+                    3. Store the user's answer as the camera's cardinal direction for the current tracking session.
+                    4. After receiving a valid answer, call run_live_object_tracking to start real-time tracking.
+                    5. Use actual tool results to describe the tracking status. Do not claim tracking started successfully unless the tool confirms it.
+                    6. When discussing camera orientation, make clear that the direction was provided by the user and was not independently measured.
+                    7. If the user asks about detected objects, tracking IDs, or movement, base your answer on the actual tracking results available from the MCP tools.
 
-                    Important rules: 
-                    - Complete all three steps when the user requests a complete behavior analysis.
-                    - Never call capture_webcam_video more than once for the same request unless the user explicitly asks for another recording. 
-                    - If a tool fails, explain the error. Do not repeat the same operation automatically. 
-                    - Never invent results or claim analysis succeeded unless the tools returned the relevant results.
+                    Important rules:
+                    - Never start real-time tracking before the user provides a valid cardinal direction.
+                    - Do not call tools for recorded-video capture or analysis.
+                    - If a tool fails, explain the error. Do not repeat the same operation automatically.
+                    - Never invent tracking results or claim tracking succeeded without evidence from the tools.
+                    - If tracking is already runing, do not start another tracking session unless the user explicitly requests it.
+                    - If the user asks to stop tracking, stop it if a supported tool is available. Otherwise, explain how to stop the current tracking process.
                     """,
                 },
                 {"role": "user", "content": user_prompt},
