@@ -5,10 +5,14 @@ from pathlib import Path
 
 from .registry import mcp
 
+# Keep a reference to the running subprocess.
+tracking_process = None
+
 
 @mcp.tool()
 def run_live_object_tracking() -> str:
-    """Open a live webcam window with YOLO detection and ByteTrack IDs. Press q to stop."""
+    """Start live YOLO tracking in the background and return immediately."""
+    global tracking_process
 
     script_path = (
         Path(__file__).parent
@@ -17,20 +21,29 @@ def run_live_object_tracking() -> str:
     )
 
     try:
-        result = subprocess.run(
+        # Avoid opening multiple webcam windows.
+        if (
+            tracking_process is not None
+            and tracking_process.poll() is None
+        ):
+            return "Live object tracking is already running."
+
+        if not script_path.exists():
+            return f"Tracking script not found: {script_path}"
+
+        # Start the webcam process without waiting for it to finish.
+        tracking_process = subprocess.Popen(
             [sys.executable, str(script_path)],
-            check=False,
-            capture_output=True,
-            text=True,
+            cwd=str(script_path.parent),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
 
-        if result.returncode == 0:
-            return "Live object tracking stopped."
-
         return (
-            f"Live tracking exited with code {result.returncode}.\n"
-            f"Output: {result.stdout}\n"
-            f"Errors: {result.stderr}"
+            "Live object tracking started in the background. "
+            f"Process ID: {tracking_process.pid}. "
+            "Press 'q' in the webcam window to stop tracking."
         )
 
     except Exception as error:

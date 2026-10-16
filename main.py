@@ -46,6 +46,37 @@ async def run_agent():
                         "parameters": tool.input_schema,
                     },
                 })
+            
+
+            # Automatically start live tracking on startup.
+            live_tracking_tool = "run_live_object_tracking"
+
+            available_tool_names = [
+                tool.name for tool in mcp_tools.tools
+            ]
+
+            if live_tracking_tool not in available_tool_names:
+                print(
+                    f"Error: {live_tracking_tool} is not registered. "
+                    f"Available tools: {available_tool_names}"
+                )
+                return
+
+            print("\nStarting live tracking...")
+
+            result = await session.call_tool(
+                live_tracking_tool,
+                arguments={}
+            )
+
+            if getattr(result, "is_error", False):
+                print("Failed to start live tracking:", result.content)
+                return
+
+            print(
+                "\nLive tracking started. "
+                "Press 'q' in the webcam window to stop tracking."
+            )
 
             # 4. Get the user's request
             user_prompt = input("\nAsk the Agent something: ")
@@ -57,7 +88,7 @@ async def run_agent():
                     You are a local object-tracking assistant connected
                     to an MCP server.
 
-                    When the user requests a new webcam behavior analysis:
+                    When the application first runs, live tracking is automatically started. While live tracking is running:
                     1. Call capture_webcam_video first, unless the user
                        explicitly provides an existing video.
                     2. Pass the exact returned video path to
@@ -101,21 +132,16 @@ async def run_agent():
                 # No tool calls means the model has finished.
                 if not response_message.tool_calls:
                     print(f"\nAgent: {response_message.content}")
-                    return
+                    break
 
                 # 6. Execute every requested MCP tool.
                 for tool_call in response_message.tool_calls:
                     tool_name = tool_call.function.name
 
                     try:
-                        # Parse JSON safely instead of using eval().
-                        tool_args = json.loads(
-                            tool_call.function.arguments
-                        )
+                        tool_args = json.loads(tool_call.function.arguments)
 
-                        print(
-                            f"\nLLM requested tool: {tool_name}"
-                        )
+                        print(f"\nLLM requested tool: {tool_name}")
                         print(f"Arguments: {tool_args}")
 
                         result = await session.call_tool(
@@ -123,34 +149,25 @@ async def run_agent():
                             arguments=tool_args,
                         )
 
-                        # Collect any text returned by the MCP tool.
                         tool_output = "\n".join(
                             item.text
                             for item in (result.content or [])
                             if hasattr(item, "text")
                         )
-                        
-                        # Check the error flag used by this MCP SDK.
-                        if getattr(result, "is_error", False):
-                            tool_output = "MCP tool error: " + tool_output
 
-                        if not tool_output:
-                            tool_output = "MCP tool returned no output."
-                        
-                        #Stop the model from retrying a failed tool indefinitely.
                         if getattr(result, "is_error", False):
-                            tool_output += (
-                                " The tool failed, and the model should not "
-                                "retry this operation automatically. Explain the error to the user instead."
+                            tool_output = (
+                                "MCP tool error: " + tool_output
+                                + "\nExplain the error. Do not retry automatically."
                             )
+                        elif not tool_output:
+                            tool_output = "MCP tool returned no output."
+
                     except Exception as exc:
-                        tool_output = (
-                            f"Tool {tool_name} failed: {exc}"
-                        )
+                        tool_output = f"Tool {tool_name} failed: {exc}"
 
                     print(f"Tool result: {tool_output}")
 
-                    # 7. Give the result back to the LLM.
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tool_call.id,
