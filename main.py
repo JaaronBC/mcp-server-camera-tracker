@@ -207,6 +207,6 @@ async def run_agent():
 
             except KeyboardInterrupt:
                 print("\nStopping automatic monitoring.", flush=True)
-                
+
 if __name__ == "__main__":
     asyncio.run(run_agent())

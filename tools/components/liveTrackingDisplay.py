@@ -3,34 +3,52 @@ import cv2
 import math
 import sys
 import json
+import time
+from datetime import datetime
+from pathlib import Path
 from ultralytics import YOLO
 
-
-# Minimum center movement in pixels to trigger detection.
+CAPTURE_SECONDS = 3.0
 MOVEMENT_THRESHOLD = 20
+
+# Save captures in the project's root directory.
+output_dir = Path(__file__).resolve().parents[2] / "captures"
+output_dir.mkdir(parents=True, exist_ok=True)
 
 
 def main():
     model = YOLO("yolo11n.pt")
     camera = cv2.VideoCapture(0)
-    waitForDetection = True
 
     if not camera.isOpened():
         camera.release()
-        print("Error: Could not open webcam.")
+        print("Error: Could not open webcam.", file=sys.stderr, flush=True)
         return
 
-    # Store the previous center position for each tracked object.
     previous_positions = {}
+    tracking_data = {}
+    frame_number = 0
 
-    print("Live YOLO + ByteTrack started. Press 'q' to stop.")
+    capture_start = None
+    capture_until = None
+
+    # Keep status messages off stdout, which carries MCP events.
+    print(
+        "Live YOLO + ByteTrack started. Press 'q' to stop.",
+        file=sys.stderr,
+        flush=True,
+    )
 
     try:
         while True:
             success, frame = camera.read()
 
             if not success:
-                print("Error: Could not read webcam frame.")
+                print(
+                    "Error: Could not read webcam frame.",
+                    file=sys.stderr,
+                    flush=True,
+                )
                 break
 
             results = model.track(
@@ -44,57 +62,110 @@ def main():
             result = results[0]
             boxes = result.boxes
 
-            if boxes is not None and boxes.id is not None and waitForDetection:
-                # Get bounding boxes and their ByteTrack IDs.
+            # 1. Detect meaningful movement and update positions.
+            if boxes is not None and boxes.id is not None:
                 coordinates = boxes.xyxy.cpu().tolist()
                 track_ids = boxes.id.int().cpu().tolist()
 
                 for bbox, track_id in zip(coordinates, track_ids):
                     x1, y1, x2, y2 = bbox
-
-                    # Calculate the center of the bounding box.
                     center_x = (x1 + x2) / 2
                     center_y = (y1 + y2) / 2
-
                     current_position = (center_x, center_y)
 
-                    if track_id in previous_positions:
-                        previous_x, previous_y = previous_positions[track_id]
+                    previous_position = previous_positions.get(track_id)
 
-                        # Calculate how far the center moved.
-                        distance = math.sqrt(
-                            (center_x - previous_x) ** 2
-                            + (center_y - previous_y) ** 2
+                    if previous_position is not None and capture_until is None:
+                        previous_x, previous_y = previous_position
+
+                        distance = math.hypot(
+                            center_x - previous_x,
+                            center_y - previous_y,
                         )
 
                         if distance >= MOVEMENT_THRESHOLD:
-                            waitForDetection = False
+                            capture_start = time.monotonic()
+                            capture_until = capture_start + CAPTURE_SECONDS
+                            tracking_data = {}
 
                             event = {
                                 "type": "movement_detected",
                                 "track_id": int(track_id),
                                 "distance_pixels": round(float(distance), 1),
                             }
-                            #sends the event to the MCP server
+
+                            # stdout: machine-readable event for the MCP parent.
                             print(json.dumps(event), flush=True)
 
+                            # stderr: diagnostic messages only.
                             print(
                                 f"Movement detected: ID {track_id}, "
-                                f"moved {distance:.1f} pixels",
+                                f"moved {distance:.1f} pixels. "
+                                f"Recording next {CAPTURE_SECONDS} seconds.",
                                 file=sys.stderr,
                                 flush=True,
                             )
 
-                    # Save the current position for the next frame.
+                    # Update every object's position on every frame.
                     previous_positions[track_id] = current_position
 
-            # Draw bounding boxes, class labels, and track IDs.
-            annotated_frame = result.plot()
+            # 2. Collect data independently of movement detection.
+            # This must be outside the per-object loop and detection condition.
+            if capture_until is not None:
+                now = time.monotonic()
 
+                if now < capture_until:
+                    current_boxes = result.boxes
+
+                    if current_boxes is not None and current_boxes.id is not None:
+                        track_ids = current_boxes.id.int().cpu().tolist()
+                        coordinates = current_boxes.xyxy.cpu().tolist()
+
+                        for track_id, bbox in zip(track_ids, coordinates):
+                            x1, y1, x2, y2 = bbox
+                            center_x = (x1 + x2) / 2
+                            center_y = (y1 + y2) / 2
+                            track_id = str(track_id)
+
+                            if track_id not in tracking_data:
+                                tracking_data[track_id] = []
+
+                            tracking_data[track_id].append({
+                                "frame": frame_number,
+                                "elapsed_seconds": round(
+                                    now - capture_start, 4
+                                ),
+                                "center_x": round(center_x, 2),
+                                "center_y": round(center_y, 2),
+                            })
+
+                else:
+                    filename = (
+                        f"tracking_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.json"
+                    )
+                    output_path = output_dir / filename
+
+                    with output_path.open("w", encoding="utf-8") as file:
+                        json.dump(tracking_data, file, indent=2)
+
+                    print(
+                        f"Tracking data saved to {output_path}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+
+                    capture_until = None
+                    capture_start = None
+                    tracking_data = {}
+
+            # 3. Display and advance the frame counter.
+            annotated_frame = result.plot()
             cv2.imshow(
                 "Counter-Drone System - Live Tracking",
                 annotated_frame,
             )
+
+            frame_number += 1
 
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 break
@@ -102,7 +173,7 @@ def main():
     finally:
         camera.release()
         cv2.destroyAllWindows()
-        print("Live tracking stopped.")
+        print("Live tracking stopped.", file=sys.stderr, flush=True)
 
 
 if __name__ == "__main__":
