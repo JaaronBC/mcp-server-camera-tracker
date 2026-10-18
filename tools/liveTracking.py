@@ -2,6 +2,9 @@
 import subprocess
 import sys
 from pathlib import Path
+import threading
+
+from tools.eventReader import read_tracking_events
 
 from .registry import mcp
 
@@ -36,9 +39,16 @@ def run_live_object_tracking() -> str:
             [sys.executable, str(script_path)],
             cwd=str(script_path.parent),
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
+            text=True,
+            bufsize=1,
         )
+        threading.Thread(
+            target=read_tracking_events,
+            args=(tracking_process,),
+            daemon=True,
+        ).start()
 
         return (
             "Live object tracking started in the background. "

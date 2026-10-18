@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 from openai import OpenAI
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+from requests import session
 
 load_dotenv()
 
@@ -15,6 +16,29 @@ openai_client = OpenAI(
     base_url="https://128.171.10.80:9443/v1",
     api_key=os.environ.get("OPENROUTER_API_KEY")
 )
+
+def parse_events(result):
+    """Convert the MCP tool response into a list of event dictionaries."""
+    events = []
+
+    for item in result.content or []:
+        if not hasattr(item, "text"):
+            continue
+
+        try:
+            data = json.loads(item.text)
+        except json.JSONDecodeError:
+            continue
+
+        if isinstance(data, list):
+            events.extend(
+                event for event in data
+                if isinstance(event, dict)
+            )
+        elif isinstance(data, dict) and data.get("type") == "movement_detected":
+            events.append(data)
+
+    return events
 
 async def run_agent():
     # 1. Configure parameters to execute your server.py file via standard I/O
@@ -78,107 +102,111 @@ async def run_agent():
                 "Press 'q' in the webcam window to stop tracking."
             )
 
-            # 4. Get the user's request
-            user_prompt = input("\nAsk the Agent something: ")
+            print(
+                "\nAutomatic movement monitoring started. "
+                "Press Ctrl+C to stop.",
+                flush=True,
+            )
 
-            messages = [
-                {
-                    "role": "system",
-                    "content": """
-                    You are a local object-tracking assistant connected
-                    to an MCP server.
-
-                    When the application first runs, live tracking is automatically started. While live tracking is running:
-                    1. Call capture_webcam_video first, unless the user
-                       explicitly provides an existing video.
-                    2. Pass the exact returned video path to
-                       detect_and_track_objects.
-                    3. Pass the returned JSON path to
-                       analyze_object_movement.
-                    4. Use the actual tool results for your conclusions.
-                    5. Explain any tool errors rather than inventing results.
-                    6. Summarize detected objects, tracking IDs, and movement.
-
-                    Important rules: 
-                    - Complete all three steps when the user requests a complete behavior analysis.
-                    - Never call capture_webcam_video more than once for the same request unless the user explicitly asks for another recording. 
-                    - If a tool fails, explain the error. Do not repeat the same operation automatically. 
-                    - Never invent results or claim analysis succeeded unless the tools returned the relevant results.
-                    """,
-                },
-                {"role": "user", "content": user_prompt},
+            analysis_tool = "analyze_object_movement"
+            available_tool_names = [
+                tool.name for tool in mcp_tools.tools
             ]
 
-            # 5. LLM tool-calling loop
-            max_loops = 10
-
-            for loop_number in range(max_loops):
-                print(f"\nLoop {loop_number + 1}...")
-
-                response = openai_client.chat.completions.create(
-                    model="openai/gpt-oss-120b",
-                    messages=messages,
-                    tools=openai_tools,
-                    tool_choice="auto",
+            if analysis_tool not in available_tool_names:
+                print(
+                    f"Error: {analysis_tool} is not registered. "
+                    f"Available tools: {available_tool_names}"
                 )
+                return
 
-                response_message = response.choices[0].message
+            try:
+                while True:
+                    # Check for new movement events.
+                    result = await session.call_tool(
+                        "get_pending_movement_events",
+                        arguments={},
+                    )
 
-                # Save the assistant message, including tool calls.
-                messages.append(
-                    response_message.model_dump(exclude_none=True)
-                )
+                    if getattr(result, "is_error", False):
+                        print(
+                            "Failed to retrieve movement events:",
+                            result.content,
+                            flush=True,
+                        )
+                        await asyncio.sleep(1)
+                        continue
 
-                # No tool calls means the model has finished.
-                if not response_message.tool_calls:
-                    print(f"\nAgent: {response_message.content}")
-                    break
+                    events = parse_events(result)
 
-                # 6. Execute every requested MCP tool.
-                for tool_call in response_message.tool_calls:
-                    tool_name = tool_call.function.name
-
-                    try:
-                        tool_args = json.loads(tool_call.function.arguments)
-
-                        print(f"\nLLM requested tool: {tool_name}")
-                        print(f"Arguments: {tool_args}")
-
-                        result = await session.call_tool(
-                            tool_name,
-                            arguments=tool_args,
+                    # Only call the analysis tool when events exist.
+                    for event in events:
+                        print(
+                            "\nMovement detected:",
+                            json.dumps(event),
+                            flush=True,
                         )
 
-                        tool_output = "\n".join(
+                        # Pass the actual event to the analysis tool.
+                        analysis_result = await session.call_tool(
+                            analysis_tool,
+                            arguments={
+                                "tracking_data": json.dumps(event)
+                            },
+                        )
+
+                        analysis_text = "\n".join(
                             item.text
-                            for item in (result.content or [])
+                            for item in (analysis_result.content or [])
                             if hasattr(item, "text")
                         )
 
-                        if getattr(result, "is_error", False):
-                            tool_output = (
-                                "MCP tool error: " + tool_output
-                                + "\nExplain the error. Do not retry automatically."
+                        if getattr(analysis_result, "is_error", False):
+                            print(
+                                "Movement analysis failed:",
+                                analysis_text,
+                                flush=True,
                             )
-                        elif not tool_output:
-                            tool_output = "MCP tool returned no output."
+                            continue
 
-                    except Exception as exc:
-                        tool_output = f"Tool {tool_name} failed: {exc}"
+                        # Ask the LLM to summarize this event's analysis.
+                        response = await asyncio.to_thread(
+                            openai_client.chat.completions.create,
+                            model="openai/gpt-oss-120b",
+                            messages=[
+                                {
+                                    "role": "system",
+                                    "content": (
+                                        "You are a real-time object-tracking "
+                                        "assistant. Summarize only the supplied "
+                                        "movement event and analysis. Do not "
+                                        "infer a threat from movement alone. "
+                                        "Explain limitations such as missing "
+                                        "direction, speed, or physical distance."
+                                    ),
+                                },
+                                {
+                                    "role": "user",
+                                    "content": (
+                                        f"Movement event:\n"
+                                        f"{json.dumps(event)}\n\n"
+                                        f"Analysis result:\n{analysis_text}"
+                                    ),
+                                },
+                            ],
+                        )
 
-                    print(f"Tool result: {tool_output}")
+                        print(
+                            "\nAgent:",
+                            response.choices[0].message.content,
+                            flush=True,
+                        )
 
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "content": tool_output,
-                    })
+                    # Avoid continuously hammering the MCP server.
+                    await asyncio.sleep(1)
 
-            print(
-                "\nAgent stopped after reaching the maximum "
-                "number of tool-calling rounds."
-            )
-
-
+            except KeyboardInterrupt:
+                print("\nStopping automatic monitoring.", flush=True)
+                
 if __name__ == "__main__":
     asyncio.run(run_agent())
