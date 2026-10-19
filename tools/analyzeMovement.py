@@ -1,58 +1,54 @@
+
 import json
 from pathlib import Path
-
 from .registry import mcp
+
 
 @mcp.tool()
 def analyze_object_movement(tracking_data: str) -> str:
-    """Analyze tracked object positions and determine each object's movement direction."""
+    """Load raw tracking observations, including timestamps, for agent analysis."""
 
-    if not tracking_data.strip():
-        raise ValueError("tracking_data cannot be empty.")
+    try:
+        event = json.loads(tracking_data)
+        file_path = Path(event["file_path"])
 
-    tracking_file = Path(tracking_data)
+        if not file_path.is_file():
+            return json.dumps({
+                "status": "error",
+                "message": "Tracking capture file not found",
+                "file_path": str(file_path),
+            })
 
-    if not tracking_file.exists():
-        raise ValueError(f"Tracking file not found: {tracking_data}")
+        with file_path.open("r", encoding="utf-8") as file:
+            capture_data = json.load(file)
 
-    with open(tracking_file, "r") as file:
-        data = json.load(file)
+        # Explicitly return the timestamps and positions for each track.
+        tracks = {}
 
-    if not data:
-        return "No objects were detected in the tracking data."
+        for track_id, observations in capture_data.items():
+            tracks[track_id] = [
+                {
+                    "frame": obs.get("frame"),
+                    "elapsed_seconds": obs.get("elapsed_seconds"),
+                    "timestamp": obs.get("timestamp"),
+                    "center_x": obs.get("center_x"),
+                    "center_y": obs.get("center_y"),
+                }
+                for obs in observations
+            ]
 
-    results = {}
+        return json.dumps({
+            "status": "success",
+            "trigger_track_id": event.get("track_id"),
+            "trigger_distance_pixels": event.get("distance_pixels"),
+            "observation_count": sum(
+                len(observations) for observations in tracks.values()
+            ),
+            "tracks": tracks,
+        })
 
-    # Movement threshold in pixels
-    movement_threshold = 30
-
-    for object_id, positions in data.items():
-
-        if len(positions) < 2:
-            results[object_id] = {
-                "movement": "insufficient data",
-                "displacement_x": 0,
-            }
-            continue
-
-        start_x = positions[0]["center_x"]
-        end_x = positions[-1]["center_x"]
-
-        displacement_x = end_x - start_x
-
-        if displacement_x > movement_threshold:
-            movement = "right"
-
-        elif displacement_x < -movement_threshold:
-            movement = "left"
-
-        else:
-            movement = "stationary"
-
-        results[object_id] = {
-            "movement": movement,
-            "displacement_x": round(displacement_x, 2),
-            "frames_tracked": len(positions),
-        }
-
-    return json.dumps(results, indent=2)
+    except (json.JSONDecodeError, KeyError, TypeError, OSError) as exc:
+        return json.dumps({
+            "status": "error",
+            "message": str(exc),
+        })
