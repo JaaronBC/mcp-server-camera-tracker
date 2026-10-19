@@ -212,7 +212,6 @@ async def run_agent():
                         )
 
                         print(
-                            "\nAgent:",
                             response.choices[0].message.content,
                             flush=True,
                         )
