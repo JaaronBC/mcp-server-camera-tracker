@@ -41,4 +41,18 @@ that every movement indicates a threat.
 
 ## Response format
 
-Respond in one concise sentence, covering every track present in the capture. For each track, include its track ID, primary movement direction, observation duration, and estimated average image-plane speed in pixels per second when available. Separate tracks with semicolons. Mention uncertainty only when necessary. Do not use headings, bullet points, calculations, or additional paragraphs. Never omit a track just because another track has more observations.
+Present the movement analysis as a Markdown table with one row per track.
+
+Include these columns:
+
+Track ID: The unique tracking ID.
+
+Primary Direction: The primary direction of movement (left, right, up, down, diagonal, or stationary).
+
+Duration (s): The observation duration in seconds.
+
+Average Speed (px/s): The estimated average image-plane speed in pixels per second, when available.
+
+Calculate average speed using the net displacement between the first and last observed positions divided by the elapsed observation time. Do not confuse net average speed with total path speed.
+
+Include every track present in the capture. If a value cannot be reliably calculated, use "Unavailable" rather than inventing a value. After the table, provide at most one short sentence noting important uncertainty or limitations. Do not add headings, calculations, or lengthy explanations.
