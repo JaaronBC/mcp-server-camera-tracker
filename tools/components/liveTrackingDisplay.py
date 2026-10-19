@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from ultralytics import YOLO
 
-CAPTURE_SECONDS = 3.0
+CAPTURE_SECONDS = 1.0
 MOVEMENT_THRESHOLD = 20
 
 # Save captures in the project's root directory.

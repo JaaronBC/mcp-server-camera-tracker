@@ -41,8 +41,4 @@ that every movement indicates a threat.
 
 ## Response format
 
-Respond in exactly one short sentence. Include the track ID,
-primary movement direction, observation duration, and estimated
-average image-plane speed in pixels per second when available.
-Mention uncertainty only when necessary. Do not use headings,
-bullet points, calculations, or additional paragraphs.
+Respond in one concise sentence, covering every track present in the capture. For each track, include its track ID, primary movement direction, observation duration, and estimated average image-plane speed in pixels per second when available. Separate tracks with semicolons. Mention uncertainty only when necessary. Do not use headings, bullet points, calculations, or additional paragraphs. Never omit a track just because another track has more observations.

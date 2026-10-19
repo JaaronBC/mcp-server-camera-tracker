@@ -172,9 +172,7 @@ async def run_agent():
                     # Only call the analysis tool when events exist.
                     for event in events:
                         print(
-                            "\nMovement detected:",
-                            json.dumps(event),
-                            flush=True,
+                            "\nMovement detected"
                         )
 
                         # Pass the actual event to the analysis tool.
