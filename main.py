@@ -16,6 +16,7 @@ openai_client = OpenAI(
     api_key=os.environ.get("OPENROUTER_API_KEY")
 )
 
+
 async def run_agent():
     # 1. Configure parameters to execute your server.py file via standard I/O
     server_params = StdioServerParameters(
