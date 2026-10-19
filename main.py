@@ -16,6 +16,28 @@ openai_client = OpenAI(
     api_key=os.environ.get("OPENROUTER_API_KEY")
 )
 
+def parse_events(result):
+    """Convert the MCP tool response into a list of event dictionaries."""
+    events = []
+
+    for item in result.content or []:
+        if not hasattr(item, "text"):
+            continue
+
+        try:
+            data = json.loads(item.text)
+        except json.JSONDecodeError:
+            continue
+
+        if isinstance(data, list):
+            events.extend(
+                event for event in data
+                if isinstance(event, dict)
+            )
+        elif isinstance(data, dict) and data.get("type") == "movement_detected":
+            events.append(data)
+
+    return events
 
 async def run_agent():
     # 1. Configure parameters to execute your server.py file via standard I/O
