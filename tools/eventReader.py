@@ -17,16 +17,9 @@ def read_tracking_events(process):
             event = json.loads(line)
 
             if event.get("type") == "movement_detected":
-                print("Received movement event:", event, flush=True)
 
                 if event.get("type") == "movement_detected":
                     movement_event_queue.put(event)
-
-                    print(
-                        "Movement event queued:",
-                        event,
-                        flush=True,
-                    )
 
         except json.JSONDecodeError:
             print(f"Non-JSON subprocess output: {line.rstrip()}", file=sys.stderr)

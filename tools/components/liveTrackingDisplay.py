@@ -31,6 +31,9 @@ def main():
 
     capture_start = None
     capture_until = None
+    trigger_track_id = None
+    trigger_distance = None
+    
 
     # Keep status messages off stdout, which carries MCP events.
     print(
@@ -88,22 +91,12 @@ def main():
                             capture_until = capture_start + CAPTURE_SECONDS
                             tracking_data = {}
 
-                            event = {
-                                "type": "movement_detected",
-                                "track_id": int(track_id),
-                                "distance_pixels": round(float(distance), 1),
-                            }
-
-                            # stdout: machine-readable event for the MCP parent.
-                            print(json.dumps(event), flush=True)
+                            trigger_track_id = int(track_id)
+                            trigger_distance = round(float(distance), 1)
 
                             # stderr: diagnostic messages only.
                             print(
-                                f"Movement detected: ID {track_id}, "
-                                f"moved {distance:.1f} pixels. "
-                                f"Recording next {CAPTURE_SECONDS} seconds.",
-                                file=sys.stderr,
-                                flush=True,
+                                f"Movement detected: ID {track_id}"
                             )
 
                     # Update every object's position on every frame.
@@ -148,6 +141,15 @@ def main():
                     with output_path.open("w", encoding="utf-8") as file:
                         json.dump(tracking_data, file, indent=2)
 
+                    event = {
+                        "type": "movement_detected",
+                        "track_id": trigger_track_id,
+                        "distance_pixels": trigger_distance,
+                        "file_path": str(output_path.resolve()),
+                    }
+                    # Send the event only after the capture file is complete.
+                    print(json.dumps(event), flush=True)
+
                     print(
                         f"Tracking data saved to {output_path}",
                         file=sys.stderr,
@@ -157,6 +159,8 @@ def main():
                     capture_until = None
                     capture_start = None
                     tracking_data = {}
+                    trigger_track_id = None
+                    trigger_distance = None
 
             # 3. Display and advance the frame counter.
             annotated_frame = result.plot()

@@ -7,6 +7,36 @@ from openai import OpenAI
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from requests import session
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parent
+SKILL_PATH = (
+    PROJECT_ROOT
+    / "Skills.md"
+)
+
+def load_movement_skill() -> str:
+    """Load movement-analysis instructions from the skill file."""
+    if not SKILL_PATH.is_file():
+        raise FileNotFoundError(
+            f"Movement skill not found: {SKILL_PATH}"
+        )
+
+    return SKILL_PATH.read_text(encoding="utf-8")
+
+
+movement_skill = load_movement_skill()
+
+SYSTEM_PROMPT = f"""
+You are the Object Behavior Assistant, an agent that interprets
+real-time object tracking observations.
+
+Follow the movement-analysis skill below whenever interpreting
+a movement event or a saved tracking capture.
+
+{movement_skill}
+"""
+
 
 load_dotenv()
 
@@ -173,27 +203,14 @@ async def run_agent():
                         response = await asyncio.to_thread(
                             openai_client.chat.completions.create,
                             model="openai/gpt-oss-120b",
-                            messages=[
-                                {
-                                    "role": "system",
-                                    "content": (
-                                        "You are a real-time object-tracking "
-                                        "assistant. Summarize only the supplied "
-                                        "movement event and analysis. Do not "
-                                        "infer a threat from movement alone. "
-                                        "Explain limitations such as missing "
-                                        "direction, speed, or physical distance."
-                                    ),
+                            messages = [
+                                {"role": "system", "content": SYSTEM_PROMPT},
+                                {"role": "user", "content": 
+                                    f"Movement event:\n"
+                                    f"{json.dumps(event)}\n\n"
+                                    f"Analysis result:\n{analysis_text}\n\n"
                                 },
-                                {
-                                    "role": "user",
-                                    "content": (
-                                        f"Movement event:\n"
-                                        f"{json.dumps(event)}\n\n"
-                                        f"Analysis result:\n{analysis_text}"
-                                    ),
-                                },
-                            ],
+                            ]
                         )
 
                         print(
