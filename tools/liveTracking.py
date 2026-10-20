@@ -24,7 +24,6 @@ def run_live_object_tracking() -> str:
     )
 
     try:
-        # Avoid opening multiple webcam windows.
         if (
             tracking_process is not None
             and tracking_process.poll() is None

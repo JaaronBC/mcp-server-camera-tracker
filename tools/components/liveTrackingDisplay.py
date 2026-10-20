@@ -94,16 +94,13 @@ def main():
                             trigger_track_id = int(track_id)
                             trigger_distance = round(float(distance), 1)
 
-                            # stderr: diagnostic messages only.
                             print(
                                 f"Movement detected: ID {track_id}"
                             )
 
-                    # Update every object's position on every frame.
                     previous_positions[track_id] = current_position
 
-            # 2. Collect data independently of movement detection.
-            # This must be outside the per-object loop and detection condition.
+
             if capture_until is not None:
                 now = time.monotonic()
 
@@ -147,7 +144,6 @@ def main():
                         "distance_pixels": trigger_distance,
                         "file_path": str(output_path.resolve()),
                     }
-                    # Send the event only after the capture file is complete.
                     print(json.dumps(event), flush=True)
 
                     print(
