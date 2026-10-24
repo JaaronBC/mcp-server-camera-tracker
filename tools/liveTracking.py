@@ -1,18 +1,13 @@
-
 import subprocess
 import sys
 from pathlib import Path
-import threading
 
-from tools.eventReader import read_tracking_events
-
-from .registry import mcp
+# from .registry import mcp
 
 # Keep a reference to the running subprocess.
 tracking_process = None
 
 
-@mcp.tool()
 def run_live_object_tracking() -> str:
     """Start live YOLO tracking in the background and return immediately."""
     global tracking_process
@@ -39,16 +34,7 @@ def run_live_object_tracking() -> str:
             [sys.executable, str(script_path)],
             cwd=str(script_path.parent),
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            bufsize=1,
         )
-        threading.Thread(
-            target=read_tracking_events,
-            args=(tracking_process,),
-            daemon=True,
-        ).start()
 
         return (
             "Live object tracking started in the background. "
@@ -58,3 +44,7 @@ def run_live_object_tracking() -> str:
 
     except Exception as error:
         return f"Could not start live tracking: {error}"
+
+if __name__ == "__main__":
+    result = run_live_object_tracking()
+    print(result)
