@@ -1,226 +1,230 @@
 # main.py
 import os
 import asyncio
-import json
+from pathlib import Path
+from typing import Any
+import sys
 from dotenv import load_dotenv
-from openai import OpenAI
+from openai import AsyncOpenAI
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
-from requests import session
 from pathlib import Path
+import tkinter
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-SKILL_PATH = (
-    PROJECT_ROOT
-    / "Skills.md"
-)
+SKILL_PATH = PROJECT_ROOT / "Skills.md"
+SERVER_PATH = PROJECT_ROOT / "server.py"
 
-def load_movement_skill() -> str:
-    """Load movement-analysis instructions from the skill file."""
+TRACKING_ADDRESS = ("127.0.0.1", 5005)
+LIVE_TRACKING_TOOL = "live_tracking"
+DETECT_OBJECTS_TOOL = "detect_objects"
+ANALYSIS_INTERVAL_SECONDS = 3
+OPENAI_BASE_URL = "https://128.171.10.83:9443/v1"
+OPENAI_MODEL = "openai/gpt-oss-120b"
+
+def load_system_skill() -> str:
+    """Load instructions used to summarize YOLO tracking frames."""
     if not SKILL_PATH.is_file():
-        raise FileNotFoundError(
-            f"Movement skill not found: {SKILL_PATH}"
+        raise FileNotFoundError(f"System skill not found: {SKILL_PATH}")
+    system_skill = SKILL_PATH.read_text(encoding="utf-8")
+    return (
+        "You are the Object Behavior Assistant, an agent that interprets "
+        "real-time object tracking observations.\n\n"
+        "Follow the movement-analysis skill below whenever interpreting "
+        "a tracking frame.\n\n"
+        f"{system_skill}"
+    )
+
+
+def create_openai_client() -> AsyncOpenAI:
+    """Create the configured summarization client from the environment."""
+    load_dotenv()
+    api_key = os.environ.get("OPENROUTER_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "OPENROUTER_API_KEY is not set. Add it to the environment or .env."
         )
 
-    return SKILL_PATH.read_text(encoding="utf-8")
+    return AsyncOpenAI(base_url=OPENAI_BASE_URL, api_key=api_key)
 
+async def verify_required_tools(session: ClientSession) -> None:
+    """Fail before starting the camera if the server lacks required tools."""
+    tool_list = await session.list_tools()
+    available = {tool.name for tool in tool_list.tools}
+    required = {LIVE_TRACKING_TOOL, DETECT_OBJECTS_TOOL}
+    missing = sorted(required - available)
+    if missing:
+        raise RuntimeError(
+            f"Required MCP tools are not registered: {missing}. "
+            f"Available tools: {sorted(available)}"
+        )
 
-movement_skill = load_movement_skill()
-
-SYSTEM_PROMPT = f"""
-You are the Object Behavior Assistant, an agent that interprets
-real-time object tracking observations.
-
-Follow the movement-analysis skill below whenever interpreting
-a movement event or a saved tracking capture.
-
-{movement_skill}
-"""
-
-
-load_dotenv()
-
-# Ensure you have your OpenAI API key set in your environment
-# or in a .env file: OPENAI_API_KEY="your-key-here"
-openai_client = OpenAI(
-    base_url="https://128.171.10.83:9443/v1",
-    api_key=os.environ.get("OPENROUTER_API_KEY")
-)
-
-def parse_events(result):
-    """Convert the MCP tool response into a list of event dictionaries."""
-    events = []
-
-    for item in result.content or []:
-        if not hasattr(item, "text"):
-            continue
-
-        try:
-            data = json.loads(item.text)
-        except json.JSONDecodeError:
-            continue
-
-        if isinstance(data, list):
-            events.extend(
-                event for event in data
-                if isinstance(event, dict)
-            )
-        elif isinstance(data, dict) and data.get("type") == "movement_detected":
-            events.append(data)
-
-    return events
-
-async def run_agent():
-    # 1. Configure parameters to execute your server.py file via standard I/O
-    server_params = StdioServerParameters(
-        command="python",
-        args=["server.py"]
+async def start_live_tracking(session: ClientSession) -> None:
+    """Start the webcam tracker through the MCP server."""
+    result = await session.call_tool(LIVE_TRACKING_TOOL, arguments={})
+    message = get_result_text(result)
+    if getattr(result, "is_error", False):
+        raise RuntimeError(f"Could not start live tracking: {message}")
+    print(
+        message
+        or "Live tracking started. Press 'q' in the webcam window to stop.",
+        flush=True,
     )
-    
-    print("Initializing MCP pipeline and connecting to server.py...")
-    
-    # 2. Establish the MCP Client -> Server connection
-    async with stdio_client(server_params) as (read_stream, write_stream):
-        async with ClientSession(read_stream, write_stream) as session:
-            # Initialize the connection with the server
-            await session.initialize()
-            
-            # List available tools exposed by the MCP server
-            mcp_tools = await session.list_tools()
-            
-            # 3. Convert MCP tools into OpenAI-compatible schemas
-            openai_tools = []
 
-            for tool in mcp_tools.tools:
-                openai_tools.append({
-                    "type": "function",
-                    "function": {
-                        "name": tool.name,
-                        "description": tool.description or "",
-                        "parameters": tool.input_schema,
-                    },
-                })
-            
+def get_result_text(result: Any) -> str:
+    """Join text blocks from an MCP tool result."""
+    return "\n".join(
+        item.text
+        for item in (result.content or [])
+        if hasattr(item, "text")
+    )
 
-            # Automatically start live tracking on startup.
-            live_tracking_tool = "run_live_object_tracking"
+async def verify_required_tools(session: ClientSession) -> None:
+    """Fail before starting the camera if the server lacks required tools."""
+    tool_list = await session.list_tools()
+    available = {tool.name for tool in tool_list.tools}
+    required = {LIVE_TRACKING_TOOL, DETECT_OBJECTS_TOOL}
+    missing = sorted(required - available)
+    if missing:
+        raise RuntimeError(
+            f"Required MCP tools are not registered: {missing}. "
+            f"Available tools: {sorted(available)}"
+        )
 
-            available_tool_names = [
-                tool.name for tool in mcp_tools.tools
-            ]
+async def start_live_tracking(session: ClientSession) -> None:
+    """Start the webcam tracker through the MCP server."""
+    result = await session.call_tool(LIVE_TRACKING_TOOL, arguments={})
+    message = get_result_text(result)
+    if getattr(result, "is_error", False):
+        raise RuntimeError(f"Could not start live tracking: {message}")
+    print(
+        message
+        or "Live tracking started. Press 'q' in the webcam window to stop.",
+        flush=True,
+    )
 
-            if live_tracking_tool not in available_tool_names:
-                print(
-                    f"Error: {live_tracking_tool} is not registered. "
-                    f"Available tools: {available_tool_names}"
-                )
-                return
 
-            print("\nStarting live tracking...")
+async def summarize_frame(
+    client: AsyncOpenAI,
+    system_prompt: str,
+    frame_data: str,
+) -> str:
+    """Ask the language model to describe a YOLO frame returned by MCP."""
+    response = await client.chat.completions.create(
+        model=OPENAI_MODEL,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": (
+                    "Summarize the objects and their positions in this latest "
+                    f"YOLO tracking frame:\n{frame_data}"
+                ),
+            },
+        ],
+    )
 
-            result = await session.call_tool(
-                live_tracking_tool,
-                arguments={}
-            )
+    if not response.choices:
+        raise RuntimeError("The language model returned no choices.")
 
-            if getattr(result, "is_error", False):
-                print("Failed to start live tracking:", result.content)
-                return
+    return response.choices[0].message.content or "(no summary returned)"
 
-            print(
-                "\nLive tracking started. "
-                "Press 'q' in the webcam window to stop tracking."
-            )
+async def monitor_movement(
+    session: ClientSession,
+    client: AsyncOpenAI,
+    system_prompt: str,
+) -> None:
+    """Receive frames from the tracker and print an interpretation."""
+    address = [TRACKING_ADDRESS[0], TRACKING_ADDRESS[1]]
 
-            print(
-                "\nAutomatic movement monitoring started. "
-                "Press Ctrl+C to stop.",
-                flush=True,
-            )
+    print(
+        "Automatic movement analysis started. Press Ctrl+C to stop.",
+        flush=True,
+    )
 
-            analysis_tool = "analyze_object_movement"
-            available_tool_names = [
-                tool.name for tool in mcp_tools.tools
-            ]
+    loop = asyncio.get_running_loop()
+    summary_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=1)
 
-            if analysis_tool not in available_tool_names:
-                print(
-                    f"Error: {analysis_tool} is not registered. "
-                    f"Available tools: {available_tool_names}"
-                )
-                return
-
+    async def summarize_frames() -> None:
+        while True:
+            frame_data = await summary_queue.get()
             try:
-                while True:
-                    # Check for new movement events.
-                    result = await session.call_tool(
-                        "get_pending_movement_events",
-                        arguments={},
-                    )
+                summary = await summarize_frame(client, system_prompt, frame_data)
+            except Exception as error:
+                print(
+                    f"Movement summary failed ({type(error).__name__}): {error}",
+                    flush=True,
+                )
+            else:
+                print(f"\nMovement summary:\n{summary}", flush=True)
 
-                    if getattr(result, "is_error", False):
+    summary_task = asyncio.create_task(summarize_frames())
+    try:
+        while True:
+            iteration_started_at = loop.time()
+            try:
+                result = await session.call_tool(
+                    DETECT_OBJECTS_TOOL,
+                    arguments={"address": address},
+                )
+            except Exception as error:
+                print(
+                    "Movement analysis tool call failed "
+                    f"({type(error).__name__}): {error}",
+                    flush=True,
+                )
+            else:
+                frame_data = get_result_text(result)
+                if getattr(result, "is_error", False):
+                    print(f"Movement analysis failed: {frame_data}", flush=True)
+                elif not frame_data:
+                    print("Movement analysis returned no frame data.", flush=True)
+                else:
+                    print(f"\nYOLO frame:\n{frame_data}", flush=True)
+                    if summary_queue.full():
+                        summary_queue.get_nowait()
                         print(
-                            "Failed to retrieve movement events:",
-                            result.content,
+                            "Replacing queued movement summary with the latest frame.",
                             flush=True,
                         )
-                        await asyncio.sleep(1)
-                        continue
+                    summary_queue.put_nowait(frame_data)
 
-                    events = parse_events(result)
+            elapsed = loop.time() - iteration_started_at
+            await asyncio.sleep(max(0, ANALYSIS_INTERVAL_SECONDS - elapsed))
+    finally:
+        summary_task.cancel()
+        try:
+            await summary_task
+        except asyncio.CancelledError:
+            pass
 
-                    # Only call the analysis tool when events exist.
-                    for event in events:
-                        print(
-                            "\nMovement detected"
-                        )
 
-                        # Pass the actual event to the analysis tool.
-                        analysis_result = await session.call_tool(
-                            analysis_tool,
-                            arguments={
-                                "tracking_data": json.dumps(event)
-                            },
-                        )
+async def run_agent() -> None:
+    """Connect to the MCP server, start tracking, and analyze its feed."""
+    system_prompt = load_system_skill()
+    client = create_openai_client()
+    server_params = StdioServerParameters(
+        command=sys.executable,
+        args=[str(SERVER_PATH)],
+    )
 
-                        analysis_text = "\n".join(
-                            item.text
-                            for item in (analysis_result.content or [])
-                            if hasattr(item, "text")
-                        )
+    print("Initializing MCP pipeline and connecting to server.py...", flush=True)
 
-                        if getattr(analysis_result, "is_error", False):
-                            print(
-                                "Movement analysis failed:",
-                                analysis_text,
-                                flush=True,
-                            )
-                            continue
+    try:
+        async with stdio_client(server_params) as (read_stream, write_stream):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                await verify_required_tools(session)
+                await start_live_tracking(session)
+                await monitor_movement(session, client, system_prompt)
+    finally:
+        await client.close()
 
-                        # Ask the LLM to summarize this event's analysis.
-                        response = await asyncio.to_thread(
-                            openai_client.chat.completions.create,
-                            model="openai/gpt-oss-120b",
-                            messages = [
-                                {"role": "system", "content": SYSTEM_PROMPT},
-                                {"role": "user", "content": 
-                                    f"Movement event:\n"
-                                    f"{json.dumps(event)}\n\n"
-                                    f"Analysis result:\n{analysis_text}\n\n"
-                                },
-                            ]
-                        )
-
-                        print(
-                            response.choices[0].message.content,
-                            flush=True,
-                        )
-
-                    # Avoid continuously hammering the MCP server.
-                    await asyncio.sleep(1)
-
-            except KeyboardInterrupt:
-                print("\nStopping automatic monitoring.", flush=True)
+def main() -> None:
+    try:
+        asyncio.run(run_agent())
+    except KeyboardInterrupt:
+        print("\nStopping movement analysis.", flush=True)
 
 if __name__ == "__main__":
-    asyncio.run(run_agent())
+    main()
