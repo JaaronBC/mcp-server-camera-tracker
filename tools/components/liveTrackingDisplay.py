@@ -31,7 +31,7 @@ def main(address: list):
             break
 
         # Run YOLO with tracking so each object keeps the same ID between frames
-        result = model.track(frame, persist=True, verbose=False)[0]
+        result = model.track(frame, persist=True, verbose=False, classes=[0])[0]
 
         # Turn each detected box into a simple dictionary
         detections = []

@@ -7,17 +7,16 @@ description: Interpret raw object tracking data from the real-time camera pipeli
 
 ## Purpose
 
-Analyze raw tracking observations produced by YOLO and ByteTrack.
-Use the observed data to describe object movement, without assuming
-that every movement indicates a threat.
+Analyze live tracking data pipeline and return the analysis data from other tools. Be time sensative, only doing tool calls every 5 seconds and providing output data. 
 
 ## Workflow
 
 1. Read the movement event returned by the tracking pipeline.
-2. Use the available MCP tool to load the associated capture JSON.
-3. Inspect the timestamps, track IDs, and center coordinates.
-4. Compare positions over time to infer movement.
-5. Report the findings in a structured, concise format.
+2. Use the available MCP tool to load the associated captures.
+3. analyze the data output, detect for any movement for different objects
+4. Inspect the timestamps, track IDs, and center coordinates.
+5. Only report everytime there's a significant movement
+6. reports should be conssise giving the time id's of each object, the distance traveled for x & y, durration of movement, and direction (up, down, left, right, diagonal)
 
 ## Interpretation rules
 
