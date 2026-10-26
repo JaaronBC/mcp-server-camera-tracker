@@ -8,8 +8,7 @@ from dotenv import load_dotenv
 from openai import AsyncOpenAI
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
-from pathlib import Path
-import tkinter
+from tools.components.display_protocol import DISPLAY_ADDRESS
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 SKILL_PATH = PROJECT_ROOT / "Skills.md"
@@ -129,6 +128,26 @@ async def summarize_frame(
 
     return response.choices[0].message.content or "(no summary returned)"
 
+async def display_tracking_window(summary: str) -> None:
+    """Send an LLM summary to the separately running Tkinter display."""
+    for attempt in range(20):
+        try:
+            _, writer = await asyncio.open_connection(*DISPLAY_ADDRESS)
+        except OSError:
+            if attempt == 19:
+                raise
+            await asyncio.sleep(0.1)
+        else:
+            break
+
+    try:
+        writer.write(summary.encode("utf-8"))
+        await writer.drain()
+    finally:
+        writer.close()
+        await writer.wait_closed()
+
+
 async def monitor_movement(
     session: ClientSession,
     client: AsyncOpenAI,
@@ -157,6 +176,14 @@ async def monitor_movement(
                 )
             else:
                 print(f"\nMovement summary:\n{summary}", flush=True)
+                try:
+                    await display_tracking_window(summary)
+                except OSError as error:
+                    print(
+                        "Could not update the tracking display "
+                        f"({type(error).__name__}): {error}",
+                        flush=True,
+                    )
 
     summary_task = asyncio.create_task(summarize_frames())
     try:

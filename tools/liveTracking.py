@@ -6,17 +6,25 @@ from .registry import mcp
 
 # Keep a reference to the running subprocess.
 tracking_process = None
+display_process = None
 
 
 @mcp.tool()
 def live_tracking() -> str:
     """Start live YOLO tracking in the background and return immediately."""
     global tracking_process
+    global display_process
 
     script_path = (
         Path(__file__).parent
         / "components"
         / "liveTrackingDisplay.py"
+    )
+
+    display_path = (
+        Path(__file__).parent
+        / "components"
+        / "computeDisplay.py"
     )
 
     # Avoid opening multiple webcam windows.
@@ -25,14 +33,29 @@ def live_tracking() -> str:
         and tracking_process.poll() is None
     ):
         return "Live object tracking is already running."
+    if (
+        display_process is not None
+        and display_process.poll() is None
+    ):
+        return "Live tracking display is already running."
 
     if not script_path.is_file():
         raise FileNotFoundError(f"Tracking script not found: {script_path}")
+    if not display_path.is_file():
+        raise FileNotFoundError(f"Display script not found: {display_path}")
 
     # Start the webcam process without waiting for it to finish.
     tracking_process = subprocess.Popen(
         [sys.executable, str(script_path)],
         cwd=str(script_path.parent),
+        stdin=subprocess.DEVNULL,
+        stdout=sys.stderr,
+    )
+
+    # Start the display process without waiting for it to finish.
+    display_process = subprocess.Popen(
+        [sys.executable, str(display_path)],
+        cwd=str(display_path.parent),
         stdin=subprocess.DEVNULL,
         stdout=sys.stderr,
     )
