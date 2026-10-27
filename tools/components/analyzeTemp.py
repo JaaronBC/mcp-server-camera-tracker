@@ -1,3 +1,4 @@
+# Handles analyzeTemp behavior.
 # listener.py
 # Receives detection data from tracker.py and prints it.
 #

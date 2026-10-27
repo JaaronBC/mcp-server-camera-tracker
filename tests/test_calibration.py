@@ -1,3 +1,4 @@
+# Handles test calibration behavior.
 import json
 import unittest
 from pathlib import Path
@@ -14,6 +15,7 @@ from tools.components.calibration import (
 
 class TestCalibration(unittest.TestCase):
     def test_compute_homography_and_map_point(self) -> None:
+        # Performs test compute homography and map point logic.
         image_points = [[0, 0], [100, 0], [100, 100], [0, 100]]
         ground_points = [[0, 0], [10, 0], [10, 20], [0, 20]]
 
@@ -24,6 +26,7 @@ class TestCalibration(unittest.TestCase):
         self.assertAlmostEqual(z_ground, 10.0, places=3)
 
     def test_load_calibration_from_points(self) -> None:
+        # Performs test load calibration from points logic.
         with TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "ground_plane_calibration.json"
             path.write_text(
@@ -44,6 +47,7 @@ class TestCalibration(unittest.TestCase):
         self.assertEqual(calibration.matrix.shape, (3, 3))
 
     def test_load_calibration_from_matrix(self) -> None:
+        # Performs test load calibration from matrix logic.
         matrix = np.array(
             [[0.1, 0.0, 0.0], [0.0, 0.2, 0.0], [0.0, 0.0, 1.0]],
             dtype=float,
@@ -68,6 +72,7 @@ class TestCalibration(unittest.TestCase):
         self.assertEqual(calibration.matrix.shape, (3, 3))
 
     def test_load_calibration_missing_file(self) -> None:
+        # Performs test load calibration missing file logic.
         with TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "does_not_exist.json"
             calibration = load_ground_plane_calibration(path)

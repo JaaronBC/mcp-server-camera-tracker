@@ -29,6 +29,21 @@ Set shared model endpoint configuration in your environment or `.env`:
 
 If `OPENAI_BASE_URL` is unset, the project defaults to `https://128.171.10.83:9443/v1`.
 
+## Testing
+
+Default test runs use mocked model responses where appropriate and do not require live endpoint access:
+
+```bash
+python -m unittest discover -s tests -p 'test_*.py' -v
+```
+
+Optional live Observation/Reasoning endpoint checks are provided in `tests/test_dashboard_reasoning_live_llm.py`.
+These run only when explicitly enabled and require `OPENROUTER_API_KEY`:
+
+```bash
+RUN_LIVE_LLM_TESTS=1 python -m unittest tests.test_dashboard_reasoning_live_llm -v
+```
+
 ## Setup (LLM)
 
 The LLM we connected to was Claude Desktop. In order to connect, go to the claude_desktop_config.json file. It's accessible through the path: file->settings->Developer->Edit Config
@@ -48,9 +63,6 @@ Edit the "mcpServers" list to include the mcp-server-camera-tracker through the 
 
 ## Available tools
 
-- `capture_webcam_video(duration_seconds)`: records a webcam video for 1 to 30 seconds in the `captures` directory.
-- `detect_and_track_dogs(video_path)`: detects dogs in a video and writes tracking positions to a neighboring JSON file.
-- `analyze_dog_movement(tracking_data)`: classifies each tracked dog's horizontal movement from the tracking JSON file.
 - `start_dashboard_demo()`: starts the webcam + radar dashboard demo in a background process.
 - `start_dashboard_and_wait_ready(timeout_seconds=10.0, max_observation_age_seconds=3.0, poll_interval_seconds=0.25)`: starts dashboard and waits until fresh observations are available or timeout occurs.
 - `dashboard_demo_status()`: returns whether the dashboard process is running, PID, and exit code.
@@ -59,11 +71,8 @@ Edit the "mcpServers" list to include the mcp-server-camera-tracker through the 
 - `stop_dashboard_and_confirm(force=False, timeout_seconds=5.0, poll_interval_seconds=0.1)`: stops dashboard and polls until process is confirmed down or timeout occurs.
 - `restart_dashboard_and_wait_ready(force_stop=False, stop_timeout_seconds=5.0, start_timeout_seconds=10.0, max_observation_age_seconds=3.0, poll_interval_seconds=0.25)`: performs stop-confirm then start-and-ready orchestration.
 - `dashboard_bootstrap(calibration=None, restart_if_running=False, force_stop=False, stop_timeout_seconds=5.0, start_timeout_seconds=10.0, max_observation_age_seconds=3.0, poll_interval_seconds=0.25)`: optional calibration apply + start/restart orchestration + lifecycle snapshot in one call.
-- `milestone_progress_status()`: returns current dashboard milestone progress summary against project design goals.
-- `milestone_2_progress_status()`: returns milestone 2 progress summary for agent pipeline and observability goals.
-- `milestone_3_progress_status()`: returns milestone 3 progress summary for VLM-based tracking quality and evaluation hardening goals.
-- `simulate_observation_summary(track_id)`: ingests latest radar state for a track and returns deterministic observation/behavior summary fields.
-- `simulate_reasoning_assessment(track_id, request_evidence_on_uncertainty=True)`: ingests latest radar state for a track and returns observation summary, reasoning assessment, and optional bounded evidence request.
+- `simulate_observation_summary(track_id)`: ingests latest radar state for a track and returns an LLM-backed observation/behavior summary with measurements, evidence references, uncertainties, and graceful fallback metadata.
+- `simulate_reasoning_assessment(track_id, request_evidence_on_uncertainty=True)`: ingests latest radar state for a track and returns an LLM-backed reasoning assessment plus optional bounded evidence request.
 - `simulate_evidence_request(track_id, reason)`: issues a bounded evidence request for a track and returns request metadata or a bounded-out indicator.
 - `simulate_visual_tracking_association(detections, frame_reference=None, event_reasons=None, timeout_seconds=1.0)`: runs the visual tracking agent on selected frames plus structured perception input and returns coordinator-validated association updates.
 - `run_reasoning_cycle_and_log(request_evidence_on_uncertainty=True, max_tracks=10)`: evaluates active tracks, records per-track status/latency/assessment events to `captures/agent_events.jsonl`, and returns cycle summary.
@@ -74,6 +83,7 @@ Edit the "mcpServers" list to include the mcp-server-camera-tracker through the 
 - `dashboard_depth_coverage_metrics(sample_limit=50)`: reports latest relative-depth coverage and trend direction from recent radar coverage history samples.
 - `dashboard_tracking_quality_report(event_window_size=100, depth_sample_limit=50)`: returns a consolidated tracking-quality status using latency/continuity, depth coverage trend, and agent event health.
 - `dashboard_health_status()`: reads latest radar state and returns camera/detector status, mapping mode, track count, and observation age.
+- `verify_dashboard_pipeline_contract(max_observation_age_seconds=3.0, require_live_pipeline=False)`: validates freshness, simulation-mode usage, track schema fields, and coordinate-unit consistency for the connected pipeline contract.
 - `wait_for_dashboard_ready(timeout_seconds=10.0, max_observation_age_seconds=3.0, poll_interval_seconds=0.25)`: polls health until fresh observations are available or timeout.
 - `set_ground_plane_calibration(calibration)`: saves and validates the calibration JSON payload.
 - `get_ground_plane_calibration()`: returns the current calibration file payload.
@@ -85,6 +95,20 @@ Edit the "mcpServers" list to include the mcp-server-camera-tracker through the 
 The dashboard demo is implemented in `tools/components/liveTrackingDisplay.py`.
 
 The Tracking Agent now uses a vision-capable VLM (`qwen-3.8-27b`) asynchronously on selected frames/events while preserving YOLO detections as primary measurements.
+
+Tracking-agent system guidance is loaded from `TrackingAgentSkill.md`.
+You can tune association behavior, uncertainty calibration, and estimation policy there without changing Python code.
+
+Reasoning pipeline agents are also LLM-backed by default:
+
+- Observation/Behavior Agent model: `OBSERVATION_AGENT_MODEL` (default: `gpt-oss-120b`)
+- Reasoning/Decision-Support Agent model: `REASONING_AGENT_MODEL` (default: `gpt-oss-120b`)
+- Shared call timeout: `DASHBOARD_AGENT_LLM_TIMEOUT_SECONDS` (default: `8.0`)
+- Shared retry count: `DASHBOARD_AGENT_LLM_RETRY_LIMIT` (default: `1`, meaning up to 2 attempts)
+
+Example:
+
+`OBSERVATION_AGENT_MODEL=gpt-oss-120b REASONING_AGENT_MODEL=gpt-oss-120b DASHBOARD_AGENT_LLM_TIMEOUT_SECONDS=10 python main.py`
 
 It renders:
 
@@ -110,10 +134,6 @@ You can tune radar depth scaling (away-from-camera range) without editing code:
 Example:
 
 `DASHBOARD_MAX_GROUND_Z=8 python tools/components/liveTrackingDisplay.py`
-
-When launching `main.py`, you can skip startup milestone logging with:
-
-`python main.py --no-milestone`
 
 You can control the periodic agent-ops heartbeat in `main.py`:
 
@@ -176,6 +196,40 @@ Coordinate semantics are preserved:
 - calibrated ground-plane coordinates are marked separately,
 - uncalibrated estimates are not presented as true 3D world positions.
 
+### End-to-end trace (live frame to assessment)
+
+A stricter call-site matrix and remaining manual live-verification items are documented in `pipeline_trace_matrix.md`.
+
+1. **Frame capture + tracking:** `tools/components/liveTrackingDisplay.py::run_live_tracking_loop`
+
+- Captures webcam frame and runs YOLO/ByteTrack.
+- Builds per-track evidence including `pixel_position`, `ground_position`, `ground_coordinate_unit`, `position_kind`, `relative_depth`, `confidence`, and `quality_flags`.
+
+2. **Tracking-agent reasoning:** `tools/visual_tracking_agent.py::LLMVisualTrackingAgent.propose_associations`
+
+- Receives frame reference + structured detections.
+- Returns association proposals used to build `tracking_agent_observation`.
+
+3. **Shared state write:** `tools/components/liveTrackingDisplay.py::run_radar_loop`
+
+- Writes `captures/latest_radar_state.json` with `tracks`, `tracking_agent_observation`, `coordinate_system`, and calibration/status fields.
+
+4. **Observation ingestion:** `tools/dashboardReasoning.py::_load_radar_state` and `_ingest_latest_tracks`
+
+- Ingests `tracks` into coordinator history records.
+
+5. **Observation LLM input assembly:** `tools/dashboardReasoning.py::_build_observation_llm_input`
+
+- Packages `history_records` plus `latest_track_snapshot`, `tracking_agent_context`, and `coordinate_context` for Observation agent invocation.
+
+6. **Reasoning cross-check:** `tools/dashboardReasoning.py::_build_reasoning_handoff_payload`
+
+- Validates `supporting_observation_ids` against ingested history before Reasoning invocation.
+
+7. **Ops/event output:** `tools/dashboardAgentOps.py::run_reasoning_cycle_and_log`
+
+- Logs per-track status, agent metadata, handoff validation, and latency to `captures/agent_events.jsonl` for dashboard/health summaries.
+
 ### Milestone 2 scaffolding
 
 Typed contracts and bounded coordinator logic for the Tracking / Observation / Reasoning flow are now scaffolded in:
@@ -223,46 +277,3 @@ Supported file formats:
 ```
 
 When calibration is unavailable or invalid, the dashboard falls back to relative image-derived mapping and labels estimates accordingly.
-
-## Demonstration Traces
-
-### Trace 1: Capture a webcam video
-
-- User prompt: [capture webcam footage using mcp-server-camera-tracker]
-- MCP tool call: `capture_webcam_video(duration_seconds)`
-- Input: capture webcam footage using mcp-server-camera-tracker for 2 seconds
-- Result:
-  The webcam capture worked. There were no errors.
-  Result: "Video recorded successfully"
-  Duration requested: 2 seconds
-  Saved to: captures\webcam_1790752985.mp4
-
-### Trace 2: Detect and track dogs
-
-- User prompt: [detect dogs in video source using mcp-server-camera-tracker]
-- MCP tool call: `detect_and_track_dogs(video_path)`
-- Input: detect dogs in "local/source/link" using mcp-server-camera-tracker
-- Result:
-  Dogs detected: 1 (tracked as ID 1)
-  Movement: Stationary
-  Horizontal displacement: 6.2 (a very small shift, likely just minor movement or tracking jitter rather than real travel)
-  Frames tracked: 214
-
-### Trace 3: Analyze dog movement
-
-- User prompt: [detect dog movement in *json file path* using mcp-server-camera-tracker]
-- MCP tool call: `analyze_dog_movement(tracking_data)`
-- Input: use mcp-server-camera-tracker to analyze the following _json file path_
-- Result:
-  Dog ID: 1
-  Movement: Stationary
-  Horizontal displacement: 6.2
-  Frames tracked: 214
-
-## MCP Architecture
-
-The MCP server is the local program that calls on our yolo api in a multitude of ways. It can use webcam tracking, instance detection, and movement detections all relating to dogs. The server performs the requested work and returns structured results. The entity that decides how to make these structured calls is the LLM.
-
-The MCP client is the host integration, and in this instance we use Claude Desktop. The client connects the LLM to the MCP server, and the LLM checks the available tools, and sends requests using them. The LLM then returns the corresponding results back to the user. In this case, the user can submit webcam access, video source links, and data file source links.
-
-One limitation we observed when testing is that some devices don’t run the webcam functionality. On one of our devices, the webcam worked fine but on the other it returned an error. This is likely due to different configurations of permissions access which could cause problems for different users.

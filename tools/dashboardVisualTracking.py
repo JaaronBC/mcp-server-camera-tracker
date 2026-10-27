@@ -1,3 +1,4 @@
+# MCP tool endpoints for visual-tracking simulation and diagnostics payloads.
 from __future__ import annotations
 
 import asyncio
@@ -11,10 +12,12 @@ from .visual_tracking_agent import TRACKING_VLM_MODEL, LLMVisualTrackingAgent
 
 
 def _to_float(value: Any) -> float | None:
+    # Implements to float behavior for this module.
     return float(value) if isinstance(value, (int, float)) else None
 
 
 def _parse_detection_candidates(payload: list[dict[str, Any]]) -> list[DetectionCandidate]:
+    # Implements parse detection candidates behavior for this module.
     parsed: list[DetectionCandidate] = []
     for index, item in enumerate(payload):
         if not isinstance(item, dict):
@@ -67,6 +70,7 @@ def simulate_visual_tracking_association(
     event_reasons: list[str] | None = None,
     timeout_seconds: float = 1.0,
 ) -> dict[str, Any]:
+    # Implements simulate visual tracking association behavior for this module.
     """Run visual tracking agent with selected frame + structured detections and return validated updates."""
     if timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be greater than zero")

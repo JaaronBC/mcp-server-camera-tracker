@@ -1,3 +1,4 @@
+# Handles test behavior.
 import os
 from dotenv import load_dotenv
 from openai import OpenAI

@@ -1,3 +1,4 @@
+# Handles dashboardMetrics behavior.
 from __future__ import annotations
 
 import json
@@ -16,6 +17,7 @@ DEPTH_COVERAGE_HISTORY_PATH = CAPTURES_DIR / "radar_depth_coverage_history.jsonl
 
 
 def _load_json_file(path: Path) -> tuple[dict[str, Any] | None, str | None]:
+    # Performs load json file logic.
     if not path.is_file():
         return None, "missing"
 
@@ -31,11 +33,13 @@ def _load_json_file(path: Path) -> tuple[dict[str, Any] | None, str | None]:
 
 
 def _latest_tracking_history_file(captures_dir: Path) -> Path | None:
+    # Performs latest tracking history file logic.
     candidates = sorted(captures_dir.glob("tracking_*.json"), key=lambda item: item.stat().st_mtime)
     return candidates[-1] if candidates else None
 
 
 def _compute_continuity_metrics(history_payload: dict[str, Any]) -> dict[str, Any]:
+    # Performs compute continuity metrics logic.
     evaluated_tracks = 0
     transitions = 0
     gap_transitions = 0
@@ -85,6 +89,7 @@ def _compute_continuity_metrics(history_payload: dict[str, Any]) -> dict[str, An
 
 
 def _safe_int(value: Any, default: int = 0) -> int:
+    # Performs safe int logic.
     if isinstance(value, bool):
         return default
     if isinstance(value, int):
@@ -95,6 +100,7 @@ def _safe_int(value: Any, default: int = 0) -> int:
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
+    # Performs safe float logic.
     if isinstance(value, bool):
         return default
     if isinstance(value, (int, float)):
@@ -106,6 +112,7 @@ def _load_depth_coverage_history_samples(
     path: Path,
     sample_limit: int,
 ) -> tuple[list[dict[str, Any]], str | None]:
+    # Performs load depth coverage history samples logic.
     if sample_limit <= 0:
         return [], "invalid_sample_limit"
 
@@ -153,6 +160,7 @@ def _load_depth_coverage_history_samples(
 
 @mcp.tool()
 def dashboard_depth_coverage_metrics(sample_limit: int = 50) -> dict[str, Any]:
+    # Performs dashboard depth coverage metrics logic.
     """Return latest relative-depth coverage and trend over recent radar snapshots."""
     now = time.time()
     errors: list[str] = []
@@ -248,6 +256,7 @@ def dashboard_depth_coverage_metrics(sample_limit: int = 50) -> dict[str, Any]:
 
 @mcp.tool()
 def dashboard_latency_continuity_metrics() -> dict[str, Any]:
+    # Performs dashboard latency continuity metrics logic.
     """Return dashboard latency and continuity metrics from capture snapshots."""
     now = time.time()
     errors: list[str] = []
@@ -360,6 +369,7 @@ def dashboard_tracking_quality_report(
     event_window_size: int = 100,
     depth_sample_limit: int = 50,
 ) -> dict[str, Any]:
+    # Performs dashboard tracking quality report logic.
     """Return consolidated tracking quality report from latency, continuity, depth, and event health metrics."""
     if event_window_size <= 0:
         raise ValueError("event_window_size must be greater than zero")

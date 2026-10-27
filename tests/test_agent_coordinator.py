@@ -1,3 +1,4 @@
+# Handles test agent coordinator behavior.
 from __future__ import annotations
 
 import unittest
@@ -22,6 +23,7 @@ class TestAgentCoordinator(unittest.TestCase):
         z: float,
         confidence: float = 0.9,
     ) -> TrackingObservationRecord:
+        # Performs obs logic.
         return TrackingObservationRecord(
             observation_id=observation_id,
             track_id=track_id,
@@ -35,6 +37,7 @@ class TestAgentCoordinator(unittest.TestCase):
         )
 
     def test_summary_insufficient_history(self) -> None:
+        # Performs test summary insufficient history logic.
         coordinator = AgentCoordinator()
         coordinator.add_tracking_observation(self._obs("o1", "t1", 1.0, 0.0, 0.0))
 
@@ -44,6 +47,7 @@ class TestAgentCoordinator(unittest.TestCase):
         self.assertIn("insufficient_history", summary.uncertainties)
 
     def test_summary_velocity_computation(self) -> None:
+        # Performs test summary velocity computation logic.
         coordinator = AgentCoordinator()
         coordinator.add_tracking_observation(self._obs("o1", "t1", 1.0, 0.0, 0.0))
         coordinator.add_tracking_observation(self._obs("o2", "t1", 2.0, 2.0, 1.0))
@@ -55,6 +59,7 @@ class TestAgentCoordinator(unittest.TestCase):
         self.assertAlmostEqual(summary.speed or 0.0, (5 ** 0.5), places=6)
 
     def test_evidence_request_is_bounded(self) -> None:
+        # Performs test evidence request is bounded logic.
         coordinator = AgentCoordinator(max_evidence_requests_per_track=2)
 
         req1 = coordinator.request_evidence("t1", "need_more_frames", requested_at=1.0)
@@ -66,6 +71,7 @@ class TestAgentCoordinator(unittest.TestCase):
         self.assertIsNone(req3)
 
     def test_reasoning_assessment_requires_more_observation(self) -> None:
+        # Performs test reasoning assessment requires more observation logic.
         coordinator = AgentCoordinator()
         coordinator.add_tracking_observation(self._obs("o1", "t1", 1.0, 0.0, 0.0))
 
@@ -75,6 +81,7 @@ class TestAgentCoordinator(unittest.TestCase):
         self.assertIn("o1", assessment.supporting_observation_ids)
 
     def test_reasoning_assessment_requires_review_for_fast_motion(self) -> None:
+        # Performs test reasoning assessment requires review for fast motion logic.
         coordinator = AgentCoordinator()
         coordinator.add_tracking_observation(self._obs("o1", "t1", 1.0, 0.0, 0.0))
         coordinator.add_tracking_observation(self._obs("o2", "t1", 2.0, 3.0, 0.0))
@@ -85,6 +92,7 @@ class TestAgentCoordinator(unittest.TestCase):
         self.assertIn("o2", assessment.supporting_observation_ids)
 
     def test_visual_proposal_conflict_uses_yolo_fallback(self) -> None:
+        # Performs test visual proposal conflict uses yolo fallback logic.
         coordinator = AgentCoordinator()
         detection = DetectionCandidate(
             detection_id="det-1",

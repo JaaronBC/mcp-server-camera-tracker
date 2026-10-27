@@ -1,3 +1,4 @@
+# Handles test dashboard visual tracking behavior.
 from __future__ import annotations
 
 import unittest
@@ -10,9 +11,11 @@ from tools.visual_tracking_agent import VisualTrackingAgentResult
 
 class FakeAgent:
     def __init__(self, model: str):
+        # Performs init logic.
         self.model = model
 
     async def propose_associations(self, frame_reference, detections, event_reasons=None, request_timeout_seconds=1.0):
+        # Performs propose associations logic.
         proposal = VisualAssociationProposal(
             detection_id=detections[0].detection_id,
             proposed_track_id="vlm-track-1",
@@ -35,6 +38,7 @@ class FakeAgent:
 
 class TestDashboardVisualTracking(unittest.TestCase):
     def test_simulate_visual_tracking_association_returns_validated_updates(self) -> None:
+        # Performs test simulate visual tracking association returns validated updates logic.
         detections = [
             {
                 "detection_id": "det-1",

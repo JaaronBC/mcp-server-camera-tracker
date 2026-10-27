@@ -1,3 +1,4 @@
+# Live dashboard pipeline that captures camera frames, tracks detections, applies tracking-agent updates, and renders radar/display state.
 from __future__ import annotations
 
 import json
@@ -49,9 +50,12 @@ LIVE_DATA_STALE_FOR_SIM_SECONDS = 2.0
 SIM_UPDATE_HZ = 10.0
 RENDER_HZ = 20.0
 MAX_GROUND_X = 10.0
+AGENT_GROUND_BLEND_FACTOR = 0.35
+AGENT_GROUND_MAX_CORRECTION = 1.5
 
 
 def _env_positive_float(name: str, default: float) -> float:
+    # Implements env positive float behavior for this module.
     raw = os.getenv(name)
     if raw is None:
         return default
@@ -71,6 +75,7 @@ UDP_TRACKING_PORT = 5005
 
 class SharedDashboardState:
     def __init__(self) -> None:
+        # Implements init behavior for this module.
         self.lock = threading.Lock()
         self.running = True
 
@@ -104,6 +109,7 @@ class SharedDashboardState:
 
 
 def resolve_model_path() -> str:
+    # Resolves model path from configuration with safe defaults.
     candidates = [
         Path(__file__).resolve().parent / "yolo11n.pt",
         PROJECT_ROOT / "yolo11n.pt",
@@ -116,17 +122,20 @@ def resolve_model_path() -> str:
 
 
 def update_json(path: Path, payload: dict) -> None:
+    # Updates json persisted state safely.
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
 def append_jsonl(path: Path, payload: dict) -> None:
+    # Appends jsonl records to log/history storage.
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as file:
         file.write(json.dumps(payload, separators=(",", ":")) + "\n")
 
 
 def build_tracking_message(timestamp: float, detections: list[dict]) -> dict:
+    # Builds tracking message payloads for pipeline consumers.
     return {
         "time": timestamp,
         "detections": detections,
@@ -134,6 +143,7 @@ def build_tracking_message(timestamp: float, detections: list[dict]) -> dict:
 
 
 def build_tracking_agent_status_text(status: dict[str, object], detailed: bool = True) -> str:
+    # Builds tracking agent status text payloads for pipeline consumers.
     model = status.get("model", "unknown")
     submissions = status.get("submissions", 0)
     completions = status.get("completions", 0)
@@ -163,6 +173,7 @@ def build_tracking_agent_status_text(status: dict[str, object], detailed: bool =
 
 
 def classify_tracking_agent_health(status: dict[str, object]) -> str:
+    # Classifies tracking agent health into normalized categories.
     submissions = status.get("submissions", 0)
     completions = status.get("completions", 0)
     unavailable_count = status.get("unavailable_count", 0)
@@ -199,6 +210,7 @@ def classify_tracking_agent_health(status: dict[str, object]) -> str:
 
 
 def tracking_agent_health_color(health: str) -> tuple[int, int, int]:
+    # Implements tracking agent health color behavior for this module.
     if health == "good":
         return (90, 220, 120)
     if health == "error":
@@ -207,10 +219,12 @@ def tracking_agent_health_color(health: str) -> tuple[int, int, int]:
 
 
 def build_tracking_agent_health_legend_text() -> str:
+    # Builds tracking agent health legend text payloads for pipeline consumers.
     return "tracking health legend: good | warn | error"
 
 
 def build_tracking_debug_toggle_hint(show_tracking_debug_details: bool) -> str:
+    # Builds tracking debug toggle hint payloads for pipeline consumers.
     mode = "detailed" if show_tracking_debug_details else "concise"
     return f"press 'h' to toggle tracking-agent diagnostics ({mode})"
 
@@ -218,6 +232,7 @@ def build_tracking_debug_toggle_hint(show_tracking_debug_details: bool) -> str:
 def compute_relative_depth_coverage(
     tracks: list[RadarTrackSnapshot],
 ) -> dict[str, float | int]:
+    # Computes relative depth coverage metrics from available state.
     total_tracks = len(tracks)
     with_depth = 0
 
@@ -236,6 +251,7 @@ def compute_relative_depth_coverage(
 
 
 def build_relative_depth_coverage_text(metrics: dict[str, float | int]) -> str:
+    # Builds relative depth coverage text payloads for pipeline consumers.
     tracks_with_depth = metrics.get("tracks_with_depth", 0)
     total_tracks = metrics.get("total_tracks", 0)
     coverage_percent = metrics.get("coverage_percent", 0.0)
@@ -247,7 +263,38 @@ def build_relative_depth_coverage_text(metrics: dict[str, float | int]) -> str:
 
 
 def build_tracking_detection_id(track_key: str) -> str:
+    # Builds tracking detection id payloads for pipeline consumers.
     return track_key
+
+
+def normalize_position_metadata(
+    position_kind: str,
+    ground_coordinate_unit: str,
+    quality_flags: list[str],
+) -> tuple[str, str, list[str]]:
+    # Normalizes position metadata into contract-safe values.
+    normalized_flags = list(quality_flags)
+    normalized_kind = position_kind
+    normalized_unit = ground_coordinate_unit
+
+    valid_kinds = {"relative_ground_estimate", "calibrated_ground_plane"}
+    if normalized_kind not in valid_kinds:
+        normalized_kind = "relative_ground_estimate"
+        normalized_unit = "relative_units"
+        normalized_flags.append("position_kind_normalized:unknown_kind")
+
+    if normalized_kind == "relative_ground_estimate":
+        if normalized_unit != "relative_units":
+            normalized_unit = "relative_units"
+            normalized_flags.append("ground_unit_normalized:relative_units")
+        return normalized_kind, normalized_unit, normalized_flags
+
+    if not isinstance(normalized_unit, str) or not normalized_unit.strip() or normalized_unit == "relative_units":
+        normalized_kind = "relative_ground_estimate"
+        normalized_unit = "relative_units"
+        normalized_flags.append("position_kind_normalized:invalid_calibrated_unit")
+
+    return normalized_kind, normalized_unit, normalized_flags
 
 
 def estimate_relative_depth_from_image_geometry(
@@ -258,6 +305,7 @@ def estimate_relative_depth_from_image_geometry(
     frame_width: int,
     frame_height: int,
 ) -> float | None:
+    # Estimates relative depth from image geometry using deterministic heuristics.
     if frame_width <= 0 or frame_height <= 0:
         return None
 
@@ -280,7 +328,9 @@ def estimate_relative_depth_from_image_geometry(
 def apply_tracking_agent_updates_to_tracks(
     tracks: dict[str, RadarTrackSnapshot],
     tracking_agent_observation: TrackingAgentObservation,
+    track_trails: dict[str, deque[tuple[float, float]]] | None = None,
 ) -> dict[str, int]:
+    # Applies validated tracking-agent updates to track state, quality flags, confidence, and bounded continuity corrections.
     accepted = 0
     rejected = 0
     unmatched = 0
@@ -296,11 +346,41 @@ def apply_tracking_agent_updates_to_tracks(
             accepted += 1
             if update.resolved_track_id != track_key:
                 snapshot.quality_flags.append(f"vlm_association_candidate:{update.resolved_track_id}")
+
+            if track_trails is not None and update.resolved_track_id:
+                resolved_trail = track_trails.get(update.resolved_track_id)
+                if isinstance(resolved_trail, deque) and len(resolved_trail) > 0:
+                    anchor_x, anchor_z = resolved_trail[-1]
+                    current_x = snapshot.ground_position.x
+                    current_z = snapshot.ground_position.z
+                    delta_x = anchor_x - current_x
+                    delta_z = anchor_z - current_z
+                    distance = (delta_x * delta_x + delta_z * delta_z) ** 0.5
+                    if distance > 0:
+                        bounded_scale = min(
+                            1.0,
+                            AGENT_GROUND_MAX_CORRECTION / distance,
+                        )
+                        blended_x = current_x + (delta_x * AGENT_GROUND_BLEND_FACTOR * bounded_scale)
+                        blended_z = current_z + (delta_z * AGENT_GROUND_BLEND_FACTOR * bounded_scale)
+                        snapshot.ground_position = GroundPosition(x=blended_x, z=blended_z)
+                        snapshot.quality_flags.append("tracking_agent_ground_anchor_blend")
+
+            if any(
+                reason in {"depth_conflict_with_reliable_measurement", "ground_position_conflict_with_calibrated_mapping"}
+                for reason in update.rejection_reasons
+            ):
+                snapshot.quality_flags.append("tracking_agent_conflict_flagged")
+                if isinstance(snapshot.confidence, (int, float)):
+                    snapshot.confidence = max(0.0, snapshot.confidence * 0.9)
         else:
             rejected += 1
             snapshot.quality_flags.append("vlm_association_rejected")
+            snapshot.quality_flags.append("cross_agent_review_required")
             for reason in update.rejection_reasons:
                 snapshot.quality_flags.append(f"vlm_rejection:{reason}")
+            if isinstance(snapshot.confidence, (int, float)):
+                snapshot.confidence = max(0.0, snapshot.confidence * 0.85)
 
     return {
         "accepted": accepted,
@@ -310,6 +390,7 @@ def apply_tracking_agent_updates_to_tracks(
 
 
 def run_live_tracking_loop(state: SharedDashboardState) -> None:
+    # Captures frames, runs detector/tracker, updates live tracks, and ingests tracking-agent observations.
     model_path = resolve_model_path()
 
     try:
@@ -374,6 +455,7 @@ def run_live_tracking_loop(state: SharedDashboardState) -> None:
                     classes=[0],
                     persist=True,
                     verbose=False,
+                    conf=0.65,
                 )[0]
             except Exception:
                 with state.lock:
@@ -454,6 +536,12 @@ def run_live_tracking_loop(state: SharedDashboardState) -> None:
                             ground_z = _image_based_ground_z
                         quality_flags.append("estimated_ground_from_image")
 
+                    position_kind, ground_unit, quality_flags = normalize_position_metadata(
+                        position_kind=position_kind,
+                        ground_coordinate_unit=ground_unit,
+                        quality_flags=quality_flags,
+                    )
+
                     track_key = str(track_id)
                     detection_id = build_tracking_detection_id(track_key)
                     if relative_depth is not None:
@@ -490,6 +578,7 @@ def run_live_tracking_loop(state: SharedDashboardState) -> None:
                         timestamp=now,
                         pixel_position=observation.pixel_position,
                         ground_position=observation.ground_position,
+                        ground_coordinate_unit=observation.ground_coordinate_unit,
                         position_kind=observation.position_kind,
                         quality_flags=observation.quality_flags,
                         confidence=observation.detection_confidence,
@@ -555,7 +644,16 @@ def run_live_tracking_loop(state: SharedDashboardState) -> None:
 
             tracking_agent_observation = tracking_runtime.poll_latest_observation()
             if tracking_agent_observation is not None:
-                summary = apply_tracking_agent_updates_to_tracks(tracks, tracking_agent_observation)
+                with state.lock:
+                    current_trails = {
+                        key: deque(value, maxlen=RADAR_TRAIL_LENGTH)
+                        for key, value in state.track_trails.items()
+                    }
+                summary = apply_tracking_agent_updates_to_tracks(
+                    tracks,
+                    tracking_agent_observation,
+                    track_trails=current_trails,
+                )
                 with state.lock:
                     state.tracking_agent_completions += 1
                     state.tracking_agent_last_latency_ms = tracking_agent_observation.proposal_latency_ms
@@ -613,6 +711,7 @@ def run_live_tracking_loop(state: SharedDashboardState) -> None:
 
 
 def build_simulated_tracks(sim_time: float) -> dict[str, RadarTrackSnapshot]:
+    # Builds simulated tracks payloads for pipeline consumers.
     simulated: dict[str, RadarTrackSnapshot] = {}
 
     sim_tracks = [
@@ -629,6 +728,7 @@ def build_simulated_tracks(sim_time: float) -> dict[str, RadarTrackSnapshot]:
             timestamp=time.time(),
             pixel_position=None,
             ground_position=GroundPosition(x=wrapped_x, z=wrapped_z),
+            ground_coordinate_unit="relative_units",
             position_kind="simulated_ground_track",
             quality_flags=["simulated_data"],
             confidence=None,
@@ -639,6 +739,7 @@ def build_simulated_tracks(sim_time: float) -> dict[str, RadarTrackSnapshot]:
 
 
 def run_radar_loop(state: SharedDashboardState) -> None:
+    # Maintains radar/shared-state artifacts and simulation fallback when live input is stale.
     sim_step = 0.0
     sim_interval = 1.0 / SIM_UPDATE_HZ
 
@@ -725,6 +826,7 @@ def run_radar_loop(state: SharedDashboardState) -> None:
 
 
 def draw_placeholder_webcam_panel(width: int, height: int, message: str):
+    # Implements draw placeholder webcam panel behavior for this module.
     panel = cv2.UMat(height, width, cv2.CV_8UC3).get()
     panel[:] = (22, 22, 22)
     cv2.putText(
@@ -757,6 +859,7 @@ def draw_radar_panel(
     trails: dict[str, deque[tuple[float, float]]],
     now: float,
 ):
+    # Implements draw radar panel behavior for this module.
     panel = cv2.UMat(height, width, cv2.CV_8UC3).get()
     panel[:] = (15, 18, 22)
 
@@ -828,6 +931,7 @@ def draw_radar_panel(
 
 
 def render_dashboard(state: SharedDashboardState) -> None:
+    # Renders the webcam/radar dashboard UI and operator status overlays.
     cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
 
     while True:
@@ -1054,6 +1158,7 @@ def render_dashboard(state: SharedDashboardState) -> None:
 
 
 def main() -> None:
+    # Implements main behavior for this module.
     CAPTURES_DIR.mkdir(parents=True, exist_ok=True)
 
     state = SharedDashboardState()

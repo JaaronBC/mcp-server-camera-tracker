@@ -1,3 +1,4 @@
+# Handles test dashboard health behavior.
 from __future__ import annotations
 
 import json
@@ -11,6 +12,7 @@ from tools import dashboardHealth
 
 class TestDashboardHealth(unittest.TestCase):
     def test_parse_radar_state_with_explicit_count(self) -> None:
+        # Performs test parse radar state with explicit count logic.
         with patch("tools.dashboardHealth.time.time", return_value=100.0):
             result = dashboardHealth._parse_radar_state(
                 {
@@ -29,6 +31,7 @@ class TestDashboardHealth(unittest.TestCase):
         self.assertAlmostEqual(result["last_observation_age_seconds"], 0.5, places=6)
 
     def test_parse_radar_state_falls_back_to_tracks_length(self) -> None:
+        # Performs test parse radar state falls back to tracks length logic.
         with patch("tools.dashboardHealth.time.time", return_value=200.0):
             result = dashboardHealth._parse_radar_state(
                 {
@@ -43,6 +46,7 @@ class TestDashboardHealth(unittest.TestCase):
         self.assertAlmostEqual(result["last_observation_age_seconds"], 10.0, places=6)
 
     def test_dashboard_health_status_missing_file(self) -> None:
+        # Performs test dashboard health status missing file logic.
         with TemporaryDirectory() as temp_dir:
             fake_path = Path(temp_dir) / "missing.json"
             with patch("tools.dashboardHealth.RADAR_STATE_PATH", fake_path):
@@ -52,6 +56,7 @@ class TestDashboardHealth(unittest.TestCase):
         self.assertEqual(result["error"], "radar_state_missing")
 
     def test_dashboard_health_status_invalid_json(self) -> None:
+        # Performs test dashboard health status invalid json logic.
         with TemporaryDirectory() as temp_dir:
             fake_path = Path(temp_dir) / "bad.json"
             fake_path.write_text("not-json", encoding="utf-8")
@@ -62,6 +67,7 @@ class TestDashboardHealth(unittest.TestCase):
         self.assertEqual(result["error"], "radar_state_invalid_json")
 
     def test_dashboard_health_status_valid_payload(self) -> None:
+        # Performs test dashboard health status valid payload logic.
         with TemporaryDirectory() as temp_dir:
             fake_path = Path(temp_dir) / "state.json"
             fake_path.write_text(
@@ -90,6 +96,7 @@ class TestDashboardHealth(unittest.TestCase):
 
     @patch("tools.dashboardHealth.dashboard_health_status")
     def test_wait_for_dashboard_ready_immediate_success(self, mock_health_status) -> None:
+        # Performs test wait for dashboard ready immediate success logic.
         mock_health_status.return_value = {
             "available": True,
             "last_observation_age_seconds": 0.2,
@@ -111,6 +118,7 @@ class TestDashboardHealth(unittest.TestCase):
         mock_health_status,
         mock_sleep,
     ) -> None:
+        # Performs test wait for dashboard ready eventual success logic.
         mock_health_status.side_effect = [
             {"available": False, "error": "radar_state_missing"},
             {"available": True, "last_observation_age_seconds": 4.0},
@@ -134,6 +142,7 @@ class TestDashboardHealth(unittest.TestCase):
         mock_health_status,
         mock_sleep,
     ) -> None:
+        # Performs test wait for dashboard ready timeout logic.
         mock_health_status.return_value = {
             "available": True,
             "last_observation_age_seconds": 999.0,
@@ -151,12 +160,147 @@ class TestDashboardHealth(unittest.TestCase):
         self.assertIn("status", result)
 
     def test_wait_for_dashboard_ready_invalid_arguments(self) -> None:
+        # Performs test wait for dashboard ready invalid arguments logic.
         with self.assertRaises(ValueError):
             dashboardHealth.wait_for_dashboard_ready(timeout_seconds=0)
         with self.assertRaises(ValueError):
             dashboardHealth.wait_for_dashboard_ready(max_observation_age_seconds=-1)
         with self.assertRaises(ValueError):
             dashboardHealth.wait_for_dashboard_ready(poll_interval_seconds=0)
+
+    def test_verify_dashboard_pipeline_contract_passes_for_fresh_valid_payload(self) -> None:
+        # Performs test verify dashboard pipeline contract passes for fresh valid payload logic.
+        with TemporaryDirectory() as temp_dir:
+            fake_path = Path(temp_dir) / "state.json"
+            fake_path.write_text(
+                json.dumps(
+                    {
+                        "timestamp": 1000.0,
+                        "coordinate_system": "calibrated_ground_plane",
+                        "camera_status": "connected",
+                        "detector_status": "running",
+                        "active_track_count": 1,
+                        "last_observation_timestamp": 1001.0,
+                        "tracks": [
+                            {
+                                "track_id": "track-1",
+                                "timestamp": 1001.0,
+                                "ground_position": {"x": 1.0, "z": 2.0},
+                                "position_kind": "calibrated_ground_plane",
+                                "ground_coordinate_unit": "meters",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch("tools.dashboardHealth.RADAR_STATE_PATH", fake_path):
+                with patch("tools.dashboardHealth.time.time", return_value=1002.0):
+                    result = dashboardHealth.verify_dashboard_pipeline_contract()
+
+        self.assertTrue(result["available"])
+        self.assertTrue(result["ready"])
+        self.assertEqual(result["summary"]["error_count"], 0)
+
+    def test_verify_dashboard_pipeline_contract_flags_stale_observation(self) -> None:
+        # Performs test verify dashboard pipeline contract flags stale observation logic.
+        with TemporaryDirectory() as temp_dir:
+            fake_path = Path(temp_dir) / "state.json"
+            fake_path.write_text(
+                json.dumps(
+                    {
+                        "timestamp": 1000.0,
+                        "last_observation_timestamp": 1000.0,
+                        "tracks": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch("tools.dashboardHealth.RADAR_STATE_PATH", fake_path):
+                with patch("tools.dashboardHealth.time.time", return_value=1005.0):
+                    result = dashboardHealth.verify_dashboard_pipeline_contract(
+                        max_observation_age_seconds=3.0,
+                    )
+
+        self.assertTrue(result["available"])
+        self.assertFalse(result["ready"])
+        codes = {item["code"] for item in result["findings"]}
+        self.assertIn("stale_observation", codes)
+
+    def test_verify_dashboard_pipeline_contract_flags_coordinate_mismatch(self) -> None:
+        # Performs test verify dashboard pipeline contract flags coordinate mismatch logic.
+        with TemporaryDirectory() as temp_dir:
+            fake_path = Path(temp_dir) / "state.json"
+            fake_path.write_text(
+                json.dumps(
+                    {
+                        "timestamp": 1000.0,
+                        "last_observation_timestamp": 1000.0,
+                        "tracks": [
+                            {
+                                "track_id": "track-1",
+                                "timestamp": 1000.0,
+                                "ground_position": {"x": 1.0, "z": 2.0},
+                                "position_kind": "relative_ground_estimate",
+                                "ground_coordinate_unit": "meters",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch("tools.dashboardHealth.RADAR_STATE_PATH", fake_path):
+                with patch("tools.dashboardHealth.time.time", return_value=1000.5):
+                    result = dashboardHealth.verify_dashboard_pipeline_contract()
+
+        self.assertTrue(result["available"])
+        self.assertFalse(result["ready"])
+        codes = {item["code"] for item in result["findings"]}
+        self.assertIn("coordinate_unit_mismatch", codes)
+
+    def test_verify_dashboard_pipeline_contract_simulation_warning_vs_error(self) -> None:
+        # Performs test verify dashboard pipeline contract simulation warning vs error logic.
+        with TemporaryDirectory() as temp_dir:
+            fake_path = Path(temp_dir) / "state.json"
+            fake_path.write_text(
+                json.dumps(
+                    {
+                        "timestamp": 1000.0,
+                        "coordinate_system": "simulation_fallback",
+                        "last_observation_timestamp": 1000.0,
+                        "tracks": [
+                            {
+                                "track_id": "sim-1",
+                                "timestamp": 1000.0,
+                                "ground_position": {"x": 1.0, "z": 2.0},
+                                "position_kind": "simulated_ground_track",
+                                "ground_coordinate_unit": "relative_units",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch("tools.dashboardHealth.RADAR_STATE_PATH", fake_path):
+                with patch("tools.dashboardHealth.time.time", return_value=1000.5):
+                    warn_result = dashboardHealth.verify_dashboard_pipeline_contract(
+                        require_live_pipeline=False,
+                    )
+                    error_result = dashboardHealth.verify_dashboard_pipeline_contract(
+                        require_live_pipeline=True,
+                    )
+
+        self.assertTrue(warn_result["available"])
+        self.assertTrue(warn_result["ready"])
+        self.assertEqual(warn_result["summary"]["warn_count"], 1)
+
+        self.assertTrue(error_result["available"])
+        self.assertFalse(error_result["ready"])
+        self.assertEqual(error_result["summary"]["error_count"], 1)
 
 
 if __name__ == "__main__":

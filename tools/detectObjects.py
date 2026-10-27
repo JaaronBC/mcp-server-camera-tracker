@@ -1,3 +1,4 @@
+# MCP tool that reads latest UDP tracking payloads and returns normalized detection frames.
 import json
 import socket
 from .registry import mcp
@@ -7,6 +8,7 @@ FRAME_RECEIVE_TIMEOUT_SECONDS = 4
 
 @mcp.tool()
 def detect_objects(address: list[str | int]) -> str:
+    # Implements detect objects behavior for this module.
     """Return the newest available tracking frame from a UDP address."""
     if (
         len(address) != 2

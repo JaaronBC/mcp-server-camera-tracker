@@ -1,3 +1,4 @@
+# Handles dashboardControl behavior.
 from __future__ import annotations
 
 import time
@@ -18,6 +19,7 @@ from .registry import mcp
 
 @mcp.tool()
 def start_dashboard_demo() -> str:
+    # Performs start dashboard demo logic.
     """Start the dashboard demo in the background and return immediately."""
     _, message = start_dashboard_process()
     return message
@@ -25,12 +27,14 @@ def start_dashboard_demo() -> str:
 
 @mcp.tool()
 def stop_dashboard_demo(force: bool = False) -> str:
+    # Performs stop dashboard demo logic.
     """Stop the running dashboard demo process."""
     return stop_dashboard_process(force=force)
 
 
 @mcp.tool()
 def dashboard_demo_status() -> dict:
+    # Performs dashboard demo status logic.
     """Return current dashboard process status including PID and exit code."""
     return dashboard_process_status()
 
@@ -41,6 +45,7 @@ def start_dashboard_and_wait_ready(
     max_observation_age_seconds: float = 3.0,
     poll_interval_seconds: float = 0.25,
 ) -> dict:
+    # Performs start dashboard and wait ready logic.
     """Start dashboard demo and block until observations are fresh or timeout is reached."""
     started, message = start_dashboard_process()
     readiness = wait_for_dashboard_ready(
@@ -62,6 +67,7 @@ def stop_dashboard_and_confirm(
     timeout_seconds: float = 5.0,
     poll_interval_seconds: float = 0.1,
 ) -> dict:
+    # Performs stop dashboard and confirm logic.
     """Stop dashboard demo and poll until process is confirmed stopped or timeout occurs."""
     if timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be greater than zero")
@@ -105,6 +111,7 @@ def restart_dashboard_and_wait_ready(
     max_observation_age_seconds: float = 3.0,
     poll_interval_seconds: float = 0.25,
 ) -> dict:
+    # Performs restart dashboard and wait ready logic.
     """Restart dashboard process and wait until fresh observations are available or timeout."""
     stop_result = stop_dashboard_and_confirm(
         force=force_stop,
@@ -143,6 +150,7 @@ def restart_dashboard_and_wait_ready(
 def dashboard_lifecycle_status(
     max_observation_age_seconds: float = 3.0,
 ) -> dict:
+    # Performs dashboard lifecycle status logic.
     """Return merged lifecycle status across process, health, and calibration checks."""
     if max_observation_age_seconds < 0:
         raise ValueError("max_observation_age_seconds must be non-negative")
@@ -180,6 +188,7 @@ def dashboard_bootstrap(
     max_observation_age_seconds: float = 3.0,
     poll_interval_seconds: float = 0.25,
 ) -> dict:
+    # Performs dashboard bootstrap logic.
     """Optionally apply calibration, start/restart dashboard, wait readiness, and return lifecycle status."""
     calibration_result: dict[str, Any] | None = None
     if calibration is not None:

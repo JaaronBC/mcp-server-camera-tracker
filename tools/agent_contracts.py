@@ -1,3 +1,4 @@
+# Handles agent contracts behavior.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -23,6 +24,7 @@ class TrackingObservationRecord:
     quality_flags: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
+        # Performs to dict logic.
         return {
             "observation_id": self.observation_id,
             "track_id": self.track_id,
@@ -56,6 +58,7 @@ class ObservationBehaviorSummary:
     uncertainties: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
+        # Performs to dict logic.
         return {
             "track_id": self.track_id,
             "created_at": self.created_at,
@@ -76,6 +79,7 @@ class EvidenceRequest:
     request_index: int
 
     def to_dict(self) -> dict:
+        # Performs to dict logic.
         return {
             "track_id": self.track_id,
             "reason": self.reason,
@@ -97,6 +101,7 @@ class ReasoningAssessment:
     score_method: str | None = None
 
     def to_dict(self) -> dict:
+        # Performs to dict logic.
         return {
             "track_id": self.track_id,
             "created_at": self.created_at,
@@ -118,6 +123,7 @@ class BoundingBox:
     y2: float
 
     def to_dict(self) -> dict:
+        # Performs to dict logic.
         return {
             "x1": self.x1,
             "y1": self.y1,
@@ -144,6 +150,7 @@ class DetectionCandidate:
     motion_history: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
+        # Performs to dict logic.
         return {
             "detection_id": self.detection_id,
             "timestamp": self.timestamp,
@@ -175,6 +182,7 @@ class VisualAssociationProposal:
     supporting_evidence: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
+        # Performs to dict logic.
         return {
             "detection_id": self.detection_id,
             "proposed_track_id": self.proposed_track_id,
@@ -198,6 +206,7 @@ class VisualAssociationUpdate:
     supporting_evidence: list[str]
 
     def to_dict(self) -> dict:
+        # Performs to dict logic.
         return {
             "detection_id": self.detection_id,
             "resolved_track_id": self.resolved_track_id,
@@ -219,6 +228,7 @@ class TrackingAgentObservation:
     uncertainties: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
+        # Performs to dict logic.
         return {
             "timestamp": self.timestamp,
             "source_agent": self.source_agent,

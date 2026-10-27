@@ -1,3 +1,4 @@
+# Coordinator logic for track history, deterministic summaries, evidence requests, and proposal validation.
 from __future__ import annotations
 
 import math
@@ -21,6 +22,7 @@ class AgentCoordinator:
         max_history_per_track: int = 50,
         max_evidence_requests_per_track: int = 3,
     ) -> None:
+        # Implements init behavior for this module.
         self._history: dict[str, deque[TrackingObservationRecord]] = defaultdict(
             lambda: deque(maxlen=max_history_per_track)
         )
@@ -28,9 +30,11 @@ class AgentCoordinator:
         self._max_evidence_requests_per_track = max_evidence_requests_per_track
 
     def add_tracking_observation(self, observation: TrackingObservationRecord) -> None:
+        # Implements add tracking observation behavior for this module.
         self._history[observation.track_id].append(observation)
 
     def get_track_history(self, track_id: str) -> list[TrackingObservationRecord]:
+        # Gets track history values for downstream consumers.
         return list(self._history.get(track_id, []))
 
     def build_observation_summary(
@@ -38,6 +42,7 @@ class AgentCoordinator:
         track_id: str,
         created_at: float,
     ) -> ObservationBehaviorSummary:
+        # Builds observation summary payloads for pipeline consumers.
         history = self.get_track_history(track_id)
 
         if len(history) < 2:
@@ -111,6 +116,7 @@ class AgentCoordinator:
         reason: str,
         requested_at: float,
     ) -> EvidenceRequest | None:
+        # Implements request evidence behavior for this module.
         count = self._evidence_request_count[track_id]
         if count >= self._max_evidence_requests_per_track:
             return None
@@ -129,6 +135,7 @@ class AgentCoordinator:
         track_id: str,
         created_at: float,
     ) -> ReasoningAssessment:
+        # Builds reasoning assessment payloads for pipeline consumers.
         summary = self.build_observation_summary(track_id, created_at)
         history = self.get_track_history(track_id)
         observation_ids = [obs.observation_id for obs in history[-5:]]
@@ -167,6 +174,7 @@ class AgentCoordinator:
         detection: DetectionCandidate,
         proposal: VisualAssociationProposal,
     ) -> VisualAssociationUpdate:
+        # Implements validate visual association proposal behavior for this module.
         rejection_reasons: list[str] = []
         uncertainties = list(proposal.uncertainties)
         supporting_evidence = list(proposal.supporting_evidence)
@@ -219,6 +227,7 @@ class AgentCoordinator:
         source_agent: str = "visual_tracking",
         additional_uncertainties: list[str] | None = None,
     ) -> TrackingAgentObservation:
+        # Builds tracking agent observation payloads for pipeline consumers.
         proposal_by_detection = {proposal.detection_id: proposal for proposal in proposals}
         updates: list[VisualAssociationUpdate] = []
 

@@ -1,3 +1,4 @@
+# Handles test dashboard control behavior.
 from __future__ import annotations
 
 import unittest
@@ -14,6 +15,7 @@ class TestDashboardControl(unittest.TestCase):
         mock_start,
         mock_wait,
     ) -> None:
+        # Performs test start dashboard and wait ready success logic.
         mock_start.return_value = (True, "started")
         mock_wait.return_value = {
             "ready": True,
@@ -44,6 +46,7 @@ class TestDashboardControl(unittest.TestCase):
         mock_start,
         mock_wait,
     ) -> None:
+        # Performs test start dashboard and wait ready timeout logic.
         mock_start.return_value = (False, "already running")
         mock_wait.return_value = {
             "ready": False,
@@ -69,6 +72,7 @@ class TestDashboardControl(unittest.TestCase):
         mock_stop,
         mock_status,
     ) -> None:
+        # Performs test stop dashboard and confirm success logic.
         mock_stop.return_value = "stopped"
         mock_status.side_effect = [
             {"running": True, "pid": 10, "return_code": None},
@@ -95,6 +99,7 @@ class TestDashboardControl(unittest.TestCase):
         mock_time,
         mock_sleep,
     ) -> None:
+        # Performs test stop dashboard and confirm timeout logic.
         mock_stop.return_value = "stopping"
         mock_status.return_value = {"running": True, "pid": 10, "return_code": None}
         mock_time.side_effect = [0.0, 0.0, 0.05, 0.11]
@@ -111,6 +116,7 @@ class TestDashboardControl(unittest.TestCase):
         self.assertGreaterEqual(mock_sleep.call_count, 1)
 
     def test_stop_dashboard_and_confirm_invalid_arguments(self) -> None:
+        # Performs test stop dashboard and confirm invalid arguments logic.
         with self.assertRaises(ValueError):
             dashboardControl.stop_dashboard_and_confirm(timeout_seconds=0)
         with self.assertRaises(ValueError):
@@ -123,6 +129,7 @@ class TestDashboardControl(unittest.TestCase):
         mock_stop_confirm,
         mock_start_wait,
     ) -> None:
+        # Performs test restart dashboard and wait ready success logic.
         mock_stop_confirm.return_value = {
             "stopped": True,
             "stop_message": "stopped",
@@ -154,6 +161,7 @@ class TestDashboardControl(unittest.TestCase):
         mock_stop_confirm,
         mock_start_wait,
     ) -> None:
+        # Performs test restart dashboard and wait ready stop failure logic.
         mock_stop_confirm.return_value = {
             "stopped": False,
             "stop_message": "timeout",
@@ -177,6 +185,7 @@ class TestDashboardControl(unittest.TestCase):
         mock_health_status,
         mock_calibration,
     ) -> None:
+        # Performs test dashboard lifecycle status ready logic.
         mock_process_status.return_value = {
             "running": True,
             "pid": 123,
@@ -208,6 +217,7 @@ class TestDashboardControl(unittest.TestCase):
         mock_health_status,
         mock_calibration,
     ) -> None:
+        # Performs test dashboard lifecycle status not ready when stale logic.
         mock_process_status.return_value = {
             "running": True,
             "pid": 123,
@@ -230,6 +240,7 @@ class TestDashboardControl(unittest.TestCase):
         self.assertFalse(result["observations_fresh"])
 
     def test_dashboard_lifecycle_status_invalid_arguments(self) -> None:
+        # Performs test dashboard lifecycle status invalid arguments logic.
         with self.assertRaises(ValueError):
             dashboardControl.dashboard_lifecycle_status(max_observation_age_seconds=-0.1)
 
@@ -242,6 +253,7 @@ class TestDashboardControl(unittest.TestCase):
         mock_start_wait,
         mock_lifecycle,
     ) -> None:
+        # Performs test dashboard bootstrap start path with calibration logic.
         mock_set_calibration.return_value = {
             "saved": True,
             "ground_coordinate_unit": "meters",
@@ -283,6 +295,7 @@ class TestDashboardControl(unittest.TestCase):
         mock_restart_wait,
         mock_lifecycle,
     ) -> None:
+        # Performs test dashboard bootstrap restart path logic.
         mock_restart_wait.return_value = {
             "restarted": True,
             "stop": {"stopped": True},

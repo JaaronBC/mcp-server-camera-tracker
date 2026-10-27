@@ -1,3 +1,4 @@
+# Handles dashboard process behavior.
 from __future__ import annotations
 
 import subprocess
@@ -12,10 +13,12 @@ _dashboard_process: subprocess.Popen[Any] | None = None
 
 
 def _is_running() -> bool:
+    # Performs is running logic.
     return _dashboard_process is not None and _dashboard_process.poll() is None
 
 
 def start_dashboard_process() -> tuple[bool, str]:
+    # Performs start dashboard process logic.
     global _dashboard_process
 
     if _is_running():
@@ -44,6 +47,7 @@ def start_dashboard_process() -> tuple[bool, str]:
 
 
 def stop_dashboard_process(force: bool = False) -> str:
+    # Performs stop dashboard process logic.
     global _dashboard_process
 
     if not _is_running():
@@ -69,6 +73,7 @@ def stop_dashboard_process(force: bool = False) -> str:
 
 
 def dashboard_process_status() -> dict[str, Any]:
+    # Performs dashboard process status logic.
     if _dashboard_process is None:
         return {
             "running": False,

@@ -1,3 +1,4 @@
+# Handles test dashboard calibration behavior.
 from __future__ import annotations
 
 import json
@@ -11,6 +12,7 @@ from tools import dashboardCalibration
 
 class TestDashboardCalibrationTools(unittest.TestCase):
     def test_get_calibration_missing(self) -> None:
+        # Performs test get calibration missing logic.
         with TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "ground_plane_calibration.json"
             with patch("tools.dashboardCalibration.CALIBRATION_PATH", path):
@@ -20,6 +22,7 @@ class TestDashboardCalibrationTools(unittest.TestCase):
         self.assertEqual(result["error"], "calibration_missing")
 
     def test_set_and_get_and_validate_calibration(self) -> None:
+        # Performs test set and get and validate calibration logic.
         payload = {
             "image_points": [[0, 0], [100, 0], [100, 100], [0, 100]],
             "ground_points": [[0, 0], [10, 0], [10, 20], [0, 20]],
@@ -40,10 +43,12 @@ class TestDashboardCalibrationTools(unittest.TestCase):
         self.assertTrue(validate_result["valid"])
 
     def test_set_calibration_rejects_non_object(self) -> None:
+        # Performs test set calibration rejects non object logic.
         with self.assertRaises(ValueError):
             dashboardCalibration.set_ground_plane_calibration([1, 2, 3])  # type: ignore[arg-type]
 
     def test_validate_calibration_invalid_payload(self) -> None:
+        # Performs test validate calibration invalid payload logic.
         with TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "ground_plane_calibration.json"
             path.write_text(json.dumps({"matrix": [[1, 2], [3, 4]]}), encoding="utf-8")
@@ -55,6 +60,7 @@ class TestDashboardCalibrationTools(unittest.TestCase):
         self.assertIn("error", result)
 
     def test_clear_calibration(self) -> None:
+        # Performs test clear calibration logic.
         payload = {
             "image_points": [[0, 0], [100, 0], [100, 100], [0, 100]],
             "ground_points": [[0, 0], [10, 0], [10, 20], [0, 20]],

@@ -1,3 +1,4 @@
+# Handles calibration behavior.
 from __future__ import annotations
 
 import json
@@ -15,6 +16,7 @@ class GroundPlaneCalibration:
 
 
 def _to_point_array(points: list[list[float]], name: str) -> np.ndarray:
+    # Performs to point array logic.
     if not isinstance(points, list) or len(points) < 4:
         raise ValueError(f"{name} must contain at least 4 points")
 
@@ -28,6 +30,7 @@ def compute_homography(
     image_points: list[list[float]],
     ground_points: list[list[float]],
 ) -> np.ndarray:
+    # Performs compute homography logic.
     image_arr = _to_point_array(image_points, "image_points")
     ground_arr = _to_point_array(ground_points, "ground_points")
     if image_arr.shape[0] != ground_arr.shape[0]:
@@ -44,6 +47,7 @@ def map_image_to_ground(
     pixel_x: float,
     pixel_y: float,
 ) -> tuple[float, float]:
+    # Performs map image to ground logic.
     points = np.array([[[float(pixel_x), float(pixel_y)]]], dtype=np.float32)
     transformed = cv2.perspectiveTransform(points, matrix)
     ground_x = float(transformed[0][0][0])
@@ -52,6 +56,7 @@ def map_image_to_ground(
 
 
 def load_ground_plane_calibration(path: Path) -> GroundPlaneCalibration | None:
+    # Performs load ground plane calibration logic.
     if not path.is_file():
         return None
 

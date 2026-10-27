@@ -1,3 +1,4 @@
+# Handles test dashboard metrics behavior.
 from __future__ import annotations
 
 import json
@@ -11,6 +12,7 @@ from tools import dashboardMetrics
 
 class TestDashboardMetrics(unittest.TestCase):
     def test_metrics_reports_unavailable_when_snapshots_missing(self) -> None:
+        # Performs test metrics reports unavailable when snapshots missing logic.
         with TemporaryDirectory() as temp_dir:
             captures_dir = Path(temp_dir)
 
@@ -26,6 +28,7 @@ class TestDashboardMetrics(unittest.TestCase):
         self.assertFalse(result["continuity"]["available"])
 
     def test_metrics_latency_and_counts_from_current_snapshots(self) -> None:
+        # Performs test metrics latency and counts from current snapshots logic.
         with TemporaryDirectory() as temp_dir:
             captures_dir = Path(temp_dir)
             radar_path = captures_dir / "latest_radar_state.json"
@@ -65,6 +68,7 @@ class TestDashboardMetrics(unittest.TestCase):
         self.assertAlmostEqual(result["latency"]["end_to_end_delay_seconds"], 6.0, places=6)
 
     def test_metrics_continuity_from_latest_tracking_history(self) -> None:
+        # Performs test metrics continuity from latest tracking history logic.
         with TemporaryDirectory() as temp_dir:
             captures_dir = Path(temp_dir)
             (captures_dir / "latest_radar_state.json").write_text(
@@ -105,6 +109,7 @@ class TestDashboardMetrics(unittest.TestCase):
         self.assertAlmostEqual(continuity["continuity_ratio"], 0.5, places=6)
 
     def test_depth_coverage_metrics_reports_unavailable_when_files_missing(self) -> None:
+        # Performs test depth coverage metrics reports unavailable when files missing logic.
         with TemporaryDirectory() as temp_dir:
             captures_dir = Path(temp_dir)
 
@@ -123,6 +128,7 @@ class TestDashboardMetrics(unittest.TestCase):
         self.assertFalse(result["trend"]["available"])
 
     def test_depth_coverage_metrics_uses_latest_radar_state(self) -> None:
+        # Performs test depth coverage metrics uses latest radar state logic.
         with TemporaryDirectory() as temp_dir:
             captures_dir = Path(temp_dir)
             radar_path = captures_dir / "latest_radar_state.json"
@@ -188,6 +194,7 @@ class TestDashboardMetrics(unittest.TestCase):
         self.assertEqual(result["trend"]["delta_coverage_percent"], 50.0)
 
     def test_depth_coverage_metrics_falls_back_to_history_when_radar_has_no_coverage(self) -> None:
+        # Performs test depth coverage metrics falls back to history when radar has no coverage logic.
         with TemporaryDirectory() as temp_dir:
             captures_dir = Path(temp_dir)
             radar_path = captures_dir / "latest_radar_state.json"
@@ -222,6 +229,7 @@ class TestDashboardMetrics(unittest.TestCase):
         self.assertFalse(result["trend"]["available"])
 
     def test_tracking_quality_report_healthy(self) -> None:
+        # Performs test tracking quality report healthy logic.
         with TemporaryDirectory() as temp_dir:
             captures_dir = Path(temp_dir)
             radar_path = captures_dir / "latest_radar_state.json"
@@ -333,6 +341,7 @@ class TestDashboardMetrics(unittest.TestCase):
         self.assertEqual(result["errors"], [])
 
     def test_tracking_quality_report_degraded_with_missing_inputs(self) -> None:
+        # Performs test tracking quality report degraded with missing inputs logic.
         with TemporaryDirectory() as temp_dir:
             captures_dir = Path(temp_dir)
             radar_path = captures_dir / "latest_radar_state.json"

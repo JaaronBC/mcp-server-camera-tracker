@@ -1,3 +1,4 @@
+# Handles dashboardCalibration behavior.
 from __future__ import annotations
 
 import json
@@ -13,18 +14,21 @@ CALIBRATION_PATH = PROJECT_ROOT / "captures" / "ground_plane_calibration.json"
 
 
 def _ensure_json_object(payload: dict[str, Any] | Any) -> dict[str, Any]:
+    # Performs ensure json object logic.
     if not isinstance(payload, dict):
         raise ValueError("calibration payload must be a JSON object")
     return payload
 
 
 def _save_calibration_payload(payload: dict[str, Any]) -> None:
+    # Performs save calibration payload logic.
     CALIBRATION_PATH.parent.mkdir(parents=True, exist_ok=True)
     CALIBRATION_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
 @mcp.tool()
 def set_ground_plane_calibration(calibration: dict[str, Any]) -> dict[str, Any]:
+    # Performs set ground plane calibration logic.
     """Save and validate dashboard ground-plane calibration JSON payload."""
     payload = _ensure_json_object(calibration)
 
@@ -43,6 +47,7 @@ def set_ground_plane_calibration(calibration: dict[str, Any]) -> dict[str, Any]:
 
 @mcp.tool()
 def get_ground_plane_calibration() -> dict[str, Any]:
+    # Performs get ground plane calibration logic.
     """Return current dashboard ground-plane calibration file contents."""
     if not CALIBRATION_PATH.is_file():
         return {
@@ -68,6 +73,7 @@ def get_ground_plane_calibration() -> dict[str, Any]:
 
 @mcp.tool()
 def validate_ground_plane_calibration() -> dict[str, Any]:
+    # Performs validate ground plane calibration logic.
     """Validate current dashboard calibration file and return summary metadata."""
     if not CALIBRATION_PATH.is_file():
         return {
@@ -102,6 +108,7 @@ def validate_ground_plane_calibration() -> dict[str, Any]:
 
 @mcp.tool()
 def clear_ground_plane_calibration() -> dict[str, Any]:
+    # Performs clear ground plane calibration logic.
     """Delete dashboard ground-plane calibration file if present."""
     existed = CALIBRATION_PATH.is_file()
     if existed:

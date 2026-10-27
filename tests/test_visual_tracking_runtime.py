@@ -1,3 +1,4 @@
+# Handles test visual tracking runtime behavior.
 from __future__ import annotations
 
 import asyncio
@@ -11,6 +12,7 @@ from tools.visual_tracking_agent import AsyncVisualTrackingRuntime, VisualTracki
 
 class FakeVisualTrackingAgent:
     def __init__(self, result: VisualTrackingAgentResult, delay_seconds: float = 0.0, model: str = "qwen-3.8-27b"):
+        # Performs init logic.
         self._result = result
         self._delay_seconds = delay_seconds
         self.model = model
@@ -22,12 +24,14 @@ class FakeVisualTrackingAgent:
         event_reasons: list[str] | None = None,
         request_timeout_seconds: float = 2.0,
     ) -> VisualTrackingAgentResult:
+        # Performs propose associations logic.
         if self._delay_seconds > 0:
             await asyncio.sleep(self._delay_seconds)
         return self._result
 
 
 def make_detection(relative_depth: float | None = None) -> DetectionCandidate:
+    # Performs make detection logic.
     return DetectionCandidate(
         detection_id="det-1",
         timestamp=1000.0,
@@ -48,6 +52,7 @@ def make_detection(relative_depth: float | None = None) -> DetectionCandidate:
 
 class TestVisualTrackingRuntime(unittest.TestCase):
     def test_vlm_assisted_association_is_applied(self) -> None:
+        # Performs test vlm assisted association is applied logic.
         proposal = VisualAssociationProposal(
             detection_id="det-1",
             proposed_track_id="vlm-track-2",
@@ -94,6 +99,7 @@ class TestVisualTrackingRuntime(unittest.TestCase):
         self.assertTrue(observation.updates[0].accepted)
 
     def test_depth_conflict_is_rejected_and_falls_back(self) -> None:
+        # Performs test depth conflict is rejected and falls back logic.
         proposal = VisualAssociationProposal(
             detection_id="det-1",
             proposed_track_id="vlm-track-2",
@@ -138,6 +144,7 @@ class TestVisualTrackingRuntime(unittest.TestCase):
         self.assertIn("depth_conflict_with_reliable_measurement", observation.updates[0].rejection_reasons)
 
     def test_tracking_continues_when_vlm_is_slow(self) -> None:
+        # Performs test tracking continues when vlm is slow logic.
         agent = FakeVisualTrackingAgent(
             VisualTrackingAgentResult(
                 available=True,
@@ -168,6 +175,7 @@ class TestVisualTrackingRuntime(unittest.TestCase):
         runtime.shutdown()
 
     def test_tracking_continues_when_vlm_unavailable(self) -> None:
+        # Performs test tracking continues when vlm unavailable logic.
         agent = FakeVisualTrackingAgent(
             VisualTrackingAgentResult(
                 available=False,

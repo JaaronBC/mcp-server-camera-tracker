@@ -1,3 +1,4 @@
+# Handles temp behavior.
 
 import cv2
 import math
@@ -17,6 +18,7 @@ output_dir.mkdir(parents=True, exist_ok=True)
 
 
 def main():
+    # Performs main logic.
     model = YOLO("yolo11n.pt")
     camera = cv2.VideoCapture(0)
 

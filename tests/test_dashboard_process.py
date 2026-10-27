@@ -1,3 +1,4 @@
+# Handles test dashboard process behavior.
 from __future__ import annotations
 
 import subprocess
@@ -9,6 +10,7 @@ from tools import dashboard_process
 
 class DummyProcess:
     def __init__(self, pid: int = 1234, poll_value: int | None = None) -> None:
+        # Performs init logic.
         self.pid = pid
         self._poll_value = poll_value
         self.terminated = False
@@ -16,27 +18,33 @@ class DummyProcess:
         self.wait_calls: list[float | None] = []
 
     def poll(self) -> int | None:
+        # Performs poll logic.
         return self._poll_value
 
     def terminate(self) -> None:
+        # Performs terminate logic.
         self.terminated = True
         self._poll_value = 0
 
     def kill(self) -> None:
+        # Performs kill logic.
         self.killed = True
         self._poll_value = -9
 
     def wait(self, timeout: float | None = None) -> int:
+        # Performs wait logic.
         self.wait_calls.append(timeout)
         return 0
 
 
 class TestDashboardProcess(unittest.TestCase):
     def tearDown(self) -> None:
+        # Performs tearDown logic.
         dashboard_process._dashboard_process = None
 
     @patch("tools.dashboard_process.DASHBOARD_SCRIPT_PATH")
     def test_start_dashboard_process_when_script_missing(self, mock_path) -> None:
+        # Performs test start dashboard process when script missing logic.
         mock_path.is_file.return_value = False
         with self.assertRaises(FileNotFoundError):
             dashboard_process.start_dashboard_process()
@@ -44,6 +52,7 @@ class TestDashboardProcess(unittest.TestCase):
     @patch("tools.dashboard_process.subprocess.Popen")
     @patch("tools.dashboard_process.DASHBOARD_SCRIPT_PATH")
     def test_start_dashboard_process_starts_subprocess(self, mock_path, mock_popen) -> None:
+        # Performs test start dashboard process starts subprocess logic.
         mock_path.is_file.return_value = True
         mock_path.parent = "/tmp"
         mock_process = DummyProcess(pid=6789)
@@ -56,6 +65,7 @@ class TestDashboardProcess(unittest.TestCase):
         self.assertIs(dashboard_process._dashboard_process, mock_process)
 
     def test_start_dashboard_process_returns_existing_running_message(self) -> None:
+        # Performs test start dashboard process returns existing running message logic.
         mock_process = DummyProcess(pid=7777, poll_value=None)
         dashboard_process._dashboard_process = mock_process
 
@@ -66,11 +76,13 @@ class TestDashboardProcess(unittest.TestCase):
         self.assertIn("7777", message)
 
     def test_stop_dashboard_process_when_not_running(self) -> None:
+        # Performs test stop dashboard process when not running logic.
         dashboard_process._dashboard_process = None
         message = dashboard_process.stop_dashboard_process()
         self.assertEqual(message, "Dashboard demo is not running.")
 
     def test_stop_dashboard_process_terminate(self) -> None:
+        # Performs test stop dashboard process terminate logic.
         mock_process = DummyProcess(pid=1111, poll_value=None)
         dashboard_process._dashboard_process = mock_process
 
@@ -82,6 +94,7 @@ class TestDashboardProcess(unittest.TestCase):
         self.assertIsNone(dashboard_process._dashboard_process)
 
     def test_stop_dashboard_process_force(self) -> None:
+        # Performs test stop dashboard process force logic.
         mock_process = DummyProcess(pid=2222, poll_value=None)
         dashboard_process._dashboard_process = mock_process
 
@@ -92,8 +105,10 @@ class TestDashboardProcess(unittest.TestCase):
         self.assertIsNone(dashboard_process._dashboard_process)
 
     def test_stop_dashboard_process_timeout_fallback_to_kill(self) -> None:
+        # Performs test stop dashboard process timeout fallback to kill logic.
         class TimeoutProcess(DummyProcess):
             def wait(self, timeout: float | None = None) -> int:
+                # Performs wait logic.
                 self.wait_calls.append(timeout)
                 if len(self.wait_calls) == 1:
                     raise subprocess.TimeoutExpired(cmd="demo", timeout=timeout)
@@ -109,6 +124,7 @@ class TestDashboardProcess(unittest.TestCase):
         self.assertTrue(mock_process.killed)
 
     def test_dashboard_process_status(self) -> None:
+        # Performs test dashboard process status logic.
         status = dashboard_process.dashboard_process_status()
         self.assertFalse(status["running"])
         self.assertIsNone(status["pid"])

@@ -1,3 +1,4 @@
+# Visual tracking agent runtime that invokes VLM association proposals and converts them into validated tracking observations.
 from __future__ import annotations
 
 import asyncio
@@ -7,6 +8,7 @@ import os
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
+from pathlib import Path
 from threading import Lock
 from typing import Protocol
 
@@ -18,6 +20,23 @@ from .agent_coordinator import AgentCoordinator
 
 TRACKING_VLM_MODEL = "qwen-3.8-27b"
 DEFAULT_OPENAI_BASE_URL = "https://128.171.10.83:9443/v1"
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+TRACKING_AGENT_SKILL_PATH = PROJECT_ROOT / "TrackingAgentSkill.md"
+TRACKING_AGENT_SYSTEM_PROMPT_FALLBACK = (
+    "You are a visual tracking agent for continuity-preserving identity association. "
+    "Given structured detections and optional frame evidence, return conservative, evidence-grounded "
+    "association proposals with calibrated uncertainty and explicit conflict flags. "
+    "Never invent measurements or unsupported identities, and always return strict JSON only."
+)
+
+
+def load_tracking_agent_skill() -> str:
+    # Loads tracking agent skill data from storage for downstream processing.
+    if TRACKING_AGENT_SKILL_PATH.is_file():
+        loaded = TRACKING_AGENT_SKILL_PATH.read_text(encoding="utf-8").strip()
+        if loaded:
+            return loaded
+    return TRACKING_AGENT_SYSTEM_PROMPT_FALLBACK
 
 
 @dataclass(slots=True)
@@ -39,6 +58,7 @@ class VisualTrackingAgentProtocol(Protocol):
         detections: list[DetectionCandidate],
         event_reasons: list[str] | None = None,
         request_timeout_seconds: float = 2.0,
+    # Implements propose associations behavior for this module.
     ) -> VisualTrackingAgentResult: ...
 
 
@@ -49,12 +69,19 @@ class LLMVisualTrackingAgent:
         openai_base_url: str = DEFAULT_OPENAI_BASE_URL,
         api_key: str | None = None,
         client: AsyncOpenAI | None = None,
+        system_prompt: str | None = None,
     ) -> None:
+        # Implements init behavior for this module.
         load_dotenv()
         self.model = model
         self._openai_base_url = os.getenv("OPENAI_BASE_URL", openai_base_url)
         self._api_key = api_key
         self._client = client
+        self._system_prompt = (
+            system_prompt.strip()
+            if isinstance(system_prompt, str) and system_prompt.strip()
+            else load_tracking_agent_skill()
+        )
 
     async def propose_associations(
         self,
@@ -63,6 +90,7 @@ class LLMVisualTrackingAgent:
         event_reasons: list[str] | None = None,
         request_timeout_seconds: float = 2.0,
     ) -> VisualTrackingAgentResult:
+        # Implements propose associations behavior for this module.
         if not detections:
             return VisualTrackingAgentResult(
                 available=True,
@@ -120,11 +148,7 @@ class LLMVisualTrackingAgent:
                     messages=[
                         {
                             "role": "system",
-                            "content": (
-                                "You are a visual tracking agent. Focus on association continuity, occlusions, "
-                                "ID-switch risk, and conflicts between depth/position evidence. "
-                                "Never invent physical measurements."
-                            ),
+                            "content": self._system_prompt,
                         },
                         {"role": "user", "content": user_content},
                     ],
@@ -206,6 +230,7 @@ class AsyncVisualTrackingRuntime:
         agent: VisualTrackingAgentProtocol,
         min_invoke_interval_seconds: float = 0.5,
     ) -> None:
+        # Implements init behavior for this module.
         self._coordinator = coordinator
         self._agent = agent
         self._min_invoke_interval_seconds = min_invoke_interval_seconds
@@ -223,6 +248,7 @@ class AsyncVisualTrackingRuntime:
         event_reasons: list[str] | None = None,
         request_timeout_seconds: float = 2.0,
     ) -> bool:
+        # Implements submit if needed behavior for this module.
         with self._lock:
             if self._pending_future is not None and not self._pending_future.done():
                 return False
@@ -240,6 +266,7 @@ class AsyncVisualTrackingRuntime:
             return True
 
     def poll_latest_observation(self):
+        # Implements poll latest observation behavior for this module.
         with self._lock:
             if self._pending_future is not None and self._pending_future.done():
                 self._latest_observation = self._pending_future.result()
@@ -249,10 +276,12 @@ class AsyncVisualTrackingRuntime:
             return value
 
     def is_busy(self) -> bool:
+        # Implements is busy behavior for this module.
         with self._lock:
             return self._pending_future is not None and not self._pending_future.done()
 
     def shutdown(self) -> None:
+        # Implements shutdown behavior for this module.
         self._executor.shutdown(wait=False, cancel_futures=True)
 
     def _run_once(
@@ -263,6 +292,7 @@ class AsyncVisualTrackingRuntime:
         event_reasons: list[str],
         request_timeout_seconds: float,
     ):
+        # Runs once workflow steps and returns status outcomes.
         result = asyncio.run(
             self._agent.propose_associations(
                 frame_reference=frame_reference,
@@ -288,6 +318,7 @@ class AsyncVisualTrackingRuntime:
 
 
 def encode_frame_as_data_url(frame) -> str:
+    # Implements encode frame as data url behavior for this module.
     ok, encoded = __import__("cv2").imencode(".jpg", frame)
     if not ok:
         raise ValueError("unable_to_encode_frame")
@@ -296,6 +327,7 @@ def encode_frame_as_data_url(frame) -> str:
 
 
 def _extract_json_object(raw_text: str) -> dict | None:
+    # Extracts json object from structured payloads.
     text = raw_text.strip()
     if not text:
         return None
@@ -324,6 +356,7 @@ def _extract_json_object(raw_text: str) -> dict | None:
 
 
 def _normalize_proposal(payload: dict) -> VisualAssociationProposal | None:
+    # Normalizes proposal into contract-safe values.
     detection_id = payload.get("detection_id")
     if not isinstance(detection_id, str):
         return None
