@@ -10,7 +10,7 @@ from tools.visual_tracking_agent import AsyncVisualTrackingRuntime, VisualTracki
 
 
 class FakeVisualTrackingAgent:
-    def __init__(self, result: VisualTrackingAgentResult, delay_seconds: float = 0.0, model: str = "gemini-3.5-flash-lite"):
+    def __init__(self, result: VisualTrackingAgentResult, delay_seconds: float = 0.0, model: str = "qwen-3.8-27b"):
         self._result = result
         self._delay_seconds = delay_seconds
         self.model = model
@@ -89,7 +89,7 @@ class TestVisualTrackingRuntime(unittest.TestCase):
         runtime.shutdown()
         self.assertIsNotNone(observation)
         assert observation is not None
-        self.assertEqual(observation.vlm_model, "gemini-3.5-flash-lite")
+        self.assertEqual(observation.vlm_model, "qwen-3.8-27b")
         self.assertEqual(observation.updates[0].resolved_track_id, "vlm-track-2")
         self.assertTrue(observation.updates[0].accepted)
 

@@ -173,12 +173,12 @@ class TestDashboardMilestone(unittest.TestCase):
 
             (root / "README.md").write_text(
                 "simulate_visual_tracking_association\n"
-                "gemini-3.5-flash-lite\n"
+                "qwen-3.8-27b\n"
                 "toggle tracking-agent diagnostics",
                 encoding="utf-8",
             )
             (root / "tools" / "visual_tracking_agent.py").write_text(
-                "GeminiVisualTrackingAgent\nAsyncVisualTrackingRuntime",
+                "propose_associations\nAsyncVisualTrackingRuntime",
                 encoding="utf-8",
             )
             (root / "tools" / "agent_contracts.py").write_text(

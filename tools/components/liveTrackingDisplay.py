@@ -32,7 +32,7 @@ from tools.agent_contracts import BoundingBox, DetectionCandidate, TrackingAgent
 from tools.agent_coordinator import AgentCoordinator
 from tools.visual_tracking_agent import (
     AsyncVisualTrackingRuntime,
-    GeminiVisualTrackingAgent,
+    LLMVisualTrackingAgent,
     encode_frame_as_data_url,
 )
 CAPTURES_DIR = PROJECT_ROOT / "captures"
@@ -89,7 +89,7 @@ class SharedDashboardState:
         self.active_tracks: dict[str, RadarTrackSnapshot] = {}
         self.track_trails: dict[str, deque[tuple[float, float]]] = {}
         self.latest_tracking_agent_observation: dict | None = None
-        self.tracking_agent_model = "gemini-3.5-flash-lite"
+        self.tracking_agent_model = "qwen-3.8-27b"
         self.tracking_agent_submissions = 0
         self.tracking_agent_completions = 0
         self.tracking_agent_unavailable_count = 0
@@ -345,7 +345,7 @@ def run_live_tracking_loop(state: SharedDashboardState) -> None:
 
     udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     tracking_coordinator = AgentCoordinator()
-    tracking_agent = GeminiVisualTrackingAgent()
+    tracking_agent = LLMVisualTrackingAgent()
     tracking_runtime = AsyncVisualTrackingRuntime(
         coordinator=tracking_coordinator,
         agent=tracking_agent,

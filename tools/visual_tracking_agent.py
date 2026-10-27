@@ -16,7 +16,7 @@ from openai import AsyncOpenAI
 from .agent_contracts import DetectionCandidate, VisualAssociationProposal
 from .agent_coordinator import AgentCoordinator
 
-GEMINI_TRACKING_MODEL = "gemini-3.5-flash-lite"
+TRACKING_VLM_MODEL = "qwen-3.8-27b"
 DEFAULT_OPENAI_BASE_URL = "https://128.171.10.83:9443/v1"
 
 
@@ -42,10 +42,10 @@ class VisualTrackingAgentProtocol(Protocol):
     ) -> VisualTrackingAgentResult: ...
 
 
-class GeminiVisualTrackingAgent:
+class LLMVisualTrackingAgent:
     def __init__(
         self,
-        model: str = GEMINI_TRACKING_MODEL,
+        model: str = TRACKING_VLM_MODEL,
         openai_base_url: str = DEFAULT_OPENAI_BASE_URL,
         api_key: str | None = None,
         client: AsyncOpenAI | None = None,
@@ -363,3 +363,7 @@ def _normalize_proposal(payload: dict) -> VisualAssociationProposal | None:
         uncertainties=[str(value) for value in uncertainties],
         supporting_evidence=[str(value) for value in supporting_evidence],
     )
+
+
+GEMINI_TRACKING_MODEL = TRACKING_VLM_MODEL
+GeminiVisualTrackingAgent = LLMVisualTrackingAgent

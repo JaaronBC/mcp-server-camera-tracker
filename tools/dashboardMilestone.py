@@ -249,7 +249,7 @@ def _evaluate_milestone_3(root: Path) -> dict[str, Any]:
             "description": "Vision-language tracking runtime is implemented",
             "complete": (
                 visual_agent.is_file()
-                and _file_contains(visual_agent, "GeminiVisualTrackingAgent")
+                and _file_contains(visual_agent, "propose_associations")
                 and _file_contains(visual_agent, "AsyncVisualTrackingRuntime")
             ),
         },
@@ -314,7 +314,7 @@ def _evaluate_milestone_3(root: Path) -> dict[str, Any]:
             "description": "README documents visual tracking association and diagnostics controls",
             "complete": (
                 _file_contains(readme, "simulate_visual_tracking_association")
-                and _file_contains(readme, "gemini-3.5-flash-lite")
+                and _file_contains(readme, "qwen-3.8-27b")
                 and _file_contains(readme, "toggle tracking-agent diagnostics")
             ),
         },

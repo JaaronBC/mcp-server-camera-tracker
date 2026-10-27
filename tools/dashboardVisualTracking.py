@@ -7,7 +7,7 @@ from typing import Any
 from .agent_contracts import BoundingBox, DetectionCandidate
 from .agent_coordinator import AgentCoordinator
 from .registry import mcp
-from .visual_tracking_agent import GEMINI_TRACKING_MODEL, GeminiVisualTrackingAgent
+from .visual_tracking_agent import TRACKING_VLM_MODEL, LLMVisualTrackingAgent
 
 
 def _to_float(value: Any) -> float | None:
@@ -67,13 +67,13 @@ def simulate_visual_tracking_association(
     event_reasons: list[str] | None = None,
     timeout_seconds: float = 1.0,
 ) -> dict[str, Any]:
-    """Run Gemini visual tracking agent with selected frame + structured detections and return validated updates."""
+    """Run visual tracking agent with selected frame + structured detections and return validated updates."""
     if timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be greater than zero")
 
     detection_candidates = _parse_detection_candidates(detections)
     coordinator = AgentCoordinator()
-    agent = GeminiVisualTrackingAgent(model=GEMINI_TRACKING_MODEL)
+    agent = LLMVisualTrackingAgent(model=TRACKING_VLM_MODEL)
 
     result = asyncio.run(
         agent.propose_associations(

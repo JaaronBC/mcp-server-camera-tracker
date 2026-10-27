@@ -53,7 +53,7 @@ class TestDashboardVisualTracking(unittest.TestCase):
             }
         ]
 
-        with patch("tools.dashboardVisualTracking.GeminiVisualTrackingAgent", FakeAgent):
+        with patch("tools.dashboardVisualTracking.LLMVisualTrackingAgent", FakeAgent):
             result = dashboardVisualTracking.simulate_visual_tracking_association(
                 detections=detections,
                 frame_reference="data:image/jpeg;base64,abc",

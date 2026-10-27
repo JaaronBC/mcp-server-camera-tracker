@@ -55,7 +55,7 @@ class TestLiveTrackingDisplayMessage(unittest.TestCase):
         observation = TrackingAgentObservation(
             timestamp=2.0,
             source_agent="visual_tracking",
-            vlm_model="gemini-3.5-flash-lite",
+            vlm_model="qwen-3.8-27b",
             proposal_latency_ms=12.0,
             frame_reference=None,
             updates=[
@@ -88,7 +88,7 @@ class TestLiveTrackingDisplayMessage(unittest.TestCase):
     def test_build_tracking_agent_status_text(self) -> None:
         status_text = build_tracking_agent_status_text(
             {
-                "model": "gemini-3.5-flash-lite",
+                "model": "qwen-3.8-27b",
                 "submissions": 12,
                 "completions": 10,
                 "unavailable_count": 2,
@@ -100,7 +100,7 @@ class TestLiveTrackingDisplayMessage(unittest.TestCase):
             }
         )
 
-        self.assertIn("model=gemini-3.5-flash-lite", status_text)
+        self.assertIn("model=qwen-3.8-27b", status_text)
         self.assertIn("submissions=12", status_text)
         self.assertIn("completions=10", status_text)
         self.assertIn("last_latency=44.3ms", status_text)
@@ -109,7 +109,7 @@ class TestLiveTrackingDisplayMessage(unittest.TestCase):
     def test_build_tracking_agent_status_text_concise(self) -> None:
         status_text = build_tracking_agent_status_text(
             {
-                "model": "gemini-3.5-flash-lite",
+                "model": "qwen-3.8-27b",
                 "submissions": 12,
                 "completions": 10,
                 "unavailable_count": 2,
@@ -122,7 +122,7 @@ class TestLiveTrackingDisplayMessage(unittest.TestCase):
             detailed=False,
         )
 
-        self.assertIn("model=gemini-3.5-flash-lite", status_text)
+        self.assertIn("model=qwen-3.8-27b", status_text)
         self.assertIn("completions=10", status_text)
         self.assertNotIn("submissions=12", status_text)
         self.assertNotIn("last_latency", status_text)

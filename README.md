@@ -65,7 +65,7 @@ Edit the "mcpServers" list to include the mcp-server-camera-tracker through the 
 - `simulate_observation_summary(track_id)`: ingests latest radar state for a track and returns deterministic observation/behavior summary fields.
 - `simulate_reasoning_assessment(track_id, request_evidence_on_uncertainty=True)`: ingests latest radar state for a track and returns observation summary, reasoning assessment, and optional bounded evidence request.
 - `simulate_evidence_request(track_id, reason)`: issues a bounded evidence request for a track and returns request metadata or a bounded-out indicator.
-- `simulate_visual_tracking_association(detections, frame_reference=None, event_reasons=None, timeout_seconds=1.0)`: runs the Gemini visual tracking agent on selected frames plus structured perception input and returns coordinator-validated association updates.
+- `simulate_visual_tracking_association(detections, frame_reference=None, event_reasons=None, timeout_seconds=1.0)`: runs the visual tracking agent on selected frames plus structured perception input and returns coordinator-validated association updates.
 - `run_reasoning_cycle_and_log(request_evidence_on_uncertainty=True, max_tracks=10)`: evaluates active tracks, records per-track status/latency/assessment events to `captures/agent_events.jsonl`, and returns cycle summary.
 - `get_recent_agent_events(limit=20)`: reads recent structured events from `captures/agent_events.jsonl`.
 - `summarize_agent_event_health(window_size=100)`: summarizes recent agent events with success/error rates, bounded-out rate, latency percentiles, and assessment-label counts.
@@ -84,7 +84,7 @@ Edit the "mcpServers" list to include the mcp-server-camera-tracker through the 
 
 The dashboard demo is implemented in `tools/components/liveTrackingDisplay.py`.
 
-The Tracking Agent now uses a vision-capable VLM (`gemini-3.5-flash-lite`) asynchronously on selected frames/events while preserving YOLO detections as primary measurements.
+The Tracking Agent now uses a vision-capable VLM (`qwen-3.8-27b`) asynchronously on selected frames/events while preserving YOLO detections as primary measurements.
 
 It renders:
 
