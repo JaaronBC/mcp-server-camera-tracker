@@ -1,0 +1,76 @@
+from __future__ import annotations
+
+import json
+import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
+
+from tools import dashboardCalibration
+
+
+class TestDashboardCalibrationTools(unittest.TestCase):
+    def test_get_calibration_missing(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "ground_plane_calibration.json"
+            with patch("tools.dashboardCalibration.CALIBRATION_PATH", path):
+                result = dashboardCalibration.get_ground_plane_calibration()
+
+        self.assertFalse(result["available"])
+        self.assertEqual(result["error"], "calibration_missing")
+
+    def test_set_and_get_and_validate_calibration(self) -> None:
+        payload = {
+            "image_points": [[0, 0], [100, 0], [100, 100], [0, 100]],
+            "ground_points": [[0, 0], [10, 0], [10, 20], [0, 20]],
+            "ground_coordinate_unit": "meters",
+        }
+
+        with TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "ground_plane_calibration.json"
+            with patch("tools.dashboardCalibration.CALIBRATION_PATH", path):
+                set_result = dashboardCalibration.set_ground_plane_calibration(payload)
+                get_result = dashboardCalibration.get_ground_plane_calibration()
+                validate_result = dashboardCalibration.validate_ground_plane_calibration()
+
+        self.assertTrue(set_result["saved"])
+        self.assertEqual(set_result["ground_coordinate_unit"], "meters")
+        self.assertTrue(get_result["available"])
+        self.assertEqual(get_result["calibration"]["ground_coordinate_unit"], "meters")
+        self.assertTrue(validate_result["valid"])
+
+    def test_set_calibration_rejects_non_object(self) -> None:
+        with self.assertRaises(ValueError):
+            dashboardCalibration.set_ground_plane_calibration([1, 2, 3])  # type: ignore[arg-type]
+
+    def test_validate_calibration_invalid_payload(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "ground_plane_calibration.json"
+            path.write_text(json.dumps({"matrix": [[1, 2], [3, 4]]}), encoding="utf-8")
+
+            with patch("tools.dashboardCalibration.CALIBRATION_PATH", path):
+                result = dashboardCalibration.validate_ground_plane_calibration()
+
+        self.assertFalse(result["valid"])
+        self.assertIn("error", result)
+
+    def test_clear_calibration(self) -> None:
+        payload = {
+            "image_points": [[0, 0], [100, 0], [100, 100], [0, 100]],
+            "ground_points": [[0, 0], [10, 0], [10, 20], [0, 20]],
+            "ground_coordinate_unit": "meters",
+        }
+
+        with TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "ground_plane_calibration.json"
+            with patch("tools.dashboardCalibration.CALIBRATION_PATH", path):
+                dashboardCalibration.set_ground_plane_calibration(payload)
+                clear_result = dashboardCalibration.clear_ground_plane_calibration()
+                get_result = dashboardCalibration.get_ground_plane_calibration()
+
+        self.assertTrue(clear_result["cleared"])
+        self.assertFalse(get_result["available"])
+
+
+if __name__ == "__main__":
+    unittest.main()
