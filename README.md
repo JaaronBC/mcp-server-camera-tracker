@@ -37,12 +37,28 @@ Default test runs use mocked model responses where appropriate and do not requir
 python -m unittest discover -s tests -p 'test_*.py' -v
 ```
 
-Optional live Observation/Reasoning endpoint checks are provided in `tests/test_dashboard_reasoning_live_llm.py`.
+Optional live Observation/Reasoning endpoint checks are provided in `tests/test_orchestration_reasoning_live_llm.py`.
 These run only when explicitly enabled and require `OPENROUTER_API_KEY`:
 
 ```bash
-RUN_LIVE_LLM_TESTS=1 python -m unittest tests.test_dashboard_reasoning_live_llm -v
+RUN_LIVE_LLM_TESTS=1 python -m unittest tests.test_orchestration_reasoning_live_llm -v
 ```
+
+## Migration summary (dashboard → orchestration)
+
+Canonical control-plane imports are now under `tools/orchestration/*`.
+Compatibility aliases currently remain in place to avoid breaking existing integrations.
+
+- `tools.dashboard.agent_ops` → `tools.orchestration.agent_ops`
+- `tools.dashboard.calibration` → `tools.orchestration.calibration`
+- `tools.dashboard.control` → `tools.orchestration.control`
+- `tools.dashboard.detect_objects_tool` → `tools.orchestration.detect_objects_tool`
+- `tools.dashboard.health` → `tools.orchestration.health`
+- `tools.dashboard.live_tracking_tool` → `tools.orchestration.live_tracking_tool`
+- `tools.dashboard.metrics` → `tools.orchestration.metrics`
+- `tools.dashboard.process` → `tools.orchestration.process`
+
+Dashboard-oriented test modules were also renamed to orchestration naming (for example, `tests/test_dashboard_control.py` → `tests/test_orchestration_control.py`).
 
 ## Setup (LLM)
 
@@ -214,19 +230,19 @@ A stricter call-site matrix and remaining manual live-verification items are doc
 
 - Writes `captures/latest_radar_state.json` with `tracks`, `tracking_agent_observation`, `coordinate_system`, and calibration/status fields.
 
-4. **Observation ingestion:** `tools/dashboardReasoning.py::_load_radar_state` and `_ingest_latest_tracks`
+4. **Observation ingestion:** `tools/reasoning/tools_reasoning_assessment.py::_load_radar_state` and `_ingest_latest_tracks`
 
 - Ingests `tracks` into coordinator history records.
 
-5. **Observation LLM input assembly:** `tools/dashboardReasoning.py::_build_observation_llm_input`
+5. **Observation LLM input assembly:** `tools/reasoning/tools_reasoning_assessment.py::_build_observation_llm_input`
 
 - Packages `history_records` plus `latest_track_snapshot`, `tracking_agent_context`, and `coordinate_context` for Observation agent invocation.
 
-6. **Reasoning cross-check:** `tools/dashboardReasoning.py::_build_reasoning_handoff_payload`
+6. **Reasoning cross-check:** `tools/reasoning/tools_reasoning_assessment.py::_build_reasoning_handoff_payload`
 
 - Validates `supporting_observation_ids` against ingested history before Reasoning invocation.
 
-7. **Ops/event output:** `tools/dashboardAgentOps.py::run_reasoning_cycle_and_log`
+7. **Ops/event output:** `tools/orchestration/agent_ops.py::run_reasoning_cycle_and_log`
 
 - Logs per-track status, agent metadata, handoff validation, and latency to `captures/agent_events.jsonl` for dashboard/health summaries.
 
@@ -234,8 +250,8 @@ A stricter call-site matrix and remaining manual live-verification items are doc
 
 Typed contracts and bounded coordinator logic for the Tracking / Observation / Reasoning flow are now scaffolded in:
 
-- `tools/agent_contracts.py`
-- `tools/agent_coordinator.py`
+- `tools/contracts.py`
+- `tools/coordinator.py`
 
 Current coordinator tests:
 
