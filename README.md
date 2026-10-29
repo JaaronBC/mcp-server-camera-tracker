@@ -24,10 +24,7 @@ python -m pip install -r requirements.txt
 
 Set shared model endpoint configuration in your environment or `.env`:
 
-- `OPENROUTER_API_KEY=<your_api_key>`
-- `OPENAI_BASE_URL=https://128.171.10.83:9443/v1`
-
-If `OPENAI_BASE_URL` is unset, the project defaults to `https://128.171.10.83:9443/v1`.
+-
 
 ## Testing
 
@@ -52,9 +49,9 @@ The legacy `agents/dashboard/*` package has been removed.
 - `tools.dashboard.agent_ops` → `tools.orchestration.agent_ops`
 - `tools.dashboard.calibration` → `tools.orchestration.calibration`
 - `tools.dashboard.control` → `tools.orchestration.control`
-- `tools.dashboard.detect_objects_tool` → `tools.orchestration.detect_objects_tool`
+- `tools.dashboard.detect_objects_tool` → `tools.orchestration.detect_objects`
 - `tools.dashboard.health` → `tools.orchestration.health`
-- `tools.dashboard.live_tracking_tool` → `tools.orchestration.live_tracking_tool`
+- `tools.dashboard.live_tracking_tool` → `tools.orchestration.live_tracking`
 - `tools.dashboard.metrics` → `tools.orchestration.metrics`
 - `tools.dashboard.process` → `tools.orchestration.process`
 

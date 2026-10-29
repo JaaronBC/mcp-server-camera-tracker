@@ -11,8 +11,8 @@ from .agent_tracking import (
     load_tracking_agent_skill,
 )
 
-LIVE_TRACKING_TOOL = "live_tracking"
-DETECT_OBJECTS_TOOL = "detect_objects"
+LIVE_TRACKING_TOOL_NAME = "live_tracking"
+DETECT_OBJECTS_TOOL_NAME = "detect_objects"
 
 
 def get_result_text(result: Any) -> str:
@@ -57,13 +57,13 @@ def _emit_message(message: str, emit: Callable[[str], None] | None) -> None:
 async def verify_required_tools(
     session,
     *,
-    live_tracking_tool: str = LIVE_TRACKING_TOOL,
-    detect_objects_tool: str = DETECT_OBJECTS_TOOL,
+    live_tracking_tool_name: str = LIVE_TRACKING_TOOL_NAME,
+    detect_objects_tool_name: str = DETECT_OBJECTS_TOOL_NAME,
 ) -> None:
     # Verifies tracking tool contract before runtime starts.
     tool_list = await session.list_tools()
     available = {tool.name for tool in tool_list.tools}
-    required = {live_tracking_tool, detect_objects_tool}
+    required = {live_tracking_tool_name, detect_objects_tool_name}
     missing = sorted(required - available)
     if missing:
         raise RuntimeError(
@@ -75,7 +75,7 @@ async def verify_required_tools(
 async def start_live_tracking(
     session,
     *,
-    tool_name: str = LIVE_TRACKING_TOOL,
+    tool_name: str = LIVE_TRACKING_TOOL_NAME,
     result_text_fn: Callable[[Any], str] = get_result_text,
     emit: Callable[[str], None] | None = None,
 ) -> None:
@@ -95,14 +95,14 @@ async def run_tracking_cycle(
     session,
     *,
     address: list[Any],
-    detect_objects_tool: str = DETECT_OBJECTS_TOOL,
+    detect_objects_tool_name: str = DETECT_OBJECTS_TOOL_NAME,
     result_text_fn: Callable[[Any], str] = get_result_text,
     emit: Callable[[str], None] | None = None,
 ) -> None:
     # Runs one tracking analysis cycle and emits movement output.
     try:
         result = await session.call_tool(
-            detect_objects_tool,
+            detect_objects_tool_name,
             arguments={"address": address},
         )
     except Exception as error:
@@ -120,6 +120,7 @@ async def run_tracking_cycle(
         _emit_message("Movement analysis returned no frame data.", emit)
     else:
         _emit_message(f"\nYOLO frame:\n{frame_data}", emit)
+
 
 __all__ = [
     "AsyncVisualTrackingRuntime",

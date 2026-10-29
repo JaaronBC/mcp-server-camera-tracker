@@ -31,14 +31,14 @@ from ultralytics import YOLO
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-from agents.components.dashboard_types import (
+from agents.tracking.tracking_types import (
     RadarTrackSnapshot,
 )
-from agents.components.calibration import (
+from agents.tracking.calibration import (
     GroundPlaneCalibration,
     load_ground_plane_calibration,
 )
-from agents.components.geometry import ground_to_radar_screen
+from agents.tracking.geometry import ground_to_radar_screen
 from agents.contracts import TrackingAgentObservation
 from agents.tracking.agent_tracking import (
     AsyncVisualTrackingRuntime,
@@ -382,14 +382,14 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from agents.components.dashboard_types import (
+from agents.tracking.tracking_types import (
     RadarTrackSnapshot,
 )
-from agents.components.calibration import (
+from agents.tracking.calibration import (
     GroundPlaneCalibration,
     load_ground_plane_calibration,
 )
-from agents.components.geometry import ground_to_radar_screen
+from agents.tracking.geometry import ground_to_radar_screen
 from agents.contracts import TrackingAgentObservation
 from agents.coordinator import AgentCoordinator
 from agents.tracking.agent_tracking import (

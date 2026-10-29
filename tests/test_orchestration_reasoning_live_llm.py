@@ -8,7 +8,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from agents.reasoning.tools import _shared as orchestrationReasoning
+from agents.reasoning.tools import _shared as orchestration_reasoning
 
 
 class TestOrchestrationReasoningLiveLLM(unittest.TestCase):
@@ -30,7 +30,7 @@ class TestOrchestrationReasoningLiveLLM(unittest.TestCase):
 
     def tearDown(self) -> None:
         # Performs tearDown logic.
-        orchestrationReasoning._reset_reasoning_state()
+        orchestration_reasoning._reset_reasoning_state()
 
     def _write_radar_payload(self, radar_path: Path) -> None:
         # Performs write radar payload logic.
@@ -60,7 +60,7 @@ class TestOrchestrationReasoningLiveLLM(unittest.TestCase):
             self._write_radar_payload(radar_path)
 
             with patch("agents.reasoning.tools._shared.RADAR_STATE_PATH", radar_path):
-                result = orchestrationReasoning.simulate_observation_summary("track-live-1")
+                result = orchestration_reasoning.simulate_observation_summary("track-live-1")
 
         self.assertTrue(result["available"])
         self.assertIn("summary", result)
@@ -79,7 +79,7 @@ class TestOrchestrationReasoningLiveLLM(unittest.TestCase):
             self._write_radar_payload(radar_path)
 
             with patch("agents.reasoning.tools._shared.RADAR_STATE_PATH", radar_path):
-                result = orchestrationReasoning.simulate_reasoning_assessment("track-live-1")
+                result = orchestration_reasoning.simulate_reasoning_assessment("track-live-1")
 
         self.assertTrue(result["available"])
         self.assertIn("summary", result)
@@ -110,7 +110,7 @@ class TestOrchestrationReasoningLiveLLM(unittest.TestCase):
             with patch("agents.reasoning.tools._shared.RADAR_STATE_PATH", radar_path):
                 responses = []
                 for index in range(4):
-                    response = orchestrationReasoning.simulate_evidence_request(
+                    response = orchestration_reasoning.simulate_evidence_request(
                         "track-live-1",
                         f"live-budget-check-{index}",
                     )

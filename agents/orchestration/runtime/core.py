@@ -5,24 +5,24 @@ from typing import Any, Awaitable, Callable
 
 from mcp import ClientSession
 
-from agents.tracking import agent_runtime as trackingAgent
+from agents.tracking import tracking_runtime as tracking_runtime_module
 
-from agents.orchestration.tools import control as orchestrationControl
-from agents.orchestration import formatting as orchestrationFormatting
+from agents.orchestration.tools import control as orchestration_control
+from agents.orchestration import formatting as orchestration_formatting
 
-from . import app as runtimeApp
-from . import callbacks as orchestrationCallbacks
-from . import config as runtimeConfig
-from . import flow as runtimeFlow
+from . import app as runtime_app
+from . import callbacks as orchestration_callbacks
+from . import config as runtime_config
+from . import flow as runtime_flow
 
 TRACKING_ADDRESS = ("127.0.0.1", 5005)
-LIVE_TRACKING_TOOL = "live_tracking"
-DETECT_OBJECTS_TOOL = "detect_objects"
-AGENT_OPS_CYCLE_TOOL = "run_reasoning_cycle_and_log"
-AGENT_OPS_HEALTH_SUMMARY_TOOL = "summarize_agent_event_health"
-DEPTH_COVERAGE_SUMMARY_TOOL = "dashboard_depth_coverage_metrics"
-PIPELINE_CONTRACT_VERIFY_TOOL = "verify_dashboard_pipeline_contract"
-DASHBOARD_HEALTH_STATUS_TOOL = "dashboard_health_status"
+LIVE_TRACKING_TOOL_NAME = "live_tracking"
+DETECT_OBJECTS_TOOL_NAME = "detect_objects"
+AGENT_OPS_CYCLE_TOOL_NAME = "run_reasoning_cycle_and_log"
+AGENT_OPS_HEALTH_SUMMARY_TOOL_NAME = "summarize_agent_event_health"
+DEPTH_COVERAGE_SUMMARY_TOOL_NAME = "dashboard_depth_coverage_metrics"
+PIPELINE_CONTRACT_VERIFY_TOOL_NAME = "verify_dashboard_pipeline_contract"
+DASHBOARD_HEALTH_STATUS_TOOL_NAME = "dashboard_health_status"
 ANALYSIS_INTERVAL_SECONDS = 3
 AGENT_OPS_INTERVAL_SECONDS = 10
 AGENT_OPS_MAX_TRACKS = 10
@@ -37,26 +37,26 @@ AGENT_STARTUP_ACTIVATION_RETRY_SECONDS = 0.5
 
 
 def get_result_text(result: Any) -> str:
-    return trackingAgent.get_result_text(result)
+    return tracking_runtime_module.get_result_text(result)
 
 
 def get_result_json_object(result: Any) -> dict[str, Any] | None:
-    return trackingAgent.get_result_json_object(result)
+    return tracking_runtime_module.get_result_json_object(result)
 
 
-format_agent_ops_cycle = orchestrationFormatting.format_agent_ops_cycle
-format_agent_ops_cycle_evidence = orchestrationFormatting.format_agent_ops_cycle_evidence
-format_agent_ops_health_summary = orchestrationFormatting.format_agent_ops_health_summary
-_format_agent_error_digest = orchestrationFormatting._format_agent_error_digest
-_format_agent_error_trends = orchestrationFormatting._format_agent_error_trends
-_format_handoff_validation_trend = orchestrationFormatting._format_handoff_validation_trend
-_format_handoff_status_summary = orchestrationFormatting._format_handoff_status_summary
-_format_handoff_degraded_rate = orchestrationFormatting._format_handoff_degraded_rate
-_format_collaboration_signals = orchestrationFormatting._format_collaboration_signals
-_classify_handoff_severity = orchestrationFormatting._classify_handoff_severity
-_format_handoff_severity = orchestrationFormatting._format_handoff_severity
-_is_agent_health_payload_fresh = orchestrationFormatting._is_agent_health_payload_fresh
-format_depth_coverage_summary = orchestrationFormatting.format_depth_coverage_summary
+format_agent_ops_cycle = orchestration_formatting.format_agent_ops_cycle
+format_agent_ops_cycle_evidence = orchestration_formatting.format_agent_ops_cycle_evidence
+format_agent_ops_health_summary = orchestration_formatting.format_agent_ops_health_summary
+_format_agent_error_digest = orchestration_formatting._format_agent_error_digest
+_format_agent_error_trends = orchestration_formatting._format_agent_error_trends
+_format_handoff_validation_trend = orchestration_formatting._format_handoff_validation_trend
+_format_handoff_status_summary = orchestration_formatting._format_handoff_status_summary
+_format_handoff_degraded_rate = orchestration_formatting._format_handoff_degraded_rate
+_format_collaboration_signals = orchestration_formatting._format_collaboration_signals
+_classify_handoff_severity = orchestration_formatting._classify_handoff_severity
+_format_handoff_severity = orchestration_formatting._format_handoff_severity
+_is_agent_health_payload_fresh = orchestration_formatting._is_agent_health_payload_fresh
+format_depth_coverage_summary = orchestration_formatting.format_depth_coverage_summary
 
 
 def format_runtime_config_banner(
@@ -71,7 +71,7 @@ def format_runtime_config_banner(
     depth_coverage_summary_every_cycles: int = DEPTH_COVERAGE_SUMMARY_EVERY_CYCLES,
     depth_coverage_sample_limit: int = DEPTH_COVERAGE_SAMPLE_LIMIT,
 ) -> str:
-    return runtimeConfig.format_runtime_config_banner(
+    return runtime_config.format_runtime_config_banner(
         enable_agent_ops_heartbeat=enable_agent_ops_heartbeat,
         agent_ops_interval_seconds=agent_ops_interval_seconds,
         agent_ops_max_tracks=agent_ops_max_tracks,
@@ -85,21 +85,21 @@ def format_runtime_config_banner(
     )
 
 
-verify_required_tools = orchestrationCallbacks.make_verify_required_tools(
-    live_tracking_tool=LIVE_TRACKING_TOOL,
-    detect_objects_tool=DETECT_OBJECTS_TOOL,
+verify_required_tools = orchestration_callbacks.make_verify_required_tools(
+    live_tracking_tool_name=LIVE_TRACKING_TOOL_NAME,
+    detect_objects_tool_name=DETECT_OBJECTS_TOOL_NAME,
 )
 
 
-start_live_tracking = orchestrationCallbacks.make_start_live_tracking(
-    tool_name=LIVE_TRACKING_TOOL,
+start_live_tracking = orchestration_callbacks.make_start_live_tracking(
+    tool_name=LIVE_TRACKING_TOOL_NAME,
     result_text_fn=get_result_text,
     emit=lambda message: print(message, flush=True),
 )
 
 
-run_agent_ops_cycle = orchestrationCallbacks.make_run_agent_ops_cycle(
-    tool_name=AGENT_OPS_CYCLE_TOOL,
+run_agent_ops_cycle = orchestration_callbacks.make_run_agent_ops_cycle(
+    tool_name=AGENT_OPS_CYCLE_TOOL_NAME,
     result_text_fn=get_result_text,
     result_json_fn=get_result_json_object,
     format_cycle_fn=format_agent_ops_cycle,
@@ -109,8 +109,8 @@ run_agent_ops_cycle = orchestrationCallbacks.make_run_agent_ops_cycle(
 )
 
 
-run_agent_ops_health_summary = orchestrationCallbacks.make_run_agent_ops_health_summary(
-    tool_name=AGENT_OPS_HEALTH_SUMMARY_TOOL,
+run_agent_ops_health_summary = orchestration_callbacks.make_run_agent_ops_health_summary(
+    tool_name=AGENT_OPS_HEALTH_SUMMARY_TOOL_NAME,
     result_text_fn=get_result_text,
     result_json_fn=get_result_json_object,
     format_health_fn=lambda payload, warn_rate, critical_rate: format_agent_ops_health_summary(
@@ -125,8 +125,8 @@ run_agent_ops_health_summary = orchestrationCallbacks.make_run_agent_ops_health_
 )
 
 
-run_depth_coverage_summary = orchestrationCallbacks.make_run_depth_coverage_summary(
-    tool_name=DEPTH_COVERAGE_SUMMARY_TOOL,
+run_depth_coverage_summary = orchestration_callbacks.make_run_depth_coverage_summary(
+    tool_name=DEPTH_COVERAGE_SUMMARY_TOOL_NAME,
     result_text_fn=get_result_text,
     result_json_fn=get_result_json_object,
     format_depth_fn=format_depth_coverage_summary,
@@ -152,7 +152,7 @@ async def run_agent_ops_pipeline(
     run_health_summary_fn: Callable[..., Awaitable[bool]],
     run_depth_summary_fn: Callable[..., Awaitable[bool]],
 ) -> dict[str, Any]:
-    return await orchestrationControl.run_agent_ops_pipeline_runtime(
+    return await orchestration_control.run_agent_ops_pipeline_runtime(
         session,
         cycle_number=cycle_number,
         max_tracks=max_tracks,
@@ -202,9 +202,9 @@ async def _run_agent_ops_pipeline_bound(
     )
 
 
-start_orchestration_agents = orchestrationCallbacks.make_start_orchestration_agents(
-    dashboard_health_status_tool=DASHBOARD_HEALTH_STATUS_TOOL,
-    agent_ops_cycle_tool=AGENT_OPS_CYCLE_TOOL,
+start_orchestration_agents = orchestration_callbacks.make_start_orchestration_agents(
+    dashboard_health_status_tool=DASHBOARD_HEALTH_STATUS_TOOL_NAME,
+    agent_ops_cycle_tool=AGENT_OPS_CYCLE_TOOL_NAME,
     result_text_fn=get_result_text,
     result_json_fn=get_result_json_object,
     format_cycle_fn=format_agent_ops_cycle,
@@ -217,8 +217,8 @@ start_orchestration_agents = orchestrationCallbacks.make_start_orchestration_age
 )
 
 
-print_depth_coverage_startup_snapshot = orchestrationCallbacks.make_print_depth_coverage_startup_snapshot(
-    tool_name=DEPTH_COVERAGE_SUMMARY_TOOL,
+print_depth_coverage_startup_snapshot = orchestration_callbacks.make_print_depth_coverage_startup_snapshot(
+    tool_name=DEPTH_COVERAGE_SUMMARY_TOOL_NAME,
     result_text_fn=get_result_text,
     result_json_fn=get_result_json_object,
     format_depth_fn=format_depth_coverage_summary,
@@ -227,8 +227,8 @@ print_depth_coverage_startup_snapshot = orchestrationCallbacks.make_print_depth_
 )
 
 
-print_pipeline_contract_startup_snapshot = orchestrationCallbacks.make_print_pipeline_contract_startup_snapshot(
-    tool_name=PIPELINE_CONTRACT_VERIFY_TOOL,
+print_pipeline_contract_startup_snapshot = orchestration_callbacks.make_print_pipeline_contract_startup_snapshot(
+    tool_name=PIPELINE_CONTRACT_VERIFY_TOOL_NAME,
     result_text_fn=get_result_text,
     result_json_fn=get_result_json_object,
     emit=lambda message: print(message, flush=True),
@@ -242,12 +242,12 @@ def make_monitor_movement(
     run_agent_ops_pipeline_fn: Callable[..., Awaitable[dict[str, Any]]],
     analysis_interval_seconds: float = ANALYSIS_INTERVAL_SECONDS,
 ) -> Callable[..., Awaitable[None]]:
-    return orchestrationCallbacks.make_monitor_movement(
-        monitor_movement_fn=runtimeFlow.monitor_movement,
-        run_tracking_cycle_fn=trackingAgent.run_tracking_cycle,
+    return orchestration_callbacks.make_monitor_movement(
+        monitor_movement_fn=runtime_flow.monitor_movement,
+        run_tracking_cycle_fn=tracking_runtime_module.run_tracking_cycle,
         tracking_address=TRACKING_ADDRESS,
         analysis_interval_seconds=analysis_interval_seconds,
-        detect_objects_tool=DETECT_OBJECTS_TOOL,
+        detect_objects_tool_name=DETECT_OBJECTS_TOOL_NAME,
         result_text_fn=get_result_text,
         run_agent_ops_pipeline_fn=run_agent_ops_pipeline_fn,
         emit=lambda message: print(message, flush=True),
@@ -264,7 +264,7 @@ def make_monitor_movement(
 
 async def run_monitoring_loop(
     session: ClientSession,
-    config: runtimeApp.RuntimeConfig,
+    config: runtime_app.RuntimeConfig,
 ) -> None:
     monitor_impl = make_monitor_movement(
         run_agent_ops_pipeline_fn=_run_agent_ops_pipeline_bound,
@@ -287,7 +287,7 @@ async def run_monitoring_loop(
 
 async def run_agent(
     *,
-    run_with_runtime_config_fn: Callable[[runtimeApp.RuntimeConfig], Awaitable[None]],
+    run_with_runtime_config_fn: Callable[[runtime_app.RuntimeConfig], Awaitable[None]],
     show_startup_banner: bool = True,
     show_startup_depth_snapshot: bool = True,
     show_startup_pipeline_contract_snapshot: bool = True,
@@ -302,7 +302,7 @@ async def run_agent(
     depth_coverage_summary_every_cycles: int = DEPTH_COVERAGE_SUMMARY_EVERY_CYCLES,
     depth_coverage_sample_limit: int = DEPTH_COVERAGE_SAMPLE_LIMIT,
 ) -> None:
-    config = runtimeApp.RuntimeConfig(
+    config = runtime_app.RuntimeConfig(
         show_startup_banner=show_startup_banner,
         show_startup_depth_snapshot=show_startup_depth_snapshot,
         show_startup_pipeline_contract_snapshot=show_startup_pipeline_contract_snapshot,

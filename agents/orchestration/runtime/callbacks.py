@@ -5,19 +5,19 @@ from typing import Any, Awaitable, Callable
 
 from mcp import ClientSession
 
-from agents.orchestration.tools import control as orchestrationControl
+from agents.orchestration.tools import control as orchestration_control
 
 
 def make_verify_required_tools(
     *,
-    live_tracking_tool: str,
-    detect_objects_tool: str,
+    live_tracking_tool_name: str,
+    detect_objects_tool_name: str,
 ) -> Callable[[ClientSession], Awaitable[None]]:
     async def _verify_required_tools(session: ClientSession) -> None:
-        await orchestrationControl.verify_required_tools_runtime(
+        await orchestration_control.verify_required_tools_runtime(
             session,
-            live_tracking_tool=live_tracking_tool,
-            detect_objects_tool=detect_objects_tool,
+            live_tracking_tool_name=live_tracking_tool_name,
+            detect_objects_tool_name=detect_objects_tool_name,
         )
 
     return _verify_required_tools
@@ -30,7 +30,7 @@ def make_start_live_tracking(
     emit: Callable[[str], None],
 ) -> Callable[[ClientSession], Awaitable[None]]:
     async def _start_live_tracking(session: ClientSession) -> None:
-        await orchestrationControl.start_live_tracking_runtime(
+        await orchestration_control.start_live_tracking_runtime(
             session,
             tool_name=tool_name,
             result_text_fn=result_text_fn,
@@ -55,7 +55,7 @@ def make_run_agent_ops_cycle(
         request_evidence_on_uncertainty: bool = True,
         max_tracks: int = default_max_tracks,
     ) -> bool:
-        return await orchestrationControl.run_agent_ops_cycle_runtime(
+        return await orchestration_control.run_agent_ops_cycle_runtime(
             session,
             request_evidence_on_uncertainty=request_evidence_on_uncertainty,
             max_tracks=max_tracks,
@@ -87,7 +87,7 @@ def make_run_agent_ops_health_summary(
         handoff_warn_rate: float = default_handoff_warn_rate,
         handoff_critical_rate: float = default_handoff_critical_rate,
     ) -> bool:
-        return await orchestrationControl.run_agent_ops_health_summary_runtime(
+        return await orchestration_control.run_agent_ops_health_summary_runtime(
             session,
             window_size=window_size,
             handoff_warn_rate=handoff_warn_rate,
@@ -115,7 +115,7 @@ def make_run_depth_coverage_summary(
         session: ClientSession,
         sample_limit: int = default_sample_limit,
     ) -> bool:
-        return await orchestrationControl.run_depth_coverage_summary_runtime(
+        return await orchestration_control.run_depth_coverage_summary_runtime(
             session,
             sample_limit=sample_limit,
             tool_name=tool_name,
@@ -149,7 +149,7 @@ def make_start_orchestration_agents(
         max_attempts: int = default_max_attempts,
         retry_seconds: float = default_retry_seconds,
     ) -> bool:
-        return await orchestrationControl.start_orchestration_agents_with_activation_checks_runtime(
+        return await orchestration_control.start_orchestration_agents_with_activation_checks_runtime(
             session,
             enable_agent_ops_heartbeat=enable_agent_ops_heartbeat,
             agent_ops_max_tracks=agent_ops_max_tracks,
@@ -180,7 +180,7 @@ def make_print_depth_coverage_startup_snapshot(
         session: ClientSession,
         sample_limit: int = default_sample_limit,
     ) -> None:
-        await orchestrationControl.print_depth_coverage_startup_snapshot_runtime(
+        await orchestration_control.print_depth_coverage_startup_snapshot_runtime(
             session,
             sample_limit=sample_limit,
             tool_name=tool_name,
@@ -207,7 +207,7 @@ def make_print_pipeline_contract_startup_snapshot(
         max_observation_age_seconds: float = default_max_observation_age_seconds,
         require_live_pipeline: bool = default_require_live_pipeline,
     ) -> None:
-        await orchestrationControl.print_pipeline_contract_startup_snapshot_runtime(
+        await orchestration_control.print_pipeline_contract_startup_snapshot_runtime(
             session,
             max_observation_age_seconds=max_observation_age_seconds,
             require_live_pipeline=require_live_pipeline,
@@ -267,7 +267,7 @@ def make_monitor_movement(
     run_tracking_cycle_fn: Callable[..., Awaitable[None]],
     tracking_address: tuple[str, int],
     analysis_interval_seconds: float,
-    detect_objects_tool: str,
+    detect_objects_tool_name: str,
     result_text_fn: Callable[[Any], str],
     run_agent_ops_pipeline_fn: Callable[..., Awaitable[dict[str, Any]]],
     emit: Callable[[str], None],
@@ -297,7 +297,7 @@ def make_monitor_movement(
             await run_tracking_cycle_fn(
                 session_handle,
                 address=address,
-                detect_objects_tool=detect_objects_tool,
+                detect_objects_tool_name=detect_objects_tool_name,
                 result_text_fn=result_text_fn,
                 emit=emit,
             )

@@ -7,7 +7,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from agents.orchestration.tools import calibration as orchestrationCalibration
+from agents.orchestration.tools import calibration as orchestration_calibration
 
 
 class TestOrchestrationCalibrationTools(unittest.TestCase):
@@ -16,7 +16,7 @@ class TestOrchestrationCalibrationTools(unittest.TestCase):
         with TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "ground_plane_calibration.json"
             with patch("agents.orchestration.tools.calibration.CALIBRATION_PATH", path):
-                result = orchestrationCalibration.get_ground_plane_calibration()
+                result = orchestration_calibration.get_ground_plane_calibration()
 
         self.assertFalse(result["available"])
         self.assertEqual(result["error"], "calibration_missing")
@@ -32,9 +32,9 @@ class TestOrchestrationCalibrationTools(unittest.TestCase):
         with TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "ground_plane_calibration.json"
             with patch("agents.orchestration.tools.calibration.CALIBRATION_PATH", path):
-                set_result = orchestrationCalibration.set_ground_plane_calibration(payload)
-                get_result = orchestrationCalibration.get_ground_plane_calibration()
-                validate_result = orchestrationCalibration.validate_ground_plane_calibration()
+                set_result = orchestration_calibration.set_ground_plane_calibration(payload)
+                get_result = orchestration_calibration.get_ground_plane_calibration()
+                validate_result = orchestration_calibration.validate_ground_plane_calibration()
 
         self.assertTrue(set_result["saved"])
         self.assertEqual(set_result["ground_coordinate_unit"], "meters")
@@ -45,7 +45,7 @@ class TestOrchestrationCalibrationTools(unittest.TestCase):
     def test_set_calibration_rejects_non_object(self) -> None:
         # Performs test set calibration rejects non object logic.
         with self.assertRaises(ValueError):
-            orchestrationCalibration.set_ground_plane_calibration([1, 2, 3])  # type: ignore[arg-type]
+            orchestration_calibration.set_ground_plane_calibration([1, 2, 3])  # type: ignore[arg-type]
 
     def test_validate_calibration_invalid_payload(self) -> None:
         # Performs test validate calibration invalid payload logic.
@@ -54,7 +54,7 @@ class TestOrchestrationCalibrationTools(unittest.TestCase):
             path.write_text(json.dumps({"matrix": [[1, 2], [3, 4]]}), encoding="utf-8")
 
             with patch("agents.orchestration.tools.calibration.CALIBRATION_PATH", path):
-                result = orchestrationCalibration.validate_ground_plane_calibration()
+                result = orchestration_calibration.validate_ground_plane_calibration()
 
         self.assertFalse(result["valid"])
         self.assertIn("error", result)
@@ -70,9 +70,9 @@ class TestOrchestrationCalibrationTools(unittest.TestCase):
         with TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "ground_plane_calibration.json"
             with patch("agents.orchestration.tools.calibration.CALIBRATION_PATH", path):
-                orchestrationCalibration.set_ground_plane_calibration(payload)
-                clear_result = orchestrationCalibration.clear_ground_plane_calibration()
-                get_result = orchestrationCalibration.get_ground_plane_calibration()
+                orchestration_calibration.set_ground_plane_calibration(payload)
+                clear_result = orchestration_calibration.clear_ground_plane_calibration()
+                get_result = orchestration_calibration.get_ground_plane_calibration()
 
         self.assertTrue(clear_result["cleared"])
         self.assertFalse(get_result["available"])

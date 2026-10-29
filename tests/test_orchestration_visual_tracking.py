@@ -4,7 +4,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from agents.tracking.tools import visual_tracking as orchestrationVisualTracking
+from agents.tracking.tools import visual_tracking as orchestration_visual_tracking
 from agents.contracts import VisualAssociationProposal
 from agents.tracking.agent_tracking import VisualTrackingAgentResult
 
@@ -58,7 +58,7 @@ class TestOrchestrationVisualTracking(unittest.TestCase):
         ]
 
         with patch("agents.tracking.tools.visual_tracking.LLMVisualTrackingAgent", FakeAgent):
-            result = orchestrationVisualTracking.simulate_visual_tracking_association(
+            result = orchestration_visual_tracking.simulate_visual_tracking_association(
                 detections=detections,
                 frame_reference="data:image/jpeg;base64,abc",
                 event_reasons=["possible_id_switch"],

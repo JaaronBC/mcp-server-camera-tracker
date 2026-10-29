@@ -6,7 +6,7 @@ from collections import deque
 from pathlib import Path
 from typing import Any
 
-from agents.components.dashboard_types import GroundPosition, RadarTrackSnapshot
+from agents.tracking.tracking_types import GroundPosition, RadarTrackSnapshot
 from agents.tracking.runtime_support import compute_relative_depth_coverage
 
 

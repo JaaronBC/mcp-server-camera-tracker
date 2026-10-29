@@ -7,7 +7,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from agents.orchestration.tools import metrics as orchestrationMetrics
+from agents.orchestration.tools import metrics as orchestration_metrics
 
 
 class TestOrchestrationMetrics(unittest.TestCase):
@@ -20,7 +20,7 @@ class TestOrchestrationMetrics(unittest.TestCase):
                 with patch("agents.orchestration.tools.metrics.RADAR_STATE_PATH", captures_dir / "latest_radar_state.json"):
                     with patch("agents.orchestration.tools.metrics.TRACKING_FRAME_PATH", captures_dir / "latest_tracking_frame.json"):
                         with patch("agents.orchestration.tools.metrics.time.time", return_value=100.0):
-                            result = orchestrationMetrics.dashboard_latency_continuity_metrics()
+                            result = orchestration_metrics.dashboard_latency_continuity_metrics()
 
         self.assertFalse(result["available"])
         self.assertIn("radar_state_missing", result["errors"])
@@ -58,7 +58,7 @@ class TestOrchestrationMetrics(unittest.TestCase):
                 with patch("agents.orchestration.tools.metrics.RADAR_STATE_PATH", radar_path):
                     with patch("agents.orchestration.tools.metrics.TRACKING_FRAME_PATH", tracking_path):
                         with patch("agents.orchestration.tools.metrics.time.time", return_value=100.0):
-                            result = orchestrationMetrics.dashboard_latency_continuity_metrics()
+                            result = orchestration_metrics.dashboard_latency_continuity_metrics()
 
         self.assertTrue(result["available"])
         self.assertEqual(result["counts"]["active_track_count"], 2)
@@ -99,7 +99,7 @@ class TestOrchestrationMetrics(unittest.TestCase):
                 with patch("agents.orchestration.tools.metrics.RADAR_STATE_PATH", captures_dir / "latest_radar_state.json"):
                     with patch("agents.orchestration.tools.metrics.TRACKING_FRAME_PATH", captures_dir / "latest_tracking_frame.json"):
                         with patch("agents.orchestration.tools.metrics.time.time", return_value=20.0):
-                            result = orchestrationMetrics.dashboard_latency_continuity_metrics()
+                            result = orchestration_metrics.dashboard_latency_continuity_metrics()
 
         continuity = result["continuity"]
         self.assertTrue(continuity["available"])
@@ -120,7 +120,7 @@ class TestOrchestrationMetrics(unittest.TestCase):
                         captures_dir / "radar_depth_coverage_history.jsonl",
                     ):
                         with patch("agents.orchestration.tools.metrics.time.time", return_value=100.0):
-                            result = orchestrationMetrics.dashboard_depth_coverage_metrics()
+                            result = orchestration_metrics.dashboard_depth_coverage_metrics()
 
         self.assertFalse(result["available"])
         self.assertIn("radar_state_missing", result["errors"])
@@ -184,7 +184,7 @@ class TestOrchestrationMetrics(unittest.TestCase):
                 with patch("agents.orchestration.tools.metrics.RADAR_STATE_PATH", radar_path):
                     with patch("agents.orchestration.tools.metrics.DEPTH_COVERAGE_HISTORY_PATH", history_path):
                         with patch("agents.orchestration.tools.metrics.time.time", return_value=100.0):
-                            result = orchestrationMetrics.dashboard_depth_coverage_metrics(sample_limit=10)
+                            result = orchestration_metrics.dashboard_depth_coverage_metrics(sample_limit=10)
 
         self.assertTrue(result["available"])
         self.assertEqual(result["latest_coverage"]["source"], "latest_radar_state")
@@ -221,7 +221,7 @@ class TestOrchestrationMetrics(unittest.TestCase):
                 with patch("agents.orchestration.tools.metrics.RADAR_STATE_PATH", radar_path):
                     with patch("agents.orchestration.tools.metrics.DEPTH_COVERAGE_HISTORY_PATH", history_path):
                         with patch("agents.orchestration.tools.metrics.time.time", return_value=60.0):
-                            result = orchestrationMetrics.dashboard_depth_coverage_metrics(sample_limit=10)
+                            result = orchestration_metrics.dashboard_depth_coverage_metrics(sample_limit=10)
 
         self.assertTrue(result["available"])
         self.assertEqual(result["latest_coverage"]["source"], "depth_coverage_history")
@@ -328,7 +328,7 @@ class TestOrchestrationMetrics(unittest.TestCase):
                         with patch("agents.orchestration.tools.metrics.DEPTH_COVERAGE_HISTORY_PATH", depth_history_path):
                             with patch("agents.orchestration.tools.metrics.time.time", return_value=100.0):
                                 with patch("agents.orchestration.tools.ops.AGENT_EVENTS_PATH", event_log_path):
-                                    result = orchestrationMetrics.dashboard_tracking_quality_report(
+                                    result = orchestration_metrics.dashboard_tracking_quality_report(
                                         event_window_size=10,
                                         depth_sample_limit=10,
                                     )
@@ -387,7 +387,7 @@ class TestOrchestrationMetrics(unittest.TestCase):
                         with patch("agents.orchestration.tools.metrics.DEPTH_COVERAGE_HISTORY_PATH", depth_history_path):
                             with patch("agents.orchestration.tools.metrics.time.time", return_value=100.0):
                                 with patch("agents.orchestration.tools.ops.AGENT_EVENTS_PATH", event_log_path):
-                                    result = orchestrationMetrics.dashboard_tracking_quality_report(
+                                    result = orchestration_metrics.dashboard_tracking_quality_report(
                                         event_window_size=10,
                                         depth_sample_limit=10,
                                     )

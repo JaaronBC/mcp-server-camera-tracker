@@ -4,7 +4,7 @@ from collections import deque
 from typing import Any, Callable
 
 from agents.contracts import DetectionCandidate, TrackingAgentObservation
-from agents.components.dashboard_types import GroundPosition, RadarTrackSnapshot
+from agents.tracking.tracking_types import GroundPosition, RadarTrackSnapshot
 
 DEFAULT_AGENT_GROUND_BLEND_FACTOR = 0.35
 DEFAULT_AGENT_GROUND_MAX_CORRECTION = 1.5

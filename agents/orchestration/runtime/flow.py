@@ -6,12 +6,12 @@ from typing import Any, Awaitable, Callable
 
 from mcp import ClientSession
 
-from . import app as runtimeApp
+from . import app as runtime_app
 
 
 async def start_runtime_services(
     session: ClientSession,
-    config: runtimeApp.RuntimeConfig,
+    config: runtime_app.RuntimeConfig,
     *,
     format_runtime_config_banner_fn: Callable[..., str],
     print_depth_coverage_startup_snapshot_fn: Callable[..., Awaitable[None]],
@@ -67,7 +67,7 @@ async def start_runtime_services(
 
 async def run_operator_loop(
     session: ClientSession,
-    config: runtimeApp.RuntimeConfig,
+    config: runtime_app.RuntimeConfig,
     *,
     monitor_movement_fn: Callable[..., Awaitable[None]],
 ) -> None:

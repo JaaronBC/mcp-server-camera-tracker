@@ -3,10 +3,11 @@ from __future__ import annotations
 from collections import deque
 from typing import Any
 
-from agents.components.calibration import GroundPlaneCalibration, map_image_to_ground
-from agents.components.dashboard_types import GroundPosition, Observation, PixelPosition, RadarTrackSnapshot
-from agents.components.geometry import image_to_relative_ground
+from agents.tracking.calibration import GroundPlaneCalibration, map_image_to_ground
+from agents.tracking.geometry import image_to_relative_ground
 from agents.contracts import BoundingBox, DetectionCandidate
+from agents.observation.observation_types import Observation
+from agents.tracking.tracking_types import GroundPosition, PixelPosition, RadarTrackSnapshot
 from agents.tracking.runtime_support import (
     build_tracking_detection_id,
     estimate_relative_depth_from_image_geometry,

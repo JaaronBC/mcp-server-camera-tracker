@@ -8,20 +8,20 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import AsyncMock, patch
 
-from agents.reasoning.tools import _shared as orchestrationReasoning
+from agents.reasoning.tools import _shared as orchestration_reasoning
 
 
 class TestOrchestrationReasoning(unittest.TestCase):
     def tearDown(self) -> None:
         # Performs tearDown logic.
-        orchestrationReasoning._reset_reasoning_state()
+        orchestration_reasoning._reset_reasoning_state()
 
     def test_reasoning_returns_unavailable_when_no_radar_state(self) -> None:
         # Performs test reasoning returns unavailable when no radar state logic.
         with TemporaryDirectory() as temp_dir:
             missing_path = Path(temp_dir) / "latest_radar_state.json"
             with patch("agents.reasoning.tools._shared.RADAR_STATE_PATH", missing_path):
-                result = orchestrationReasoning.simulate_reasoning_assessment("track-1")
+                result = orchestration_reasoning.simulate_reasoning_assessment("track-1")
 
         self.assertFalse(result["available"])
         self.assertEqual(result["error"], "radar_state_unavailable")
@@ -31,7 +31,7 @@ class TestOrchestrationReasoning(unittest.TestCase):
         with TemporaryDirectory() as temp_dir:
             missing_path = Path(temp_dir) / "latest_radar_state.json"
             with patch("agents.reasoning.tools._shared.RADAR_STATE_PATH", missing_path):
-                result = orchestrationReasoning.simulate_observation_summary("track-1")
+                result = orchestration_reasoning.simulate_observation_summary("track-1")
 
         self.assertFalse(result["available"])
         self.assertEqual(result["error"], "radar_state_unavailable")
@@ -62,7 +62,7 @@ class TestOrchestrationReasoning(unittest.TestCase):
             ):
                 with patch("agents.reasoning.tools._shared.RADAR_STATE_PATH", radar_path):
                     with patch("agents.reasoning.tools._shared.time.time", return_value=1005.0):
-                        result = orchestrationReasoning.simulate_reasoning_assessment("track-1")
+                        result = orchestration_reasoning.simulate_reasoning_assessment("track-1")
 
         self.assertFalse(result["available"])
         self.assertEqual(result["error"], "radar_state_stale")
@@ -95,7 +95,7 @@ class TestOrchestrationReasoning(unittest.TestCase):
             ):
                 with patch("agents.reasoning.tools._shared.RADAR_STATE_PATH", radar_path):
                     with patch("agents.reasoning.tools._shared.time.time", return_value=2003.0):
-                        result = orchestrationReasoning.simulate_evidence_request("track-1", "need_more")
+                        result = orchestration_reasoning.simulate_evidence_request("track-1", "need_more")
 
         self.assertFalse(result["available"])
         self.assertEqual(result["error"], "radar_state_stale")
@@ -167,7 +167,7 @@ class TestOrchestrationReasoning(unittest.TestCase):
                             },
                         ),
                     ):
-                        result = orchestrationReasoning.simulate_reasoning_assessment("track-1")
+                        result = orchestration_reasoning.simulate_reasoning_assessment("track-1")
 
         self.assertTrue(result["available"])
         self.assertEqual(result["assessment"]["assessment_label"], "requires_more_observation")
@@ -239,7 +239,7 @@ class TestOrchestrationReasoning(unittest.TestCase):
                             {"status": "ok", "model": "gpt-oss-120b", "latency_ms": 10.0, "error": None, "attempts": 1},
                         ),
                     ):
-                        orchestrationReasoning.simulate_reasoning_assessment("track-1")
+                        orchestration_reasoning.simulate_reasoning_assessment("track-1")
 
                 radar_path.write_text(json.dumps(second_payload), encoding="utf-8")
                 with patch(
@@ -277,7 +277,7 @@ class TestOrchestrationReasoning(unittest.TestCase):
                             {"status": "ok", "model": "gpt-oss-120b", "latency_ms": 13.0, "error": None, "attempts": 1},
                         ),
                     ):
-                        result = orchestrationReasoning.simulate_reasoning_assessment("track-1")
+                        result = orchestration_reasoning.simulate_reasoning_assessment("track-1")
 
         self.assertTrue(result["available"])
         self.assertEqual(result["assessment"]["assessment_label"], "requires_review")
@@ -328,7 +328,7 @@ class TestOrchestrationReasoning(unittest.TestCase):
                         {"status": "ok", "model": "gpt-oss-120b", "latency_ms": 8.0, "error": None, "attempts": 1},
                     ),
                 ):
-                    orchestrationReasoning.simulate_observation_summary("track-1")
+                    orchestration_reasoning.simulate_observation_summary("track-1")
 
                 radar_path.write_text(json.dumps(second_payload), encoding="utf-8")
                 with patch(
@@ -347,7 +347,7 @@ class TestOrchestrationReasoning(unittest.TestCase):
                         {"status": "ok", "model": "gpt-oss-120b", "latency_ms": 9.0, "error": None, "attempts": 1},
                     ),
                 ):
-                    result = orchestrationReasoning.simulate_observation_summary("track-1")
+                    result = orchestration_reasoning.simulate_observation_summary("track-1")
 
         self.assertTrue(result["available"])
         summary = result["summary"]
@@ -387,7 +387,7 @@ class TestOrchestrationReasoning(unittest.TestCase):
                         {"status": "error", "model": "gpt-oss-120b", "latency_ms": 15.0, "error": "timeout", "attempts": 2},
                     ),
                 ):
-                    result = orchestrationReasoning.simulate_observation_summary("track-1")
+                    result = orchestration_reasoning.simulate_observation_summary("track-1")
 
         self.assertTrue(result["available"])
         self.assertFalse(result["summary"]["llm_available"])
@@ -440,7 +440,7 @@ class TestOrchestrationReasoning(unittest.TestCase):
                             {"status": "error", "model": "gpt-oss-120b", "latency_ms": 16.0, "error": "timeout", "attempts": 2},
                         ),
                     ):
-                        result = orchestrationReasoning.simulate_reasoning_assessment("track-1")
+                        result = orchestration_reasoning.simulate_reasoning_assessment("track-1")
 
         self.assertTrue(result["available"])
         self.assertFalse(result["assessment"]["llm_available"])
@@ -451,7 +451,7 @@ class TestOrchestrationReasoning(unittest.TestCase):
         with TemporaryDirectory() as temp_dir:
             missing_path = Path(temp_dir) / "latest_radar_state.json"
             with patch("agents.reasoning.tools._shared.RADAR_STATE_PATH", missing_path):
-                result = orchestrationReasoning.simulate_evidence_request(
+                result = orchestration_reasoning.simulate_evidence_request(
                     "track-1",
                     "need_more_observations",
                 )
@@ -480,7 +480,7 @@ class TestOrchestrationReasoning(unittest.TestCase):
             with patch("agents.reasoning.tools._shared.RADAR_STATE_PATH", radar_path):
                 requests = []
                 for index in range(4):
-                    response = orchestrationReasoning.simulate_evidence_request(
+                    response = orchestration_reasoning.simulate_evidence_request(
                         "track-1",
                         f"reason-{index}",
                     )
@@ -519,7 +519,7 @@ class TestOrchestrationReasoning(unittest.TestCase):
                 "agents.observation.agent_observation.invoke_llm_json_response",
                 new=AsyncMock(return_value=expected_payload),
             ) as invoke_mock:
-                payload, meta = orchestrationReasoning._call_observation_agent_with_retry(
+                payload, meta = orchestration_reasoning._call_observation_agent_with_retry(
                     {"track_id": "track-1"}
                 )
 
@@ -562,7 +562,7 @@ class TestOrchestrationReasoning(unittest.TestCase):
                 "agents.reasoning.agent_reasoning.invoke_llm_json_response",
                 new=AsyncMock(side_effect=[RuntimeError("transient"), expected_payload]),
             ) as invoke_mock:
-                payload, meta = orchestrationReasoning._call_reasoning_agent_with_retry(
+                payload, meta = orchestration_reasoning._call_reasoning_agent_with_retry(
                     {"track_id": "track-1"}
                 )
 
@@ -591,7 +591,7 @@ class TestOrchestrationReasoning(unittest.TestCase):
             "request_more_observations": True,
         }
 
-        assessment, request_more = orchestrationReasoning._validate_reasoning_llm_payload(
+        assessment, request_more = orchestration_reasoning._validate_reasoning_llm_payload(
             payload,
             track_id="track-1",
             created_at=1.23,
@@ -617,7 +617,7 @@ class TestOrchestrationReasoning(unittest.TestCase):
                 new=AsyncMock(side_effect=[RuntimeError("llm_invalid_json_response")] * 3),
             ) as invoke_mock:
                 with patch("agents.observation.agent_observation.time.sleep") as sleep_mock:
-                    payload, meta = orchestrationReasoning._call_observation_agent_with_retry(
+                    payload, meta = orchestration_reasoning._call_observation_agent_with_retry(
                         {"track_id": "track-1"}
                     )
 
@@ -644,7 +644,7 @@ class TestOrchestrationReasoning(unittest.TestCase):
                 "agents.reasoning.agent_reasoning.invoke_llm_json_response",
                 new=AsyncMock(side_effect=TimeoutError("request timeout")),
             ):
-                payload, meta = orchestrationReasoning._call_reasoning_agent_with_retry(
+                payload, meta = orchestration_reasoning._call_reasoning_agent_with_retry(
                     {"track_id": "track-1"}
                 )
 
@@ -705,7 +705,7 @@ class TestOrchestrationReasoning(unittest.TestCase):
                         with patch(
                             "agents.reasoning.tools._shared._call_reasoning_agent_with_retry"
                         ) as reasoning_mock:
-                            result = orchestrationReasoning.simulate_reasoning_assessment("track-1")
+                            result = orchestration_reasoning.simulate_reasoning_assessment("track-1")
 
         self.assertTrue(result["available"])
         self.assertFalse(result["assessment"]["llm_available"])
@@ -726,7 +726,7 @@ class TestOrchestrationReasoning(unittest.TestCase):
             {"observation_id": "obs-2"},
         ]
 
-        payload, meta = orchestrationReasoning._build_reasoning_handoff_payload(
+        payload, meta = orchestration_reasoning._build_reasoning_handoff_payload(
             track_id="track-1",
             created_at=123.0,
             summary=summary,
@@ -816,7 +816,7 @@ class TestOrchestrationReasoning(unittest.TestCase):
                     "agents.reasoning.tools._shared._call_observation_agent_with_retry",
                     side_effect=_capture_observation_payload,
                 ):
-                    orchestrationReasoning.simulate_observation_summary("track-1")
+                    orchestration_reasoning.simulate_observation_summary("track-1")
 
         self.assertEqual(len(captured_payloads), 1)
         payload = captured_payloads[0]
@@ -948,7 +948,7 @@ class TestOrchestrationReasoning(unittest.TestCase):
                         "agents.reasoning.tools._shared._call_reasoning_agent_with_retry",
                         side_effect=_capture_reasoning_payload,
                     ):
-                        orchestrationReasoning.simulate_reasoning_assessment("track-1")
+                        orchestration_reasoning.simulate_reasoning_assessment("track-1")
 
         self.assertEqual(len(captured_reasoning_inputs), 1)
         reasoning_input = captured_reasoning_inputs[0]
@@ -991,7 +991,7 @@ class TestOrchestrationReasoning(unittest.TestCase):
             ]
         }
 
-        snapshot = orchestrationReasoning._extract_latest_track_snapshot(radar_state, "track-1")
+        snapshot = orchestration_reasoning._extract_latest_track_snapshot(radar_state, "track-1")
 
         self.assertTrue(snapshot["available"])
         self.assertEqual(snapshot["position_kind"], "relative_ground_estimate")
@@ -1013,7 +1013,7 @@ class TestOrchestrationReasoning(unittest.TestCase):
             ]
         }
 
-        snapshot = orchestrationReasoning._extract_latest_track_snapshot(radar_state, "track-1")
+        snapshot = orchestration_reasoning._extract_latest_track_snapshot(radar_state, "track-1")
 
         self.assertTrue(snapshot["available"])
         self.assertEqual(snapshot["position_kind"], "relative_ground_estimate")

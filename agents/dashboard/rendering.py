@@ -7,8 +7,8 @@ from pathlib import Path
 
 import cv2
 
-from agents.components.dashboard_types import RadarTrackSnapshot
-from agents.components.geometry import ground_to_radar_screen
+from agents.tracking.geometry import ground_to_radar_screen
+from agents.tracking.tracking_types import RadarTrackSnapshot
 from agents.tracking.runtime_support import build_relative_depth_coverage_text, compute_relative_depth_coverage
 
 from .config import (

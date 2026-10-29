@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from agents.components.calibration import load_ground_plane_calibration
+from agents.tracking.calibration import load_ground_plane_calibration
 
 from ...registry import mcp
 

@@ -7,7 +7,7 @@ from typing import Any, Awaitable, Callable
 
 from openai import AsyncOpenAI
 
-from .. import llm_common
+from .. import llm_call
 
 DEFAULT_OPENAI_BASE_URL = "https://128.171.10.83:9443/v1"
 DEFAULT_OBSERVATION_AGENT_MODEL = "gpt-oss-120b"
@@ -23,46 +23,46 @@ DEFAULT_OBSERVATION_SYSTEM_PROMPT = (
 
 
 def _resolve_model(env_name: str = "OBSERVATION_AGENT_MODEL", default_model: str = DEFAULT_OBSERVATION_AGENT_MODEL) -> str:
-    return llm_common.resolve_model(env_name, default_model)
+    return llm_call.resolve_model(env_name, default_model)
 
 
 def _resolve_timeout_seconds() -> float:
-    return llm_common.resolve_timeout_seconds(DEFAULT_LLM_TIMEOUT_SECONDS)
+    return llm_call.resolve_timeout_seconds(DEFAULT_LLM_TIMEOUT_SECONDS)
 
 
 def _resolve_retry_limit() -> int:
-    return llm_common.resolve_retry_limit(DEFAULT_LLM_RETRY_LIMIT)
+    return llm_call.resolve_retry_limit(DEFAULT_LLM_RETRY_LIMIT)
 
 
 def _resolve_retry_backoff_seconds() -> float:
-    return llm_common.resolve_retry_backoff_seconds(DEFAULT_LLM_RETRY_BACKOFF_SECONDS)
+    return llm_call.resolve_retry_backoff_seconds(DEFAULT_LLM_RETRY_BACKOFF_SECONDS)
 
 
 def _classify_llm_error(error: Exception) -> str:
-    return llm_common.classify_llm_error(error)
+    return llm_call.classify_llm_error(error)
 
 
 def _create_openai_client() -> AsyncOpenAI:
-    return llm_common.create_openai_client(DEFAULT_OPENAI_BASE_URL)
+    return llm_call.create_openai_client(DEFAULT_OPENAI_BASE_URL)
 
 
 def _extract_json_object(raw_text: str) -> dict[str, Any] | None:
-    payload = llm_common.extract_json_object(raw_text)
+    payload = llm_call.extract_json_object(raw_text)
     if isinstance(payload, dict):
         return payload
     return None
 
 
 def _coerce_str_list(value: Any) -> list[str]:
-    return llm_common.coerce_str_list(value)
+    return llm_call.coerce_str_list(value)
 
 
 def _coerce_bool(value: Any, default: bool = False) -> bool:
-    return llm_common.coerce_bool(value, default)
+    return llm_call.coerce_bool(value, default)
 
 
 def _coerce_str(value: Any, default: str) -> str:
-    return llm_common.coerce_str(value, default)
+    return llm_call.coerce_str(value, default)
 
 
 def normalize_track_coordinate_metadata(snapshot: dict[str, Any]) -> dict[str, Any]:

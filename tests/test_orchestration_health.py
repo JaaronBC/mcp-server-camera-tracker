@@ -7,14 +7,14 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from agents.orchestration.tools import health as orchestrationHealth
+from agents.orchestration.tools import health as orchestration_health
 
 
 class TestOrchestrationHealth(unittest.TestCase):
     def test_parse_radar_state_with_explicit_count(self) -> None:
         # Performs test parse radar state with explicit count logic.
         with patch("agents.orchestration.tools.health.time.time", return_value=100.0):
-            result = orchestrationHealth._parse_radar_state(
+            result = orchestration_health._parse_radar_state(
                 {
                     "timestamp": 98.0,
                     "coordinate_system": "relative_image_plane",
@@ -33,7 +33,7 @@ class TestOrchestrationHealth(unittest.TestCase):
     def test_parse_radar_state_falls_back_to_tracks_length(self) -> None:
         # Performs test parse radar state falls back to tracks length logic.
         with patch("agents.orchestration.tools.health.time.time", return_value=200.0):
-            result = orchestrationHealth._parse_radar_state(
+            result = orchestration_health._parse_radar_state(
                 {
                     "timestamp": 190.0,
                     "tracks": [{"id": 1}, {"id": 2}],
@@ -50,7 +50,7 @@ class TestOrchestrationHealth(unittest.TestCase):
         with TemporaryDirectory() as temp_dir:
             fake_path = Path(temp_dir) / "missing.json"
             with patch("agents.orchestration.tools.health.RADAR_STATE_PATH", fake_path):
-                result = orchestrationHealth.dashboard_health_status()
+                result = orchestration_health.dashboard_health_status()
 
         self.assertFalse(result["available"])
         self.assertEqual(result["error"], "radar_state_missing")
@@ -61,7 +61,7 @@ class TestOrchestrationHealth(unittest.TestCase):
             fake_path = Path(temp_dir) / "bad.json"
             fake_path.write_text("not-json", encoding="utf-8")
             with patch("agents.orchestration.tools.health.RADAR_STATE_PATH", fake_path):
-                result = orchestrationHealth.dashboard_health_status()
+                result = orchestration_health.dashboard_health_status()
 
         self.assertFalse(result["available"])
         self.assertEqual(result["error"], "radar_state_invalid_json")
@@ -87,7 +87,7 @@ class TestOrchestrationHealth(unittest.TestCase):
 
             with patch("agents.orchestration.tools.health.RADAR_STATE_PATH", fake_path):
                 with patch("agents.orchestration.tools.health.time.time", return_value=1003.0):
-                    result = orchestrationHealth.dashboard_health_status()
+                    result = orchestration_health.dashboard_health_status()
 
         self.assertTrue(result["available"])
         self.assertEqual(result["mapping_mode"], "simulation_fallback")
@@ -102,7 +102,7 @@ class TestOrchestrationHealth(unittest.TestCase):
             "last_observation_age_seconds": 0.2,
         }
 
-        result = orchestrationHealth.wait_for_dashboard_ready(
+        result = orchestration_health.wait_for_dashboard_ready(
             timeout_seconds=1.0,
             max_observation_age_seconds=1.0,
             poll_interval_seconds=0.1,
@@ -125,7 +125,7 @@ class TestOrchestrationHealth(unittest.TestCase):
             {"available": True, "last_observation_age_seconds": 0.4},
         ]
 
-        result = orchestrationHealth.wait_for_dashboard_ready(
+        result = orchestration_health.wait_for_dashboard_ready(
             timeout_seconds=2.0,
             max_observation_age_seconds=1.0,
             poll_interval_seconds=0.01,
@@ -149,7 +149,7 @@ class TestOrchestrationHealth(unittest.TestCase):
         }
 
         with patch("agents.orchestration.tools.health.time.time", side_effect=[0.0, 0.0, 0.05, 0.1, 0.11]):
-            result = orchestrationHealth.wait_for_dashboard_ready(
+            result = orchestration_health.wait_for_dashboard_ready(
                 timeout_seconds=0.1,
                 max_observation_age_seconds=1.0,
                 poll_interval_seconds=0.05,
@@ -162,11 +162,11 @@ class TestOrchestrationHealth(unittest.TestCase):
     def test_wait_for_dashboard_ready_invalid_arguments(self) -> None:
         # Performs test wait for dashboard ready invalid arguments logic.
         with self.assertRaises(ValueError):
-            orchestrationHealth.wait_for_dashboard_ready(timeout_seconds=0)
+            orchestration_health.wait_for_dashboard_ready(timeout_seconds=0)
         with self.assertRaises(ValueError):
-            orchestrationHealth.wait_for_dashboard_ready(max_observation_age_seconds=-1)
+            orchestration_health.wait_for_dashboard_ready(max_observation_age_seconds=-1)
         with self.assertRaises(ValueError):
-            orchestrationHealth.wait_for_dashboard_ready(poll_interval_seconds=0)
+            orchestration_health.wait_for_dashboard_ready(poll_interval_seconds=0)
 
     def test_verify_dashboard_pipeline_contract_passes_for_fresh_valid_payload(self) -> None:
         # Performs test verify dashboard pipeline contract passes for fresh valid payload logic.
@@ -197,7 +197,7 @@ class TestOrchestrationHealth(unittest.TestCase):
 
             with patch("agents.orchestration.tools.health.RADAR_STATE_PATH", fake_path):
                 with patch("agents.orchestration.tools.health.time.time", return_value=1002.0):
-                    result = orchestrationHealth.verify_dashboard_pipeline_contract()
+                    result = orchestration_health.verify_dashboard_pipeline_contract()
 
         self.assertTrue(result["available"])
         self.assertTrue(result["ready"])
@@ -220,7 +220,7 @@ class TestOrchestrationHealth(unittest.TestCase):
 
             with patch("agents.orchestration.tools.health.RADAR_STATE_PATH", fake_path):
                 with patch("agents.orchestration.tools.health.time.time", return_value=1005.0):
-                    result = orchestrationHealth.verify_dashboard_pipeline_contract(
+                    result = orchestration_health.verify_dashboard_pipeline_contract(
                         max_observation_age_seconds=3.0,
                     )
 
@@ -254,7 +254,7 @@ class TestOrchestrationHealth(unittest.TestCase):
 
             with patch("agents.orchestration.tools.health.RADAR_STATE_PATH", fake_path):
                 with patch("agents.orchestration.tools.health.time.time", return_value=1000.5):
-                    result = orchestrationHealth.verify_dashboard_pipeline_contract()
+                    result = orchestration_health.verify_dashboard_pipeline_contract()
 
         self.assertTrue(result["available"])
         self.assertFalse(result["ready"])
@@ -287,10 +287,10 @@ class TestOrchestrationHealth(unittest.TestCase):
 
             with patch("agents.orchestration.tools.health.RADAR_STATE_PATH", fake_path):
                 with patch("agents.orchestration.tools.health.time.time", return_value=1000.5):
-                    warn_result = orchestrationHealth.verify_dashboard_pipeline_contract(
+                    warn_result = orchestration_health.verify_dashboard_pipeline_contract(
                         require_live_pipeline=False,
                     )
-                    error_result = orchestrationHealth.verify_dashboard_pipeline_contract(
+                    error_result = orchestration_health.verify_dashboard_pipeline_contract(
                         require_live_pipeline=True,
                     )
 

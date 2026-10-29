@@ -1,11 +1,9 @@
-# Handles geometry behavior.
 from __future__ import annotations
 
 import math
 
 
 def _clamp(value: float, lower: float, upper: float) -> float:
-    # Performs clamp logic.
     if value < lower:
         return lower
     if value > upper:
@@ -21,7 +19,6 @@ def image_to_relative_ground(
     max_ground_x: float = 10.0,
     max_ground_z: float = 20.0,
 ) -> tuple[float, float]:
-    # Performs image to relative ground logic.
     if frame_width <= 0 or frame_height <= 0:
         raise ValueError("frame dimensions must be positive")
     if max_ground_x <= 0 or max_ground_z <= 0:
@@ -47,7 +44,6 @@ def ground_to_radar_screen(
     max_ground_z: float = 20.0,
     margin: int = 40,
 ) -> tuple[int, int]:
-    # Performs ground to radar screen logic.
     if panel_width <= 2 * margin or panel_height <= 2 * margin:
         raise ValueError("radar panel is too small for requested margin")
     if max_ground_x <= 0 or max_ground_z <= 0:
@@ -70,5 +66,4 @@ def ground_to_radar_screen(
 
 
 def planar_distance(first: tuple[float, float], second: tuple[float, float]) -> float:
-    # Performs planar distance logic.
     return math.hypot(second[0] - first[0], second[1] - first[1])

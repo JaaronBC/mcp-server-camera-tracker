@@ -4,7 +4,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from agents.orchestration.tools import control as orchestrationControl
+from agents.orchestration.tools import control as orchestration_control
 
 
 class TestOrchestrationControl(unittest.TestCase):
@@ -23,7 +23,7 @@ class TestOrchestrationControl(unittest.TestCase):
             "status": {"available": True},
         }
 
-        result = orchestrationControl.start_dashboard_and_wait_ready(
+        result = orchestration_control.start_dashboard_and_wait_ready(
             timeout_seconds=5.0,
             max_observation_age_seconds=2.0,
             poll_interval_seconds=0.1,
@@ -55,7 +55,7 @@ class TestOrchestrationControl(unittest.TestCase):
             "status": {"available": False, "error": "radar_state_missing"},
         }
 
-        result = orchestrationControl.start_dashboard_and_wait_ready(
+        result = orchestration_control.start_dashboard_and_wait_ready(
             timeout_seconds=1.0,
             max_observation_age_seconds=0.5,
             poll_interval_seconds=0.1,
@@ -79,7 +79,7 @@ class TestOrchestrationControl(unittest.TestCase):
             {"running": False, "pid": 10, "return_code": 0},
         ]
 
-        result = orchestrationControl.stop_dashboard_and_confirm(
+        result = orchestration_control.stop_dashboard_and_confirm(
             force=False,
             timeout_seconds=1.0,
             poll_interval_seconds=0.01,
@@ -104,7 +104,7 @@ class TestOrchestrationControl(unittest.TestCase):
         mock_status.return_value = {"running": True, "pid": 10, "return_code": None}
         mock_time.side_effect = [0.0, 0.0, 0.05, 0.11]
 
-        result = orchestrationControl.stop_dashboard_and_confirm(
+        result = orchestration_control.stop_dashboard_and_confirm(
             force=True,
             timeout_seconds=0.1,
             poll_interval_seconds=0.05,
@@ -118,9 +118,9 @@ class TestOrchestrationControl(unittest.TestCase):
     def test_stop_dashboard_and_confirm_invalid_arguments(self) -> None:
         # Performs test stop dashboard and confirm invalid arguments logic.
         with self.assertRaises(ValueError):
-            orchestrationControl.stop_dashboard_and_confirm(timeout_seconds=0)
+            orchestration_control.stop_dashboard_and_confirm(timeout_seconds=0)
         with self.assertRaises(ValueError):
-            orchestrationControl.stop_dashboard_and_confirm(poll_interval_seconds=0)
+            orchestration_control.stop_dashboard_and_confirm(poll_interval_seconds=0)
 
     @patch("agents.orchestration.tools.control.start_dashboard_and_wait_ready")
     @patch("agents.orchestration.tools.control.stop_dashboard_and_confirm")
@@ -142,7 +142,7 @@ class TestOrchestrationControl(unittest.TestCase):
             "readiness": {"ready": True, "attempts": 2},
         }
 
-        result = orchestrationControl.restart_dashboard_and_wait_ready(
+        result = orchestration_control.restart_dashboard_and_wait_ready(
             force_stop=False,
             stop_timeout_seconds=4.0,
             start_timeout_seconds=8.0,
@@ -169,7 +169,7 @@ class TestOrchestrationControl(unittest.TestCase):
             "status": {"running": True},
         }
 
-        result = orchestrationControl.restart_dashboard_and_wait_ready()
+        result = orchestration_control.restart_dashboard_and_wait_ready()
 
         self.assertFalse(result["restarted"])
         self.assertIsNone(result["start"])
@@ -201,7 +201,7 @@ class TestOrchestrationControl(unittest.TestCase):
             "ground_coordinate_unit": "meters",
         }
 
-        result = orchestrationControl.dashboard_lifecycle_status(max_observation_age_seconds=1.0)
+        result = orchestration_control.dashboard_lifecycle_status(max_observation_age_seconds=1.0)
 
         self.assertTrue(result["ready"])
         self.assertTrue(result["running"])
@@ -232,7 +232,7 @@ class TestOrchestrationControl(unittest.TestCase):
             "error": "calibration_missing",
         }
 
-        result = orchestrationControl.dashboard_lifecycle_status(max_observation_age_seconds=1.0)
+        result = orchestration_control.dashboard_lifecycle_status(max_observation_age_seconds=1.0)
 
         self.assertFalse(result["ready"])
         self.assertTrue(result["running"])
@@ -242,7 +242,7 @@ class TestOrchestrationControl(unittest.TestCase):
     def test_dashboard_lifecycle_status_invalid_arguments(self) -> None:
         # Performs test orchestration lifecycle status invalid arguments logic.
         with self.assertRaises(ValueError):
-            orchestrationControl.dashboard_lifecycle_status(max_observation_age_seconds=-0.1)
+            orchestration_control.dashboard_lifecycle_status(max_observation_age_seconds=-0.1)
 
     @patch("agents.orchestration.tools.control.dashboard_lifecycle_status")
     @patch("agents.orchestration.tools.control.start_dashboard_and_wait_ready")
@@ -269,7 +269,7 @@ class TestOrchestrationControl(unittest.TestCase):
             "running": True,
         }
 
-        result = orchestrationControl.dashboard_bootstrap(
+        result = orchestration_control.dashboard_bootstrap(
             calibration={
                 "image_points": [[0, 0], [100, 0], [100, 100], [0, 100]],
                 "ground_points": [[0, 0], [10, 0], [10, 20], [0, 20]],
@@ -307,7 +307,7 @@ class TestOrchestrationControl(unittest.TestCase):
             "running": True,
         }
 
-        result = orchestrationControl.dashboard_bootstrap(
+        result = orchestration_control.dashboard_bootstrap(
             restart_if_running=True,
             force_stop=True,
             stop_timeout_seconds=2.0,

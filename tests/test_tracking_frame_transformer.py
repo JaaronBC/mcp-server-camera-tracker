@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 
-from agents.components.calibration import GroundPlaneCalibration
+from agents.tracking.calibration import GroundPlaneCalibration
 from agents.tracking.frame_transformer import build_tracking_frame_outputs
 
 

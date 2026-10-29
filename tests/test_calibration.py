@@ -6,7 +6,7 @@ from tempfile import TemporaryDirectory
 
 import numpy as np
 
-from agents.components.calibration import (
+from agents.tracking.calibration import (
     compute_homography,
     load_ground_plane_calibration,
     map_image_to_ground,

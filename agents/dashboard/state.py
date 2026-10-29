@@ -3,7 +3,7 @@ from __future__ import annotations
 import threading
 from collections import deque
 
-from agents.components.dashboard_types import RadarTrackSnapshot
+from agents.tracking.tracking_types import RadarTrackSnapshot
 
 
 class SharedDashboardState:

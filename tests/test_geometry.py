@@ -1,7 +1,7 @@
 # Handles test geometry behavior.
 import unittest
 
-from agents.components.geometry import ground_to_radar_screen, image_to_relative_ground
+from agents.tracking.geometry import ground_to_radar_screen, image_to_relative_ground
 
 
 class TestGeometryMappings(unittest.TestCase):

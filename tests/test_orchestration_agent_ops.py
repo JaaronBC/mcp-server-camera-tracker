@@ -7,14 +7,14 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from agents.orchestration.tools import ops as orchestrationAgentOps
-from agents.reasoning.tools import _shared as orchestrationReasoning
+from agents.orchestration.tools import ops as orchestration_agent_ops
+from agents.reasoning.tools import _shared as orchestration_reasoning
 
 
 class TestOrchestrationAgentOps(unittest.TestCase):
     def tearDown(self) -> None:
         # Performs tearDown logic.
-        orchestrationReasoning._reset_reasoning_state()
+        orchestration_reasoning._reset_reasoning_state()
 
     def test_run_reasoning_cycle_and_log_missing_radar_state(self) -> None:
         # Performs test run reasoning cycle and log missing radar state logic.
@@ -24,7 +24,7 @@ class TestOrchestrationAgentOps(unittest.TestCase):
 
             with patch("agents.reasoning.tools._shared.RADAR_STATE_PATH", missing_radar):
                 with patch("agents.orchestration.tools.ops.AGENT_EVENTS_PATH", events_path):
-                    result = orchestrationAgentOps.run_reasoning_cycle_and_log()
+                    result = orchestration_agent_ops.run_reasoning_cycle_and_log()
 
         self.assertFalse(result["available"])
         self.assertEqual(result["error"], "radar_state_unavailable")
@@ -114,7 +114,7 @@ class TestOrchestrationAgentOps(unittest.TestCase):
                             "error": None,
                         },
                     ):
-                        result = orchestrationAgentOps.run_reasoning_cycle_and_log(max_tracks=1)
+                        result = orchestration_agent_ops.run_reasoning_cycle_and_log(max_tracks=1)
 
                     self.assertTrue(events_path.is_file())
                     lines = events_path.read_text(encoding="utf-8").splitlines()
@@ -199,7 +199,7 @@ class TestOrchestrationAgentOps(unittest.TestCase):
                         "agents.orchestration.tools.ops._append_event",
                         side_effect=OSError("disk full"),
                     ):
-                        result = orchestrationAgentOps.run_reasoning_cycle_and_log(max_tracks=1)
+                        result = orchestration_agent_ops.run_reasoning_cycle_and_log(max_tracks=1)
 
         self.assertTrue(result["available"])
         self.assertEqual(result["cycle"]["success_count"], 1)
@@ -267,7 +267,7 @@ class TestOrchestrationAgentOps(unittest.TestCase):
                             "error": None,
                         },
                     ):
-                        result = orchestrationAgentOps.run_reasoning_cycle_and_log(max_tracks=1)
+                        result = orchestration_agent_ops.run_reasoning_cycle_and_log(max_tracks=1)
 
         self.assertTrue(result["available"])
         self.assertEqual(len(result["events"]), 1)
@@ -340,7 +340,7 @@ class TestOrchestrationAgentOps(unittest.TestCase):
                         "error": "radar_state_stale",
                     },
                 ):
-                    result = orchestrationAgentOps.run_reasoning_cycle_and_log(max_tracks=1)
+                    result = orchestration_agent_ops.run_reasoning_cycle_and_log(max_tracks=1)
 
         self.assertTrue(result["available"])
         self.assertEqual(len(result["events"]), 1)
@@ -389,7 +389,7 @@ class TestOrchestrationAgentOps(unittest.TestCase):
             )
 
             with patch("agents.orchestration.tools.ops.AGENT_EVENTS_PATH", events_path):
-                result = orchestrationAgentOps.get_recent_agent_events(limit=10)
+                result = orchestration_agent_ops.get_recent_agent_events(limit=10)
 
         self.assertTrue(result["available"])
         self.assertEqual(result["returned_events"], 2)
@@ -400,16 +400,16 @@ class TestOrchestrationAgentOps(unittest.TestCase):
     def test_invalid_limits_raise(self) -> None:
         # Performs test invalid limits raise logic.
         with self.assertRaises(ValueError):
-            orchestrationAgentOps.get_recent_agent_events(limit=0)
+            orchestration_agent_ops.get_recent_agent_events(limit=0)
         with self.assertRaises(ValueError):
-            orchestrationAgentOps.run_reasoning_cycle_and_log(max_tracks=0)
+            orchestration_agent_ops.run_reasoning_cycle_and_log(max_tracks=0)
 
     def test_summarize_agent_event_health_missing_file(self) -> None:
         # Performs test summarize agent event health missing file logic.
         with TemporaryDirectory() as temp_dir:
             events_path = Path(temp_dir) / "agent_events.jsonl"
             with patch("agents.orchestration.tools.ops.AGENT_EVENTS_PATH", events_path):
-                result = orchestrationAgentOps.summarize_agent_event_health(window_size=10)
+                result = orchestration_agent_ops.summarize_agent_event_health(window_size=10)
 
         self.assertFalse(result["available"])
         self.assertEqual(result["error"], "agent_events_missing")
@@ -473,7 +473,7 @@ class TestOrchestrationAgentOps(unittest.TestCase):
 
             with patch("agents.orchestration.tools.ops.AGENT_EVENTS_PATH", events_path):
                 with patch("agents.orchestration.tools.ops.time.time", return_value=120.0):
-                    result = orchestrationAgentOps.summarize_agent_event_health(window_size=10)
+                    result = orchestration_agent_ops.summarize_agent_event_health(window_size=10)
 
         self.assertTrue(result["available"])
         self.assertEqual(result["returned_events"], 3)
@@ -555,7 +555,7 @@ class TestOrchestrationAgentOps(unittest.TestCase):
 
             with patch("agents.orchestration.tools.ops.AGENT_EVENTS_PATH", events_path):
                 with patch("agents.orchestration.tools.ops.time.time", return_value=200.0):
-                    result = orchestrationAgentOps.summarize_agent_event_health(window_size=10)
+                    result = orchestration_agent_ops.summarize_agent_event_health(window_size=10)
 
         self.assertTrue(result["available"])
         self.assertFalse(result["freshness"]["is_fresh"])
@@ -564,20 +564,20 @@ class TestOrchestrationAgentOps(unittest.TestCase):
     def test_format_agent_error_digest_from_codes(self) -> None:
         # Performs test format agent error digest from codes logic.
         self.assertEqual(
-            orchestrationAgentOps._format_agent_error_digest("timeout", "invalid_response_format"),
+            orchestration_agent_ops._format_agent_error_digest("timeout", "invalid_response_format"),
             "obs(timeout),rea(invalid_response_format)",
         )
         self.assertEqual(
-            orchestrationAgentOps._format_agent_error_digest(None, ""),
+            orchestration_agent_ops._format_agent_error_digest(None, ""),
             "obs(none),rea(none)",
         )
 
     def test_derive_handoff_quality(self) -> None:
         # Performs test derive handoff quality logic.
-        self.assertEqual(orchestrationAgentOps._derive_handoff_quality("ok", None), "healthy")
-        self.assertEqual(orchestrationAgentOps._derive_handoff_quality("error", None), "degraded")
+        self.assertEqual(orchestration_agent_ops._derive_handoff_quality("ok", None), "healthy")
+        self.assertEqual(orchestration_agent_ops._derive_handoff_quality("error", None), "degraded")
         self.assertEqual(
-            orchestrationAgentOps._derive_handoff_quality(None, "invalid_handoff_payload"),
+            orchestration_agent_ops._derive_handoff_quality(None, "invalid_handoff_payload"),
             "degraded",
         )
 
@@ -611,7 +611,7 @@ class TestOrchestrationAgentOps(unittest.TestCase):
             },
         }
 
-        trace = orchestrationAgentOps._extract_evidence_trace(summary)
+        trace = orchestration_agent_ops._extract_evidence_trace(summary)
 
         self.assertEqual(trace["latest_track_snapshot"]["ground_position"], {"x": 1.0, "z": 2.0})
         self.assertEqual(len(trace["latest_track_snapshot"]["quality_flags"]), 5)
@@ -625,14 +625,14 @@ class TestOrchestrationAgentOps(unittest.TestCase):
     def test_summarize_agent_event_health_invalid_window_size(self) -> None:
         # Performs test summarize agent event health invalid window size logic.
         with self.assertRaises(ValueError):
-            orchestrationAgentOps.summarize_agent_event_health(window_size=0)
+            orchestration_agent_ops.summarize_agent_event_health(window_size=0)
 
     def test_prune_agent_event_log_missing_file(self) -> None:
         # Performs test prune agent event log missing file logic.
         with TemporaryDirectory() as temp_dir:
             events_path = Path(temp_dir) / "agent_events.jsonl"
             with patch("agents.orchestration.tools.ops.AGENT_EVENTS_PATH", events_path):
-                result = orchestrationAgentOps.prune_agent_event_log(max_events_keep=10)
+                result = orchestration_agent_ops.prune_agent_event_log(max_events_keep=10)
 
         self.assertFalse(result["available"])
         self.assertEqual(result["error"], "agent_events_missing")
@@ -647,7 +647,7 @@ class TestOrchestrationAgentOps(unittest.TestCase):
             )
 
             with patch("agents.orchestration.tools.ops.AGENT_EVENTS_PATH", events_path):
-                result = orchestrationAgentOps.prune_agent_event_log(max_events_keep=5)
+                result = orchestration_agent_ops.prune_agent_event_log(max_events_keep=5)
 
         self.assertTrue(result["available"])
         self.assertFalse(result["pruned"])
@@ -671,7 +671,7 @@ class TestOrchestrationAgentOps(unittest.TestCase):
 
             with patch("agents.orchestration.tools.ops.AGENT_EVENTS_PATH", events_path):
                 with patch("agents.orchestration.tools.ops.time.strftime", return_value="20261026_120000"):
-                    result = orchestrationAgentOps.prune_agent_event_log(max_events_keep=2)
+                    result = orchestration_agent_ops.prune_agent_event_log(max_events_keep=2)
 
             remaining_lines = events_path.read_text(encoding="utf-8").splitlines()
             archive_path = result["archive_path"]
@@ -692,7 +692,7 @@ class TestOrchestrationAgentOps(unittest.TestCase):
     def test_prune_agent_event_log_invalid_max_events_keep(self) -> None:
         # Performs test prune agent event log invalid max events keep logic.
         with self.assertRaises(ValueError):
-            orchestrationAgentOps.prune_agent_event_log(max_events_keep=-1)
+            orchestration_agent_ops.prune_agent_event_log(max_events_keep=-1)
 
 
 if __name__ == "__main__":

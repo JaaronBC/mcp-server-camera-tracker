@@ -1,19 +1,8 @@
-# Handles dashboard types behavior.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-
-@dataclass(slots=True)
-class PixelPosition:
-    x: float
-    y: float
-
-
-@dataclass(slots=True)
-class GroundPosition:
-    x: float
-    z: float
+from agents.tracking.tracking_types import GroundPosition, PixelPosition
 
 
 @dataclass(slots=True)
@@ -33,7 +22,6 @@ class Observation:
     occluded: bool | None = None
 
     def to_dict(self) -> dict:
-        # Performs to dict logic.
         return {
             "track_id": self.track_id,
             "timestamp": self.timestamp,
@@ -58,41 +46,4 @@ class Observation:
             "detection_confidence": self.detection_confidence,
             "quality_flags": self.quality_flags,
             "occluded": self.occluded,
-        }
-
-
-@dataclass(slots=True)
-class RadarTrackSnapshot:
-    track_id: str
-    timestamp: float
-    pixel_position: PixelPosition | None
-    ground_position: GroundPosition
-    ground_coordinate_unit: str | None
-    position_kind: str
-    quality_flags: list[str]
-    confidence: float | None
-    relative_depth: float | None = None
-
-    def to_dict(self) -> dict:
-        # Performs to dict logic.
-        return {
-            "track_id": self.track_id,
-            "timestamp": self.timestamp,
-            "pixel_position": (
-                None
-                if self.pixel_position is None
-                else {
-                    "x": self.pixel_position.x,
-                    "y": self.pixel_position.y,
-                }
-            ),
-            "ground_position": {
-                "x": self.ground_position.x,
-                "z": self.ground_position.z,
-            },
-            "ground_coordinate_unit": self.ground_coordinate_unit,
-            "relative_depth": self.relative_depth,
-            "position_kind": self.position_kind,
-            "quality_flags": self.quality_flags,
-            "confidence": self.confidence,
         }

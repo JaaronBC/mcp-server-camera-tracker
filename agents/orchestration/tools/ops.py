@@ -7,7 +7,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from ...reasoning.tools import _shared as dashboardReasoning
+from ...reasoning.tools import _shared as dashboard_reasoning
 from ...registry import mcp
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -319,7 +319,7 @@ def run_reasoning_cycle_and_log(
     if max_tracks <= 0:
         raise ValueError("max_tracks must be greater than zero")
 
-    radar_state = dashboardReasoning._load_radar_state()
+    radar_state = dashboard_reasoning._load_radar_state()
     if radar_state is None:
         return {
             "available": False,
@@ -339,7 +339,7 @@ def run_reasoning_cycle_and_log(
 
     for index, track_id in enumerate(track_ids, start=1):
         started = time.perf_counter()
-        result = dashboardReasoning.simulate_reasoning_assessment(
+        result = dashboard_reasoning.simulate_reasoning_assessment(
             track_id,
             request_evidence_on_uncertainty=request_evidence_on_uncertainty,
         )

@@ -7,7 +7,7 @@ from pathlib import Path
 import cv2
 from ultralytics import YOLO
 
-from agents.components.calibration import GroundPlaneCalibration, load_ground_plane_calibration
+from agents.tracking.calibration import GroundPlaneCalibration, load_ground_plane_calibration
 from agents.coordinator import AgentCoordinator
 from agents.tracking.agent_tracking import (
     AsyncVisualTrackingRuntime,

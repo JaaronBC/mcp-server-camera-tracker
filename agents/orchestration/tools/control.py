@@ -6,7 +6,7 @@ from typing import Any, Awaitable, Callable
 
 from mcp import ClientSession
 
-from .. import agent_orchestration as orchestrationAgent
+from .. import agent_orchestration as orchestration_agent
 from .calibration import (
     set_ground_plane_calibration,
     validate_ground_plane_calibration,
@@ -18,19 +18,19 @@ from ..process import (
     stop_dashboard_process,
 )
 from ...registry import mcp
-from ...tracking import agent_runtime as trackingAgent
+from ...tracking import tracking_runtime as tracking_runtime_module
 
 
 async def verify_required_tools_runtime(
     session: ClientSession,
     *,
-    live_tracking_tool: str,
-    detect_objects_tool: str,
+    live_tracking_tool_name: str,
+    detect_objects_tool_name: str,
 ) -> None:
-    await trackingAgent.verify_required_tools(
+    await tracking_runtime_module.verify_required_tools(
         session,
-        live_tracking_tool=live_tracking_tool,
-        detect_objects_tool=detect_objects_tool,
+        live_tracking_tool_name=live_tracking_tool_name,
+        detect_objects_tool_name=detect_objects_tool_name,
     )
 
 
@@ -41,7 +41,7 @@ async def start_live_tracking_runtime(
     result_text_fn: Callable[[Any], str],
     emit: Callable[[str], None],
 ) -> None:
-    await trackingAgent.start_live_tracking(
+    await tracking_runtime_module.start_live_tracking(
         session,
         tool_name=tool_name,
         result_text_fn=result_text_fn,
@@ -61,7 +61,7 @@ async def run_agent_ops_cycle_runtime(
     format_evidence_fn: Callable[[dict[str, Any]], list[str]],
     emit: Callable[[str], None],
 ) -> bool:
-    return await orchestrationAgent.run_agent_ops_cycle(
+    return await orchestration_agent.run_agent_ops_cycle(
         session,
         request_evidence_on_uncertainty=request_evidence_on_uncertainty,
         max_tracks=max_tracks,
@@ -86,7 +86,7 @@ async def run_agent_ops_health_summary_runtime(
     format_health_fn: Callable[[dict[str, Any], float, float], str],
     emit: Callable[[str], None],
 ) -> bool:
-    return await orchestrationAgent.run_agent_ops_health_summary(
+    return await orchestration_agent.run_agent_ops_health_summary(
         session,
         window_size=window_size,
         handoff_warn_rate=handoff_warn_rate,
@@ -109,7 +109,7 @@ async def run_depth_coverage_summary_runtime(
     format_depth_fn: Callable[[dict[str, Any]], str],
     emit: Callable[[str], None],
 ) -> bool:
-    return await orchestrationAgent.run_depth_coverage_summary(
+    return await orchestration_agent.run_depth_coverage_summary(
         session,
         sample_limit=sample_limit,
         tool_name=tool_name,
@@ -137,7 +137,7 @@ async def run_agent_ops_pipeline_runtime(
     run_health_summary_fn: Callable[..., Awaitable[bool]],
     run_depth_summary_fn: Callable[..., Awaitable[bool]],
 ) -> dict[str, Any]:
-    return await orchestrationAgent.run_agent_ops_pipeline(
+    return await orchestration_agent.run_agent_ops_pipeline(
         session,
         cycle_number=cycle_number,
         max_tracks=max_tracks,
@@ -170,7 +170,7 @@ async def start_orchestration_agents_with_activation_checks_runtime(
     format_evidence_fn: Callable[[dict[str, Any]], list[str]],
     emit: Callable[[str], None],
 ) -> bool:
-    return await orchestrationAgent.start_orchestration_agents_with_activation_checks(
+    return await orchestration_agent.start_orchestration_agents_with_activation_checks(
         session,
         enable_agent_ops_heartbeat=enable_agent_ops_heartbeat,
         agent_ops_max_tracks=agent_ops_max_tracks,
@@ -196,7 +196,7 @@ async def print_depth_coverage_startup_snapshot_runtime(
     format_depth_fn: Callable[[dict[str, Any]], str],
     emit: Callable[[str], None],
 ) -> None:
-    await orchestrationAgent.print_depth_coverage_startup_snapshot(
+    await orchestration_agent.print_depth_coverage_startup_snapshot(
         session,
         sample_limit=sample_limit,
         tool_name=tool_name,
@@ -217,7 +217,7 @@ async def print_pipeline_contract_startup_snapshot_runtime(
     result_json_fn: Callable[[Any], dict[str, Any] | None],
     emit: Callable[[str], None],
 ) -> None:
-    await orchestrationAgent.print_pipeline_contract_startup_snapshot(
+    await orchestration_agent.print_pipeline_contract_startup_snapshot(
         session,
         max_observation_age_seconds=max_observation_age_seconds,
         require_live_pipeline=require_live_pipeline,
