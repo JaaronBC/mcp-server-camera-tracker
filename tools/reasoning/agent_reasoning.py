@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import time
 from typing import Any, Awaitable, Callable
 
-from dotenv import load_dotenv
 from openai import AsyncOpenAI
+
+from .. import llm_common
 
 DEFAULT_OPENAI_BASE_URL = "https://128.171.10.83:9443/v1"
 DEFAULT_REASONING_AGENT_MODEL = "gpt-oss-120b"
@@ -24,118 +24,46 @@ DEFAULT_REASONING_SYSTEM_PROMPT = (
 
 
 def _resolve_model(env_name: str = "REASONING_AGENT_MODEL", default_model: str = DEFAULT_REASONING_AGENT_MODEL) -> str:
-    value = os.getenv(env_name)
-    if isinstance(value, str) and value.strip():
-        return value.strip()
-    return default_model
+    return llm_common.resolve_model(env_name, default_model)
 
 
 def _resolve_timeout_seconds() -> float:
-    value = os.getenv("DASHBOARD_AGENT_LLM_TIMEOUT_SECONDS")
-    if value is None:
-        return DEFAULT_LLM_TIMEOUT_SECONDS
-    try:
-        timeout = float(value)
-    except ValueError:
-        return DEFAULT_LLM_TIMEOUT_SECONDS
-    if timeout <= 0:
-        return DEFAULT_LLM_TIMEOUT_SECONDS
-    return timeout
+    return llm_common.resolve_timeout_seconds(DEFAULT_LLM_TIMEOUT_SECONDS)
 
 
 def _resolve_retry_limit() -> int:
-    value = os.getenv("DASHBOARD_AGENT_LLM_RETRY_LIMIT")
-    if value is None:
-        return DEFAULT_LLM_RETRY_LIMIT
-    try:
-        retry_limit = int(value)
-    except ValueError:
-        return DEFAULT_LLM_RETRY_LIMIT
-    if retry_limit < 0:
-        return DEFAULT_LLM_RETRY_LIMIT
-    return retry_limit
+    return llm_common.resolve_retry_limit(DEFAULT_LLM_RETRY_LIMIT)
 
 
 def _resolve_retry_backoff_seconds() -> float:
-    value = os.getenv("DASHBOARD_AGENT_LLM_RETRY_BACKOFF_SECONDS")
-    if value is None:
-        return DEFAULT_LLM_RETRY_BACKOFF_SECONDS
-    try:
-        backoff_seconds = float(value)
-    except ValueError:
-        return DEFAULT_LLM_RETRY_BACKOFF_SECONDS
-    if backoff_seconds < 0:
-        return DEFAULT_LLM_RETRY_BACKOFF_SECONDS
-    return backoff_seconds
+    return llm_common.resolve_retry_backoff_seconds(DEFAULT_LLM_RETRY_BACKOFF_SECONDS)
 
 
 def _classify_llm_error(error: Exception) -> str:
-    text = f"{type(error).__name__}:{error}".lower()
-    if "timeout" in text:
-        return "timeout"
-    if "api_key" in text or "unauthorized" in text or "authentication" in text:
-        return "authentication"
-    if "llm_invalid_json_response" in text or "json" in text:
-        return "invalid_response_format"
-    if "llm_empty_response" in text or "empty_response" in text:
-        return "empty_response"
-    return "runtime_error"
+    return llm_common.classify_llm_error(error)
 
 
 def _create_openai_client() -> AsyncOpenAI:
-    load_dotenv()
-    api_key = os.getenv("OPENROUTER_API_KEY")
-    if not api_key:
-        raise RuntimeError("OPENROUTER_API_KEY is not set")
-    base_url = os.getenv("OPENAI_BASE_URL", DEFAULT_OPENAI_BASE_URL)
-    return AsyncOpenAI(base_url=base_url, api_key=api_key)
+    return llm_common.create_openai_client(DEFAULT_OPENAI_BASE_URL)
 
 
 def _extract_json_object(raw_text: str) -> dict[str, Any] | None:
-    text = raw_text.strip()
-    if not text:
-        return None
-    if text.startswith("```"):
-        blocks = text.split("```")
-        text = ""
-        for block in blocks:
-            candidate = block.strip()
-            if candidate.startswith("json"):
-                candidate = candidate[4:].strip()
-            if candidate.startswith("{") and candidate.endswith("}"):
-                text = candidate
-                break
-        if not text:
-            return None
-    try:
-        payload = json.loads(text)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(payload, dict):
-        return None
-    return payload
+    payload = llm_common.extract_json_object(raw_text)
+    if isinstance(payload, dict):
+        return payload
+    return None
 
 
 def _coerce_str_list(value: Any) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    result: list[str] = []
-    for item in value:
-        if isinstance(item, str) and item.strip():
-            result.append(item.strip())
-    return result
+    return llm_common.coerce_str_list(value)
 
 
 def _coerce_bool(value: Any, default: bool = False) -> bool:
-    if isinstance(value, bool):
-        return value
-    return default
+    return llm_common.coerce_bool(value, default)
 
 
 def _coerce_str(value: Any, default: str) -> str:
-    if isinstance(value, str) and value.strip():
-        return value.strip()
-    return default
+    return llm_common.coerce_str(value, default)
 
 
 def validate_reasoning_llm_payload(

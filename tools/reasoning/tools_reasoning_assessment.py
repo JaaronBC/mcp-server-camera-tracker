@@ -23,6 +23,39 @@ _COORDINATOR = AgentCoordinator()
 _INGESTED_OBSERVATION_IDS: set[str] = set()
 
 
+def _build_unavailable_track_response(track_id: str, prepared: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "available": False,
+        "error": prepared.get("error", "radar_state_unavailable"),
+        "track_id": track_id,
+        "radar_state_age_seconds": prepared.get("radar_state_age_seconds"),
+        "radar_state_max_age_seconds": prepared.get("radar_state_max_age_seconds"),
+    }
+
+
+def _attach_llm_meta(payload: dict[str, Any], llm_payload: dict[str, Any] | None, llm_meta: dict[str, Any]) -> None:
+    payload["llm_available"] = llm_payload is not None
+    payload["llm_model"] = llm_meta.get("model")
+    payload["llm_latency_ms"] = llm_meta.get("latency_ms")
+    payload["llm_error"] = llm_meta.get("error")
+
+
+def _default_handoff_validation() -> dict[str, Any]:
+    return {
+        "status": "ok",
+        "error": None,
+        "error_code": None,
+    }
+
+
+def _handoff_validation_error(error: Exception) -> dict[str, Any]:
+    return {
+        "status": "error",
+        "error": f"{type(error).__name__}:{error}",
+        "error_code": "invalid_handoff_payload",
+    }
+
+
 def _resolve_radar_state_max_age_seconds() -> float:
     # Resolves radar state max age seconds from configuration with safe defaults.
     value = os.getenv("DASHBOARD_RADAR_STATE_MAX_AGE_SECONDS")
@@ -335,13 +368,7 @@ def simulate_evidence_request(track_id: str, reason: str) -> dict[str, Any]:
 
     prepared = _prepare_track_analysis(track_id)
     if not bool(prepared.get("available")):
-        return {
-            "available": False,
-            "error": prepared.get("error", "radar_state_unavailable"),
-            "track_id": track_id,
-            "radar_state_age_seconds": prepared.get("radar_state_age_seconds"),
-            "radar_state_max_age_seconds": prepared.get("radar_state_max_age_seconds"),
-        }
+        return _build_unavailable_track_response(track_id, prepared)
 
     _radar_state = prepared["radar_state"]
     ingested_count = prepared["ingested_count"]
@@ -367,13 +394,7 @@ def simulate_observation_summary(track_id: str) -> dict[str, Any]:
     """Build only the observation/behavior summary for one track from latest radar state."""
     prepared = _prepare_track_analysis(track_id)
     if not bool(prepared.get("available")):
-        return {
-            "available": False,
-            "error": prepared.get("error", "radar_state_unavailable"),
-            "track_id": track_id,
-            "radar_state_age_seconds": prepared.get("radar_state_age_seconds"),
-            "radar_state_max_age_seconds": prepared.get("radar_state_max_age_seconds"),
-        }
+        return _build_unavailable_track_response(track_id, prepared)
 
     radar_state = prepared["radar_state"]
     ingested_count = prepared["ingested_count"]
@@ -393,10 +414,7 @@ def simulate_observation_summary(track_id: str) -> dict[str, Any]:
             valid_observation_ids=set(supporting_ids),
         )
 
-    summary["llm_available"] = observation_payload is not None
-    summary["llm_model"] = observation_meta.get("model")
-    summary["llm_latency_ms"] = observation_meta.get("latency_ms")
-    summary["llm_error"] = observation_meta.get("error")
+    _attach_llm_meta(summary, observation_payload, observation_meta)
 
     return {
         "available": True,
@@ -419,13 +437,7 @@ def simulate_reasoning_assessment(
     """Build an observation summary and reasoning assessment for one track from latest radar state."""
     prepared = _prepare_track_analysis(track_id)
     if not bool(prepared.get("available")):
-        return {
-            "available": False,
-            "error": prepared.get("error", "radar_state_unavailable"),
-            "track_id": track_id,
-            "radar_state_age_seconds": prepared.get("radar_state_age_seconds"),
-            "radar_state_max_age_seconds": prepared.get("radar_state_max_age_seconds"),
-        }
+        return _build_unavailable_track_response(track_id, prepared)
 
     radar_state = prepared["radar_state"]
     ingested_count = prepared["ingested_count"]
@@ -446,16 +458,9 @@ def simulate_reasoning_assessment(
             valid_observation_ids=set(supporting_ids),
         )
 
-    summary["llm_available"] = observation_payload is not None
-    summary["llm_model"] = observation_meta.get("model")
-    summary["llm_latency_ms"] = observation_meta.get("latency_ms")
-    summary["llm_error"] = observation_meta.get("error")
+    _attach_llm_meta(summary, observation_payload, observation_meta)
 
-    handoff_validation = {
-        "status": "ok",
-        "error": None,
-        "error_code": None,
-    }
+    handoff_validation = _default_handoff_validation()
     try:
         reasoning_input, handoff_validation = _build_reasoning_handoff_payload(
             track_id=track_id,
@@ -467,11 +472,7 @@ def simulate_reasoning_assessment(
     except ValueError as error:
         reasoning_payload = None
         reasoning_meta = _skipped_reasoning_meta(error)
-        handoff_validation = {
-            "status": "error",
-            "error": f"{type(error).__name__}:{error}",
-            "error_code": "invalid_handoff_payload",
-        }
+        handoff_validation = _handoff_validation_error(error)
 
     if reasoning_payload is None:
         assessment, request_more_observations = _fallback_reasoning_assessment(
@@ -487,10 +488,7 @@ def simulate_reasoning_assessment(
             valid_observation_ids=set(summary.get("supporting_observation_ids", [])),
         )
 
-    assessment["llm_available"] = reasoning_payload is not None
-    assessment["llm_model"] = reasoning_meta.get("model")
-    assessment["llm_latency_ms"] = reasoning_meta.get("latency_ms")
-    assessment["llm_error"] = reasoning_meta.get("error")
+    _attach_llm_meta(assessment, reasoning_payload, reasoning_meta)
 
     evidence_request = None
     if request_evidence_on_uncertainty and request_more_observations:
