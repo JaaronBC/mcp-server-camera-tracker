@@ -1,7 +1,6 @@
 """Single orchestration MCP registration entrypoint.
 
-Import this module from `server.py` to register orchestration/control-plane
-MCP tools while preserving compatibility with the legacy control-plane modules.
+Import this module from `server.py` to register orchestration/control-plane MCP tools.
 """
 
 from . import agent_ops  # noqa: F401

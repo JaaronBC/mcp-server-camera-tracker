@@ -47,7 +47,7 @@ RUN_LIVE_LLM_TESTS=1 python -m unittest tests.test_orchestration_reasoning_live_
 ## Migration summary (dashboard → orchestration)
 
 Canonical control-plane imports are now under `tools/orchestration/*`.
-Compatibility aliases currently remain in place to avoid breaking existing integrations.
+The legacy `tools/dashboard/*` package has been removed.
 
 - `tools.dashboard.agent_ops` → `tools.orchestration.agent_ops`
 - `tools.dashboard.calibration` → `tools.orchestration.calibration`

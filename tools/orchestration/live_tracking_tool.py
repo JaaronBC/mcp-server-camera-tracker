@@ -1,7 +1,15 @@
-"""Compatibility alias to `tools.dashboard.live_tracking_tool` for incremental orchestration migration."""
+# MCP tool that launches and supervises the live dashboard tracking process.
+from .process import start_dashboard_process
+from ..registry import mcp
 
-import sys as _sys
 
-from ..dashboard import live_tracking_tool as _impl
+@mcp.tool()
+def live_tracking() -> str:
+    # Implements live tracking behavior for this module.
+    """Start live YOLO tracking in the background and return immediately."""
+    _, message = start_dashboard_process()
+    return message
 
-_sys.modules[__name__] = _impl
+if __name__ == "__main__":
+    result = live_tracking()
+    print(result)
