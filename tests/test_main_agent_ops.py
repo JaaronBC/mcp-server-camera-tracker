@@ -87,19 +87,15 @@ class FakeClientSessionContext:
 class TestMainAgentOps(unittest.IsolatedAsyncioTestCase):
     async def _run_agent_with_common_patches(self, **kwargs) -> str:
         # Performs run agent with common patches logic.
-        fake_client = MagicMock()
-        fake_client.close = AsyncMock(return_value=None)
         output_stream = io.StringIO()
 
-        with patch("main.load_system_skill", return_value="skill"):
-            with patch("main.create_openai_client", return_value=fake_client):
-                with patch("main.stdio_client", return_value=FakeStdioContext()):
-                    with patch("main.ClientSession", FakeClientSessionContext):
-                        with patch("main.verify_required_tools", new=AsyncMock(return_value=None)):
-                            with patch("main.start_live_tracking", new=AsyncMock(return_value=None)):
-                                with patch("main.monitor_movement", new=AsyncMock(return_value=None)):
-                                    with redirect_stdout(output_stream):
-                                        await main.run_agent(**kwargs)
+        with patch("main.stdio_client", return_value=FakeStdioContext()):
+            with patch("main.ClientSession", FakeClientSessionContext):
+                with patch("main.verify_required_tools", new=AsyncMock(return_value=None)):
+                    with patch("main.start_live_tracking", new=AsyncMock(return_value=None)):
+                        with patch("main.monitor_movement", new=AsyncMock(return_value=None)):
+                            with redirect_stdout(output_stream):
+                                await main.run_agent(**kwargs)
 
         return output_stream.getvalue()
 
@@ -287,21 +283,18 @@ class TestMainAgentOps(unittest.IsolatedAsyncioTestCase):
 
         stream = io.StringIO()
         with patch("main.ANALYSIS_INTERVAL_SECONDS", 0):
-            with patch("main.summarize_frame", new=AsyncMock(return_value="ok-summary")):
-                with patch("main.run_agent_ops_cycle", new=AsyncMock(side_effect=slow_cycle)) as cycle_mock:
-                    with redirect_stdout(stream):
-                        with self.assertRaises(KeyboardInterrupt):
-                            await main.monitor_movement(
-                                session,
-                                client=MagicMock(),
-                                system_prompt="skill",
-                                enable_agent_ops_heartbeat=True,
-                                agent_ops_interval_seconds=0,
-                                agent_ops_max_tracks=2,
-                                agent_ops_summary_every_cycles=100,
-                                depth_coverage_summary_enabled=False,
-                                depth_coverage_summary_every_cycles=100,
-                            )
+            with patch("main.run_agent_ops_cycle", new=AsyncMock(side_effect=slow_cycle)) as cycle_mock:
+                with redirect_stdout(stream):
+                    with self.assertRaises(KeyboardInterrupt):
+                        await main.monitor_movement(
+                            session,
+                            enable_agent_ops_heartbeat=True,
+                            agent_ops_interval_seconds=0,
+                            agent_ops_max_tracks=2,
+                            agent_ops_summary_every_cycles=100,
+                            depth_coverage_summary_enabled=False,
+                            depth_coverage_summary_every_cycles=100,
+                        )
 
         self.assertEqual(cycle_mock.await_count, 1)
         self.assertIn("Skipping agent ops trigger: prior cycle still running.", stream.getvalue())

@@ -1,6 +1,6 @@
 # MCP tool that launches and supervises the live dashboard tracking process.
-from .dashboard_process import start_dashboard_process
-from .registry import mcp
+from .process import start_dashboard_process
+from ..registry import mcp
 
 
 @mcp.tool()

@@ -4,17 +4,17 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from .dashboardCalibration import (
+from .calibration import (
     set_ground_plane_calibration,
     validate_ground_plane_calibration,
 )
-from .dashboardHealth import dashboard_health_status, wait_for_dashboard_ready
-from .dashboard_process import (
+from .health import dashboard_health_status, wait_for_dashboard_ready
+from .process import (
     dashboard_process_status,
     start_dashboard_process,
     stop_dashboard_process,
 )
-from .registry import mcp
+from ..registry import mcp
 
 
 @mcp.tool()

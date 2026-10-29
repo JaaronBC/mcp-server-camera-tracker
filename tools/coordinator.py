@@ -4,7 +4,7 @@ from __future__ import annotations
 import math
 from collections import defaultdict, deque
 
-from .agent_contracts import (
+from .contracts import (
     DetectionCandidate,
     EvidenceRequest,
     ObservationBehaviorSummary,

@@ -6,10 +6,10 @@ import time
 from pathlib import Path
 from typing import Any
 
-from . import dashboardAgentOps
-from .registry import mcp
+from . import agent_ops
+from ..registry import mcp
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CAPTURES_DIR = PROJECT_ROOT / "captures"
 RADAR_STATE_PATH = CAPTURES_DIR / "latest_radar_state.json"
 TRACKING_FRAME_PATH = CAPTURES_DIR / "latest_tracking_frame.json"
@@ -378,7 +378,7 @@ def dashboard_tracking_quality_report(
 
     latency_continuity = dashboard_latency_continuity_metrics()
     depth_coverage = dashboard_depth_coverage_metrics(sample_limit=depth_sample_limit)
-    event_health = dashboardAgentOps.summarize_agent_event_health(window_size=event_window_size)
+    event_health = agent_ops.summarize_agent_event_health(window_size=event_window_size)
 
     continuity_ratio = latency_continuity.get("continuity", {}).get("continuity_ratio")
     end_to_end_delay = latency_continuity.get("latency", {}).get("end_to_end_delay_seconds")

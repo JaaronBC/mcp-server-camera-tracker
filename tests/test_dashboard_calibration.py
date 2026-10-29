@@ -7,7 +7,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from tools import dashboardCalibration
+from tools.dashboard import calibration as dashboardCalibration
 
 
 class TestDashboardCalibrationTools(unittest.TestCase):
@@ -15,7 +15,7 @@ class TestDashboardCalibrationTools(unittest.TestCase):
         # Performs test get calibration missing logic.
         with TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "ground_plane_calibration.json"
-            with patch("tools.dashboardCalibration.CALIBRATION_PATH", path):
+            with patch("tools.dashboard.calibration.CALIBRATION_PATH", path):
                 result = dashboardCalibration.get_ground_plane_calibration()
 
         self.assertFalse(result["available"])
@@ -31,7 +31,7 @@ class TestDashboardCalibrationTools(unittest.TestCase):
 
         with TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "ground_plane_calibration.json"
-            with patch("tools.dashboardCalibration.CALIBRATION_PATH", path):
+            with patch("tools.dashboard.calibration.CALIBRATION_PATH", path):
                 set_result = dashboardCalibration.set_ground_plane_calibration(payload)
                 get_result = dashboardCalibration.get_ground_plane_calibration()
                 validate_result = dashboardCalibration.validate_ground_plane_calibration()
@@ -53,7 +53,7 @@ class TestDashboardCalibrationTools(unittest.TestCase):
             path = Path(temp_dir) / "ground_plane_calibration.json"
             path.write_text(json.dumps({"matrix": [[1, 2], [3, 4]]}), encoding="utf-8")
 
-            with patch("tools.dashboardCalibration.CALIBRATION_PATH", path):
+            with patch("tools.dashboard.calibration.CALIBRATION_PATH", path):
                 result = dashboardCalibration.validate_ground_plane_calibration()
 
         self.assertFalse(result["valid"])
@@ -69,7 +69,7 @@ class TestDashboardCalibrationTools(unittest.TestCase):
 
         with TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "ground_plane_calibration.json"
-            with patch("tools.dashboardCalibration.CALIBRATION_PATH", path):
+            with patch("tools.dashboard.calibration.CALIBRATION_PATH", path):
                 dashboardCalibration.set_ground_plane_calibration(payload)
                 clear_result = dashboardCalibration.clear_ground_plane_calibration()
                 get_result = dashboardCalibration.get_ground_plane_calibration()

@@ -8,7 +8,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from tools import dashboardReasoning
+from tools.reasoning import tools_reasoning_assessment as dashboardReasoning
 
 
 class TestDashboardReasoningLiveLLM(unittest.TestCase):
@@ -59,7 +59,7 @@ class TestDashboardReasoningLiveLLM(unittest.TestCase):
             radar_path = Path(temp_dir) / "latest_radar_state.json"
             self._write_radar_payload(radar_path)
 
-            with patch("tools.dashboardReasoning.RADAR_STATE_PATH", radar_path):
+            with patch("tools.reasoning.tools_reasoning_assessment.RADAR_STATE_PATH", radar_path):
                 result = dashboardReasoning.simulate_observation_summary("track-live-1")
 
         self.assertTrue(result["available"])
@@ -78,7 +78,7 @@ class TestDashboardReasoningLiveLLM(unittest.TestCase):
             radar_path = Path(temp_dir) / "latest_radar_state.json"
             self._write_radar_payload(radar_path)
 
-            with patch("tools.dashboardReasoning.RADAR_STATE_PATH", radar_path):
+            with patch("tools.reasoning.tools_reasoning_assessment.RADAR_STATE_PATH", radar_path):
                 result = dashboardReasoning.simulate_reasoning_assessment("track-live-1")
 
         self.assertTrue(result["available"])
@@ -107,7 +107,7 @@ class TestDashboardReasoningLiveLLM(unittest.TestCase):
             radar_path = Path(temp_dir) / "latest_radar_state.json"
             self._write_radar_payload(radar_path)
 
-            with patch("tools.dashboardReasoning.RADAR_STATE_PATH", radar_path):
+            with patch("tools.reasoning.tools_reasoning_assessment.RADAR_STATE_PATH", radar_path):
                 responses = []
                 for index in range(4):
                     response = dashboardReasoning.simulate_evidence_request(

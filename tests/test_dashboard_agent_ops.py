@@ -7,8 +7,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from tools import dashboardAgentOps
-from tools import dashboardReasoning
+from tools.dashboard import agent_ops as dashboardAgentOps
+from tools.reasoning import tools_reasoning_assessment as dashboardReasoning
 
 
 class TestDashboardAgentOps(unittest.TestCase):
@@ -22,8 +22,8 @@ class TestDashboardAgentOps(unittest.TestCase):
             missing_radar = Path(temp_dir) / "latest_radar_state.json"
             events_path = Path(temp_dir) / "agent_events.jsonl"
 
-            with patch("tools.dashboardReasoning.RADAR_STATE_PATH", missing_radar):
-                with patch("tools.dashboardAgentOps.AGENT_EVENTS_PATH", events_path):
+            with patch("tools.reasoning.tools_reasoning_assessment.RADAR_STATE_PATH", missing_radar):
+                with patch("tools.dashboard.agent_ops.AGENT_EVENTS_PATH", events_path):
                     result = dashboardAgentOps.run_reasoning_cycle_and_log()
 
         self.assertFalse(result["available"])
@@ -54,10 +54,10 @@ class TestDashboardAgentOps(unittest.TestCase):
             radar_path.write_text(json.dumps(payload), encoding="utf-8")
             events_path = Path(temp_dir) / "agent_events.jsonl"
 
-            with patch("tools.dashboardReasoning.RADAR_STATE_PATH", radar_path):
-                with patch("tools.dashboardAgentOps.AGENT_EVENTS_PATH", events_path):
+            with patch("tools.reasoning.tools_reasoning_assessment.RADAR_STATE_PATH", radar_path):
+                with patch("tools.dashboard.agent_ops.AGENT_EVENTS_PATH", events_path):
                     with patch(
-                        "tools.dashboardReasoning.simulate_reasoning_assessment",
+                        "tools.reasoning.tools_reasoning_assessment.simulate_reasoning_assessment",
                         return_value={
                             "available": True,
                             "summary": {
@@ -166,9 +166,9 @@ class TestDashboardAgentOps(unittest.TestCase):
             radar_path = Path(temp_dir) / "latest_radar_state.json"
             radar_path.write_text(json.dumps(payload), encoding="utf-8")
 
-            with patch("tools.dashboardReasoning.RADAR_STATE_PATH", radar_path):
+            with patch("tools.reasoning.tools_reasoning_assessment.RADAR_STATE_PATH", radar_path):
                 with patch(
-                    "tools.dashboardReasoning.simulate_reasoning_assessment",
+                    "tools.reasoning.tools_reasoning_assessment.simulate_reasoning_assessment",
                     return_value={
                         "available": True,
                         "summary": {"needs_more_observations": False},
@@ -187,7 +187,7 @@ class TestDashboardAgentOps(unittest.TestCase):
                     },
                 ):
                     with patch(
-                        "tools.dashboardAgentOps._append_event",
+                        "tools.dashboard.agent_ops._append_event",
                         side_effect=OSError("disk full"),
                     ):
                         result = dashboardAgentOps.run_reasoning_cycle_and_log(max_tracks=1)
@@ -214,7 +214,7 @@ class TestDashboardAgentOps(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with patch("tools.dashboardAgentOps.AGENT_EVENTS_PATH", events_path):
+            with patch("tools.dashboard.agent_ops.AGENT_EVENTS_PATH", events_path):
                 result = dashboardAgentOps.get_recent_agent_events(limit=10)
 
         self.assertTrue(result["available"])
@@ -234,7 +234,7 @@ class TestDashboardAgentOps(unittest.TestCase):
         # Performs test summarize agent event health missing file logic.
         with TemporaryDirectory() as temp_dir:
             events_path = Path(temp_dir) / "agent_events.jsonl"
-            with patch("tools.dashboardAgentOps.AGENT_EVENTS_PATH", events_path):
+            with patch("tools.dashboard.agent_ops.AGENT_EVENTS_PATH", events_path):
                 result = dashboardAgentOps.summarize_agent_event_health(window_size=10)
 
         self.assertFalse(result["available"])
@@ -288,8 +288,8 @@ class TestDashboardAgentOps(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with patch("tools.dashboardAgentOps.AGENT_EVENTS_PATH", events_path):
-                with patch("tools.dashboardAgentOps.time.time", return_value=120.0):
+            with patch("tools.dashboard.agent_ops.AGENT_EVENTS_PATH", events_path):
+                with patch("tools.dashboard.agent_ops.time.time", return_value=120.0):
                     result = dashboardAgentOps.summarize_agent_event_health(window_size=10)
 
         self.assertTrue(result["available"])
@@ -364,8 +364,8 @@ class TestDashboardAgentOps(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with patch("tools.dashboardAgentOps.AGENT_EVENTS_PATH", events_path):
-                with patch("tools.dashboardAgentOps.time.time", return_value=200.0):
+            with patch("tools.dashboard.agent_ops.AGENT_EVENTS_PATH", events_path):
+                with patch("tools.dashboard.agent_ops.time.time", return_value=200.0):
                     result = dashboardAgentOps.summarize_agent_event_health(window_size=10)
 
         self.assertTrue(result["available"])
@@ -442,7 +442,7 @@ class TestDashboardAgentOps(unittest.TestCase):
         # Performs test prune agent event log missing file logic.
         with TemporaryDirectory() as temp_dir:
             events_path = Path(temp_dir) / "agent_events.jsonl"
-            with patch("tools.dashboardAgentOps.AGENT_EVENTS_PATH", events_path):
+            with patch("tools.dashboard.agent_ops.AGENT_EVENTS_PATH", events_path):
                 result = dashboardAgentOps.prune_agent_event_log(max_events_keep=10)
 
         self.assertFalse(result["available"])
@@ -457,7 +457,7 @@ class TestDashboardAgentOps(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with patch("tools.dashboardAgentOps.AGENT_EVENTS_PATH", events_path):
+            with patch("tools.dashboard.agent_ops.AGENT_EVENTS_PATH", events_path):
                 result = dashboardAgentOps.prune_agent_event_log(max_events_keep=5)
 
         self.assertTrue(result["available"])
@@ -480,8 +480,8 @@ class TestDashboardAgentOps(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with patch("tools.dashboardAgentOps.AGENT_EVENTS_PATH", events_path):
-                with patch("tools.dashboardAgentOps.time.strftime", return_value="20261026_120000"):
+            with patch("tools.dashboard.agent_ops.AGENT_EVENTS_PATH", events_path):
+                with patch("tools.dashboard.agent_ops.time.strftime", return_value="20261026_120000"):
                     result = dashboardAgentOps.prune_agent_event_log(max_events_keep=2)
 
             remaining_lines = events_path.read_text(encoding="utf-8").splitlines()

@@ -8,7 +8,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import AsyncMock, patch
 
-from tools import dashboardReasoning
+from tools.reasoning import tools_reasoning_assessment as dashboardReasoning
 
 
 class TestDashboardReasoning(unittest.TestCase):
@@ -20,7 +20,7 @@ class TestDashboardReasoning(unittest.TestCase):
         # Performs test reasoning returns unavailable when no radar state logic.
         with TemporaryDirectory() as temp_dir:
             missing_path = Path(temp_dir) / "latest_radar_state.json"
-            with patch("tools.dashboardReasoning.RADAR_STATE_PATH", missing_path):
+            with patch("tools.reasoning.tools_reasoning_assessment.RADAR_STATE_PATH", missing_path):
                 result = dashboardReasoning.simulate_reasoning_assessment("track-1")
 
         self.assertFalse(result["available"])
@@ -30,7 +30,7 @@ class TestDashboardReasoning(unittest.TestCase):
         # Performs test observation summary returns unavailable when no radar state logic.
         with TemporaryDirectory() as temp_dir:
             missing_path = Path(temp_dir) / "latest_radar_state.json"
-            with patch("tools.dashboardReasoning.RADAR_STATE_PATH", missing_path):
+            with patch("tools.reasoning.tools_reasoning_assessment.RADAR_STATE_PATH", missing_path):
                 result = dashboardReasoning.simulate_observation_summary("track-1")
 
         self.assertFalse(result["available"])
@@ -60,8 +60,8 @@ class TestDashboardReasoning(unittest.TestCase):
                 {"DASHBOARD_RADAR_STATE_MAX_AGE_SECONDS": "2"},
                 clear=False,
             ):
-                with patch("tools.dashboardReasoning.RADAR_STATE_PATH", radar_path):
-                    with patch("tools.dashboardReasoning.time.time", return_value=1005.0):
+                with patch("tools.reasoning.tools_reasoning_assessment.RADAR_STATE_PATH", radar_path):
+                    with patch("tools.reasoning.tools_reasoning_assessment.time.time", return_value=1005.0):
                         result = dashboardReasoning.simulate_reasoning_assessment("track-1")
 
         self.assertFalse(result["available"])
@@ -93,8 +93,8 @@ class TestDashboardReasoning(unittest.TestCase):
                 {"DASHBOARD_RADAR_STATE_MAX_AGE_SECONDS": "1"},
                 clear=False,
             ):
-                with patch("tools.dashboardReasoning.RADAR_STATE_PATH", radar_path):
-                    with patch("tools.dashboardReasoning.time.time", return_value=2003.0):
+                with patch("tools.reasoning.tools_reasoning_assessment.RADAR_STATE_PATH", radar_path):
+                    with patch("tools.reasoning.tools_reasoning_assessment.time.time", return_value=2003.0):
                         result = dashboardReasoning.simulate_evidence_request("track-1", "need_more")
 
         self.assertFalse(result["available"])
@@ -119,9 +119,9 @@ class TestDashboardReasoning(unittest.TestCase):
         with TemporaryDirectory() as temp_dir:
             radar_path = Path(temp_dir) / "latest_radar_state.json"
             radar_path.write_text(json.dumps(payload), encoding="utf-8")
-            with patch("tools.dashboardReasoning.RADAR_STATE_PATH", radar_path):
+            with patch("tools.reasoning.tools_reasoning_assessment.RADAR_STATE_PATH", radar_path):
                 with patch(
-                    "tools.dashboardReasoning._call_observation_agent_with_retry",
+                    "tools.reasoning.tools_reasoning_assessment._call_observation_agent_with_retry",
                     return_value=(
                         {
                             "summary": "Insufficient history for confident trajectory interpretation.",
@@ -143,7 +143,7 @@ class TestDashboardReasoning(unittest.TestCase):
                     ),
                 ):
                     with patch(
-                        "tools.dashboardReasoning._call_reasoning_agent_with_retry",
+                        "tools.reasoning.tools_reasoning_assessment._call_reasoning_agent_with_retry",
                         return_value=(
                             {
                                 "assessment_label": "requires_more_observation",
@@ -202,10 +202,10 @@ class TestDashboardReasoning(unittest.TestCase):
 
         with TemporaryDirectory() as temp_dir:
             radar_path = Path(temp_dir) / "latest_radar_state.json"
-            with patch("tools.dashboardReasoning.RADAR_STATE_PATH", radar_path):
+            with patch("tools.reasoning.tools_reasoning_assessment.RADAR_STATE_PATH", radar_path):
                 radar_path.write_text(json.dumps(first_payload), encoding="utf-8")
                 with patch(
-                    "tools.dashboardReasoning._call_observation_agent_with_retry",
+                    "tools.reasoning.tools_reasoning_assessment._call_observation_agent_with_retry",
                     return_value=(
                         {
                             "summary": "Initial observation only.",
@@ -221,7 +221,7 @@ class TestDashboardReasoning(unittest.TestCase):
                     ),
                 ):
                     with patch(
-                        "tools.dashboardReasoning._call_reasoning_agent_with_retry",
+                        "tools.reasoning.tools_reasoning_assessment._call_reasoning_agent_with_retry",
                         return_value=(
                             {
                                 "assessment_label": "requires_more_observation",
@@ -243,7 +243,7 @@ class TestDashboardReasoning(unittest.TestCase):
 
                 radar_path.write_text(json.dumps(second_payload), encoding="utf-8")
                 with patch(
-                    "tools.dashboardReasoning._call_observation_agent_with_retry",
+                    "tools.reasoning.tools_reasoning_assessment._call_observation_agent_with_retry",
                     return_value=(
                         {
                             "summary": "Track shows sustained high-speed departure.",
@@ -259,7 +259,7 @@ class TestDashboardReasoning(unittest.TestCase):
                     ),
                 ):
                     with patch(
-                        "tools.dashboardReasoning._call_reasoning_agent_with_retry",
+                        "tools.reasoning.tools_reasoning_assessment._call_reasoning_agent_with_retry",
                         return_value=(
                             {
                                 "assessment_label": "requires_review",
@@ -310,10 +310,10 @@ class TestDashboardReasoning(unittest.TestCase):
 
         with TemporaryDirectory() as temp_dir:
             radar_path = Path(temp_dir) / "latest_radar_state.json"
-            with patch("tools.dashboardReasoning.RADAR_STATE_PATH", radar_path):
+            with patch("tools.reasoning.tools_reasoning_assessment.RADAR_STATE_PATH", radar_path):
                 radar_path.write_text(json.dumps(first_payload), encoding="utf-8")
                 with patch(
-                    "tools.dashboardReasoning._call_observation_agent_with_retry",
+                    "tools.reasoning.tools_reasoning_assessment._call_observation_agent_with_retry",
                     return_value=(
                         {
                             "summary": "Initial observation.",
@@ -332,7 +332,7 @@ class TestDashboardReasoning(unittest.TestCase):
 
                 radar_path.write_text(json.dumps(second_payload), encoding="utf-8")
                 with patch(
-                    "tools.dashboardReasoning._call_observation_agent_with_retry",
+                    "tools.reasoning.tools_reasoning_assessment._call_observation_agent_with_retry",
                     return_value=(
                         {
                             "summary": "Track moved diagonally with sustained motion.",
@@ -379,9 +379,9 @@ class TestDashboardReasoning(unittest.TestCase):
         with TemporaryDirectory() as temp_dir:
             radar_path = Path(temp_dir) / "latest_radar_state.json"
             radar_path.write_text(json.dumps(payload), encoding="utf-8")
-            with patch("tools.dashboardReasoning.RADAR_STATE_PATH", radar_path):
+            with patch("tools.reasoning.tools_reasoning_assessment.RADAR_STATE_PATH", radar_path):
                 with patch(
-                    "tools.dashboardReasoning._call_observation_agent_with_retry",
+                    "tools.reasoning.tools_reasoning_assessment._call_observation_agent_with_retry",
                     return_value=(
                         None,
                         {"status": "error", "model": "gpt-oss-120b", "latency_ms": 15.0, "error": "timeout", "attempts": 2},
@@ -416,9 +416,9 @@ class TestDashboardReasoning(unittest.TestCase):
         with TemporaryDirectory() as temp_dir:
             radar_path = Path(temp_dir) / "latest_radar_state.json"
             radar_path.write_text(json.dumps(payload), encoding="utf-8")
-            with patch("tools.dashboardReasoning.RADAR_STATE_PATH", radar_path):
+            with patch("tools.reasoning.tools_reasoning_assessment.RADAR_STATE_PATH", radar_path):
                 with patch(
-                    "tools.dashboardReasoning._call_observation_agent_with_retry",
+                    "tools.reasoning.tools_reasoning_assessment._call_observation_agent_with_retry",
                     return_value=(
                         {
                             "summary": "Rapid movement observed.",
@@ -434,7 +434,7 @@ class TestDashboardReasoning(unittest.TestCase):
                     ),
                 ):
                     with patch(
-                        "tools.dashboardReasoning._call_reasoning_agent_with_retry",
+                        "tools.reasoning.tools_reasoning_assessment._call_reasoning_agent_with_retry",
                         return_value=(
                             None,
                             {"status": "error", "model": "gpt-oss-120b", "latency_ms": 16.0, "error": "timeout", "attempts": 2},
@@ -450,7 +450,7 @@ class TestDashboardReasoning(unittest.TestCase):
         # Performs test evidence request returns unavailable when no radar state logic.
         with TemporaryDirectory() as temp_dir:
             missing_path = Path(temp_dir) / "latest_radar_state.json"
-            with patch("tools.dashboardReasoning.RADAR_STATE_PATH", missing_path):
+            with patch("tools.reasoning.tools_reasoning_assessment.RADAR_STATE_PATH", missing_path):
                 result = dashboardReasoning.simulate_evidence_request(
                     "track-1",
                     "need_more_observations",
@@ -477,7 +477,7 @@ class TestDashboardReasoning(unittest.TestCase):
             radar_path = Path(temp_dir) / "latest_radar_state.json"
             radar_path.write_text(json.dumps(payload), encoding="utf-8")
 
-            with patch("tools.dashboardReasoning.RADAR_STATE_PATH", radar_path):
+            with patch("tools.reasoning.tools_reasoning_assessment.RADAR_STATE_PATH", radar_path):
                 requests = []
                 for index in range(4):
                     response = dashboardReasoning.simulate_evidence_request(
@@ -516,7 +516,7 @@ class TestDashboardReasoning(unittest.TestCase):
             clear=False,
         ):
             with patch(
-                "tools.dashboardReasoning._invoke_llm_json_response",
+                "tools.observation.agent_observation.invoke_llm_json_response",
                 new=AsyncMock(return_value=expected_payload),
             ) as invoke_mock:
                 payload, meta = dashboardReasoning._call_observation_agent_with_retry(
@@ -559,7 +559,7 @@ class TestDashboardReasoning(unittest.TestCase):
             clear=False,
         ):
             with patch(
-                "tools.dashboardReasoning._invoke_llm_json_response",
+                "tools.reasoning.agent_reasoning.invoke_llm_json_response",
                 new=AsyncMock(side_effect=[RuntimeError("transient"), expected_payload]),
             ) as invoke_mock:
                 payload, meta = dashboardReasoning._call_reasoning_agent_with_retry(
@@ -613,10 +613,10 @@ class TestDashboardReasoning(unittest.TestCase):
             clear=False,
         ):
             with patch(
-                "tools.dashboardReasoning._invoke_llm_json_response",
+                "tools.observation.agent_observation.invoke_llm_json_response",
                 new=AsyncMock(side_effect=[RuntimeError("llm_invalid_json_response")] * 3),
             ) as invoke_mock:
-                with patch("tools.dashboardReasoning.time.sleep") as sleep_mock:
+                with patch("tools.observation.agent_observation.time.sleep") as sleep_mock:
                     payload, meta = dashboardReasoning._call_observation_agent_with_retry(
                         {"track_id": "track-1"}
                     )
@@ -641,7 +641,7 @@ class TestDashboardReasoning(unittest.TestCase):
             clear=False,
         ):
             with patch(
-                "tools.dashboardReasoning._invoke_llm_json_response",
+                "tools.reasoning.agent_reasoning.invoke_llm_json_response",
                 new=AsyncMock(side_effect=TimeoutError("request timeout")),
             ):
                 payload, meta = dashboardReasoning._call_reasoning_agent_with_retry(
@@ -677,9 +677,9 @@ class TestDashboardReasoning(unittest.TestCase):
         with TemporaryDirectory() as temp_dir:
             radar_path = Path(temp_dir) / "latest_radar_state.json"
             radar_path.write_text(json.dumps(payload), encoding="utf-8")
-            with patch("tools.dashboardReasoning.RADAR_STATE_PATH", radar_path):
+            with patch("tools.reasoning.tools_reasoning_assessment.RADAR_STATE_PATH", radar_path):
                 with patch(
-                    "tools.dashboardReasoning._call_observation_agent_with_retry",
+                    "tools.reasoning.tools_reasoning_assessment._call_observation_agent_with_retry",
                     return_value=(
                         {
                             "summary": "Observation summary with malformed supporting ids.",
@@ -695,7 +695,7 @@ class TestDashboardReasoning(unittest.TestCase):
                     ),
                 ):
                     with patch(
-                        "tools.dashboardReasoning._validate_observation_llm_payload",
+                        "tools.reasoning.tools_reasoning_assessment._validate_observation_llm_payload",
                         return_value={
                             "summary": "broken",
                             "supporting_observation_ids": "not-a-list",
@@ -703,7 +703,7 @@ class TestDashboardReasoning(unittest.TestCase):
                         },
                     ):
                         with patch(
-                            "tools.dashboardReasoning._call_reasoning_agent_with_retry"
+                            "tools.reasoning.tools_reasoning_assessment._call_reasoning_agent_with_retry"
                         ) as reasoning_mock:
                             result = dashboardReasoning.simulate_reasoning_assessment("track-1")
 
@@ -785,7 +785,7 @@ class TestDashboardReasoning(unittest.TestCase):
             radar_path = Path(temp_dir) / "latest_radar_state.json"
             radar_path.write_text(json.dumps(radar_state), encoding="utf-8")
 
-            with patch("tools.dashboardReasoning.RADAR_STATE_PATH", radar_path):
+            with patch("tools.reasoning.tools_reasoning_assessment.RADAR_STATE_PATH", radar_path):
                 captured_payloads: list[dict] = []
 
                 def _capture_observation_payload(user_payload: dict):
@@ -813,7 +813,7 @@ class TestDashboardReasoning(unittest.TestCase):
                     )
 
                 with patch(
-                    "tools.dashboardReasoning._call_observation_agent_with_retry",
+                    "tools.reasoning.tools_reasoning_assessment._call_observation_agent_with_retry",
                     side_effect=_capture_observation_payload,
                 ):
                     dashboardReasoning.simulate_observation_summary("track-1")
@@ -890,11 +890,11 @@ class TestDashboardReasoning(unittest.TestCase):
             radar_path = Path(temp_dir) / "latest_radar_state.json"
             radar_path.write_text(json.dumps(radar_state), encoding="utf-8")
 
-            with patch("tools.dashboardReasoning.RADAR_STATE_PATH", radar_path):
+            with patch("tools.reasoning.tools_reasoning_assessment.RADAR_STATE_PATH", radar_path):
                 captured_reasoning_inputs: list[dict] = []
 
                 with patch(
-                    "tools.dashboardReasoning._call_observation_agent_with_retry",
+                    "tools.reasoning.tools_reasoning_assessment._call_observation_agent_with_retry",
                     return_value=(
                         {
                             "summary": "Observation includes rich track context.",
@@ -945,7 +945,7 @@ class TestDashboardReasoning(unittest.TestCase):
                         )
 
                     with patch(
-                        "tools.dashboardReasoning._call_reasoning_agent_with_retry",
+                        "tools.reasoning.tools_reasoning_assessment._call_reasoning_agent_with_retry",
                         side_effect=_capture_reasoning_payload,
                     ):
                         dashboardReasoning.simulate_reasoning_assessment("track-1")

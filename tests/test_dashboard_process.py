@@ -5,7 +5,7 @@ import subprocess
 import unittest
 from unittest.mock import patch
 
-from tools import dashboard_process
+from tools.dashboard import process as dashboard_process
 
 
 class DummyProcess:
@@ -42,15 +42,15 @@ class TestDashboardProcess(unittest.TestCase):
         # Performs tearDown logic.
         dashboard_process._dashboard_process = None
 
-    @patch("tools.dashboard_process.DASHBOARD_SCRIPT_PATH")
+    @patch("tools.dashboard.process.DASHBOARD_SCRIPT_PATH")
     def test_start_dashboard_process_when_script_missing(self, mock_path) -> None:
         # Performs test start dashboard process when script missing logic.
         mock_path.is_file.return_value = False
         with self.assertRaises(FileNotFoundError):
             dashboard_process.start_dashboard_process()
 
-    @patch("tools.dashboard_process.subprocess.Popen")
-    @patch("tools.dashboard_process.DASHBOARD_SCRIPT_PATH")
+    @patch("tools.dashboard.process.subprocess.Popen")
+    @patch("tools.dashboard.process.DASHBOARD_SCRIPT_PATH")
     def test_start_dashboard_process_starts_subprocess(self, mock_path, mock_popen) -> None:
         # Performs test start dashboard process starts subprocess logic.
         mock_path.is_file.return_value = True

@@ -1,7 +1,7 @@
 # MCP tool that reads latest UDP tracking payloads and returns normalized detection frames.
 import json
 import socket
-from .registry import mcp
+from ..registry import mcp
 
 FRAME_RECEIVE_TIMEOUT_SECONDS = 4
 

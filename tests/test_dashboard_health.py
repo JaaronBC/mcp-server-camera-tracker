@@ -7,13 +7,13 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from tools import dashboardHealth
+from tools.dashboard import health as dashboardHealth
 
 
 class TestDashboardHealth(unittest.TestCase):
     def test_parse_radar_state_with_explicit_count(self) -> None:
         # Performs test parse radar state with explicit count logic.
-        with patch("tools.dashboardHealth.time.time", return_value=100.0):
+        with patch("tools.dashboard.health.time.time", return_value=100.0):
             result = dashboardHealth._parse_radar_state(
                 {
                     "timestamp": 98.0,
@@ -32,7 +32,7 @@ class TestDashboardHealth(unittest.TestCase):
 
     def test_parse_radar_state_falls_back_to_tracks_length(self) -> None:
         # Performs test parse radar state falls back to tracks length logic.
-        with patch("tools.dashboardHealth.time.time", return_value=200.0):
+        with patch("tools.dashboard.health.time.time", return_value=200.0):
             result = dashboardHealth._parse_radar_state(
                 {
                     "timestamp": 190.0,
@@ -49,7 +49,7 @@ class TestDashboardHealth(unittest.TestCase):
         # Performs test dashboard health status missing file logic.
         with TemporaryDirectory() as temp_dir:
             fake_path = Path(temp_dir) / "missing.json"
-            with patch("tools.dashboardHealth.RADAR_STATE_PATH", fake_path):
+            with patch("tools.dashboard.health.RADAR_STATE_PATH", fake_path):
                 result = dashboardHealth.dashboard_health_status()
 
         self.assertFalse(result["available"])
@@ -60,7 +60,7 @@ class TestDashboardHealth(unittest.TestCase):
         with TemporaryDirectory() as temp_dir:
             fake_path = Path(temp_dir) / "bad.json"
             fake_path.write_text("not-json", encoding="utf-8")
-            with patch("tools.dashboardHealth.RADAR_STATE_PATH", fake_path):
+            with patch("tools.dashboard.health.RADAR_STATE_PATH", fake_path):
                 result = dashboardHealth.dashboard_health_status()
 
         self.assertFalse(result["available"])
@@ -85,8 +85,8 @@ class TestDashboardHealth(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with patch("tools.dashboardHealth.RADAR_STATE_PATH", fake_path):
-                with patch("tools.dashboardHealth.time.time", return_value=1003.0):
+            with patch("tools.dashboard.health.RADAR_STATE_PATH", fake_path):
+                with patch("tools.dashboard.health.time.time", return_value=1003.0):
                     result = dashboardHealth.dashboard_health_status()
 
         self.assertTrue(result["available"])
@@ -94,7 +94,7 @@ class TestDashboardHealth(unittest.TestCase):
         self.assertEqual(result["active_track_count"], 1)
         self.assertAlmostEqual(result["last_observation_age_seconds"], 2.0, places=6)
 
-    @patch("tools.dashboardHealth.dashboard_health_status")
+    @patch("tools.dashboard.health.dashboard_health_status")
     def test_wait_for_dashboard_ready_immediate_success(self, mock_health_status) -> None:
         # Performs test wait for dashboard ready immediate success logic.
         mock_health_status.return_value = {
@@ -111,8 +111,8 @@ class TestDashboardHealth(unittest.TestCase):
         self.assertTrue(result["ready"])
         self.assertEqual(result["attempts"], 1)
 
-    @patch("tools.dashboardHealth.time.sleep")
-    @patch("tools.dashboardHealth.dashboard_health_status")
+    @patch("tools.dashboard.health.time.sleep")
+    @patch("tools.dashboard.health.dashboard_health_status")
     def test_wait_for_dashboard_ready_eventual_success(
         self,
         mock_health_status,
@@ -135,8 +135,8 @@ class TestDashboardHealth(unittest.TestCase):
         self.assertEqual(result["attempts"], 3)
         self.assertGreaterEqual(mock_sleep.call_count, 2)
 
-    @patch("tools.dashboardHealth.time.sleep")
-    @patch("tools.dashboardHealth.dashboard_health_status")
+    @patch("tools.dashboard.health.time.sleep")
+    @patch("tools.dashboard.health.dashboard_health_status")
     def test_wait_for_dashboard_ready_timeout(
         self,
         mock_health_status,
@@ -148,7 +148,7 @@ class TestDashboardHealth(unittest.TestCase):
             "last_observation_age_seconds": 999.0,
         }
 
-        with patch("tools.dashboardHealth.time.time", side_effect=[0.0, 0.0, 0.05, 0.1, 0.11]):
+        with patch("tools.dashboard.health.time.time", side_effect=[0.0, 0.0, 0.05, 0.1, 0.11]):
             result = dashboardHealth.wait_for_dashboard_ready(
                 timeout_seconds=0.1,
                 max_observation_age_seconds=1.0,
@@ -195,8 +195,8 @@ class TestDashboardHealth(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with patch("tools.dashboardHealth.RADAR_STATE_PATH", fake_path):
-                with patch("tools.dashboardHealth.time.time", return_value=1002.0):
+            with patch("tools.dashboard.health.RADAR_STATE_PATH", fake_path):
+                with patch("tools.dashboard.health.time.time", return_value=1002.0):
                     result = dashboardHealth.verify_dashboard_pipeline_contract()
 
         self.assertTrue(result["available"])
@@ -218,8 +218,8 @@ class TestDashboardHealth(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with patch("tools.dashboardHealth.RADAR_STATE_PATH", fake_path):
-                with patch("tools.dashboardHealth.time.time", return_value=1005.0):
+            with patch("tools.dashboard.health.RADAR_STATE_PATH", fake_path):
+                with patch("tools.dashboard.health.time.time", return_value=1005.0):
                     result = dashboardHealth.verify_dashboard_pipeline_contract(
                         max_observation_age_seconds=3.0,
                     )
@@ -252,8 +252,8 @@ class TestDashboardHealth(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with patch("tools.dashboardHealth.RADAR_STATE_PATH", fake_path):
-                with patch("tools.dashboardHealth.time.time", return_value=1000.5):
+            with patch("tools.dashboard.health.RADAR_STATE_PATH", fake_path):
+                with patch("tools.dashboard.health.time.time", return_value=1000.5):
                     result = dashboardHealth.verify_dashboard_pipeline_contract()
 
         self.assertTrue(result["available"])
@@ -285,8 +285,8 @@ class TestDashboardHealth(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with patch("tools.dashboardHealth.RADAR_STATE_PATH", fake_path):
-                with patch("tools.dashboardHealth.time.time", return_value=1000.5):
+            with patch("tools.dashboard.health.RADAR_STATE_PATH", fake_path):
+                with patch("tools.dashboard.health.time.time", return_value=1000.5):
                     warn_result = dashboardHealth.verify_dashboard_pipeline_contract(
                         require_live_pipeline=False,
                     )

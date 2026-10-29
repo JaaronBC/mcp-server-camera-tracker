@@ -15,12 +15,12 @@ from typing import Protocol
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
 
-from .agent_contracts import DetectionCandidate, VisualAssociationProposal
-from .agent_coordinator import AgentCoordinator
+from ..contracts import DetectionCandidate, VisualAssociationProposal
+from ..coordinator import AgentCoordinator
 
 TRACKING_VLM_MODEL = "qwen-3.8-27b"
 DEFAULT_OPENAI_BASE_URL = "https://128.171.10.83:9443/v1"
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 TRACKING_AGENT_SKILL_PATH = PROJECT_ROOT / "TrackingAgentSkill.md"
 TRACKING_AGENT_SYSTEM_PROMPT_FALLBACK = (
     "You are a visual tracking agent for continuity-preserving identity association. "
@@ -397,6 +397,3 @@ def _normalize_proposal(payload: dict) -> VisualAssociationProposal | None:
         supporting_evidence=[str(value) for value in supporting_evidence],
     )
 
-
-GEMINI_TRACKING_MODEL = TRACKING_VLM_MODEL
-GeminiVisualTrackingAgent = LLMVisualTrackingAgent

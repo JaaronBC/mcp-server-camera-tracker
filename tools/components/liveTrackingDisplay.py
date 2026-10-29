@@ -1,7 +1,6 @@
 # Live dashboard pipeline that captures camera frames, tracks detections, applies tracking-agent updates, and renders radar/display state.
 from __future__ import annotations
 
-import json
 import os
 import socket
 import threading
@@ -18,24 +17,50 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from tools.components.dashboard_types import (
-    GroundPosition,
-    Observation,
-    PixelPosition,
     RadarTrackSnapshot,
 )
 from tools.components.calibration import (
     GroundPlaneCalibration,
     load_ground_plane_calibration,
-    map_image_to_ground,
 )
-from tools.components.geometry import ground_to_radar_screen, image_to_relative_ground
-from tools.agent_contracts import BoundingBox, DetectionCandidate, TrackingAgentObservation
-from tools.agent_coordinator import AgentCoordinator
-from tools.visual_tracking_agent import (
+from tools.components.geometry import ground_to_radar_screen
+from tools.contracts import TrackingAgentObservation
+from tools.coordinator import AgentCoordinator
+from tools.tracking.agent_tracking import (
     AsyncVisualTrackingRuntime,
     LLMVisualTrackingAgent,
     encode_frame_as_data_url,
 )
+from tools.tracking.state_publisher import (
+    apply_simulation_fallback_state,
+    build_tracking_frame_message,
+    build_tracking_simulated_tracks,
+    collect_radar_publish_snapshot,
+    publish_tracking_frame_message,
+    publish_tracking_radar_state,
+)
+from tools.tracking.runtime_support import (
+    apply_tracking_agent_metric_update_to_state,
+    apply_tracking_observation_update,
+    apply_tracking_agent_updates_to_tracks,
+    build_relative_depth_coverage_text,
+    build_tracking_detection_id,
+    commit_live_tracking_frame_state,
+    collect_tracking_runtime_observation_update,
+    compute_relative_depth_coverage,
+    estimate_relative_depth_from_image_geometry,
+    normalize_position_metadata,
+    submit_tracking_runtime_candidates,
+    summarize_tracking_agent_observation_metrics,
+)
+from tools.tracking.status_runtime import (
+    build_tracking_agent_health_legend_text,
+    build_tracking_agent_status_text,
+    build_tracking_debug_toggle_hint,
+    classify_tracking_agent_health,
+    tracking_agent_health_color,
+)
+from tools.tracking.frame_transformer import build_tracking_frame_outputs
 CAPTURES_DIR = PROJECT_ROOT / "captures"
 LATEST_TRACKING_FRAME_PATH = CAPTURES_DIR / "latest_tracking_frame.json"
 LATEST_RADAR_STATE_PATH = CAPTURES_DIR / "latest_radar_state.json"
@@ -121,272 +146,9 @@ def resolve_model_path() -> str:
     return "yolov8n.pt"
 
 
-def update_json(path: Path, payload: dict) -> None:
-    # Updates json persisted state safely.
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-
-
-def append_jsonl(path: Path, payload: dict) -> None:
-    # Appends jsonl records to log/history storage.
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as file:
-        file.write(json.dumps(payload, separators=(",", ":")) + "\n")
-
-
 def build_tracking_message(timestamp: float, detections: list[dict]) -> dict:
     # Builds tracking message payloads for pipeline consumers.
-    return {
-        "time": timestamp,
-        "detections": detections,
-    }
-
-
-def build_tracking_agent_status_text(status: dict[str, object], detailed: bool = True) -> str:
-    # Builds tracking agent status text payloads for pipeline consumers.
-    model = status.get("model", "unknown")
-    submissions = status.get("submissions", 0)
-    completions = status.get("completions", 0)
-    unavailable_count = status.get("unavailable_count", 0)
-    accepted = status.get("total_updates_accepted", 0)
-    rejected = status.get("total_updates_rejected", 0)
-    unmatched = status.get("total_updates_unmatched", 0)
-    latency_ms = status.get("last_latency_ms")
-    last_error = status.get("last_error")
-
-    latency_text = "n/a" if not isinstance(latency_ms, (int, float)) else f"{latency_ms:.1f}ms"
-    error_text = "none" if not isinstance(last_error, str) or not last_error else last_error
-
-    if not detailed:
-        return (
-            "tracking_agent_status: "
-            f"model={model} | completions={completions} | unavailable={unavailable_count} | "
-            f"accepted={accepted} | rejected={rejected} | last_error={error_text}"
-        )
-
-    return (
-        "tracking_agent_status: "
-        f"model={model} | submissions={submissions} | completions={completions} | "
-        f"unavailable={unavailable_count} | accepted={accepted} | rejected={rejected} | "
-        f"unmatched={unmatched} | last_latency={latency_text} | last_error={error_text}"
-    )
-
-
-def classify_tracking_agent_health(status: dict[str, object]) -> str:
-    # Classifies tracking agent health into normalized categories.
-    submissions = status.get("submissions", 0)
-    completions = status.get("completions", 0)
-    unavailable_count = status.get("unavailable_count", 0)
-    accepted = status.get("total_updates_accepted", 0)
-    rejected = status.get("total_updates_rejected", 0)
-    last_error = status.get("last_error")
-
-    if not isinstance(submissions, int):
-        submissions = 0
-    if not isinstance(completions, int):
-        completions = 0
-    if not isinstance(unavailable_count, int):
-        unavailable_count = 0
-    if not isinstance(accepted, int):
-        accepted = 0
-    if not isinstance(rejected, int):
-        rejected = 0
-
-    if isinstance(last_error, str) and last_error in {"vlm_timeout", "vlm_unavailable"}:
-        return "error"
-
-    if submissions == 0:
-        return "warn"
-
-    unavailable_rate = unavailable_count / submissions
-    decisions = accepted + rejected
-    rejection_rate = (rejected / decisions) if decisions > 0 else 0.0
-
-    if unavailable_rate >= 0.25 or rejection_rate >= 0.5:
-        return "error"
-    if unavailable_rate >= 0.1 or rejection_rate >= 0.25 or completions < submissions:
-        return "warn"
-    return "good"
-
-
-def tracking_agent_health_color(health: str) -> tuple[int, int, int]:
-    # Implements tracking agent health color behavior for this module.
-    if health == "good":
-        return (90, 220, 120)
-    if health == "error":
-        return (80, 80, 245)
-    return (100, 210, 240)
-
-
-def build_tracking_agent_health_legend_text() -> str:
-    # Builds tracking agent health legend text payloads for pipeline consumers.
-    return "tracking health legend: good | warn | error"
-
-
-def build_tracking_debug_toggle_hint(show_tracking_debug_details: bool) -> str:
-    # Builds tracking debug toggle hint payloads for pipeline consumers.
-    mode = "detailed" if show_tracking_debug_details else "concise"
-    return f"press 'h' to toggle tracking-agent diagnostics ({mode})"
-
-
-def compute_relative_depth_coverage(
-    tracks: list[RadarTrackSnapshot],
-) -> dict[str, float | int]:
-    # Computes relative depth coverage metrics from available state.
-    total_tracks = len(tracks)
-    with_depth = 0
-
-    for track in tracks:
-        if track.relative_depth is not None:
-            with_depth += 1
-
-    coverage_ratio = (with_depth / total_tracks) if total_tracks > 0 else 0.0
-
-    return {
-        "tracks_with_depth": with_depth,
-        "total_tracks": total_tracks,
-        "coverage_ratio": round(coverage_ratio, 3),
-        "coverage_percent": round(coverage_ratio * 100.0, 1),
-    }
-
-
-def build_relative_depth_coverage_text(metrics: dict[str, float | int]) -> str:
-    # Builds relative depth coverage text payloads for pipeline consumers.
-    tracks_with_depth = metrics.get("tracks_with_depth", 0)
-    total_tracks = metrics.get("total_tracks", 0)
-    coverage_percent = metrics.get("coverage_percent", 0.0)
-    return (
-        "depth coverage: "
-        f"{tracks_with_depth}/{total_tracks} "
-        f"({coverage_percent}%)"
-    )
-
-
-def build_tracking_detection_id(track_key: str) -> str:
-    # Builds tracking detection id payloads for pipeline consumers.
-    return track_key
-
-
-def normalize_position_metadata(
-    position_kind: str,
-    ground_coordinate_unit: str,
-    quality_flags: list[str],
-) -> tuple[str, str, list[str]]:
-    # Normalizes position metadata into contract-safe values.
-    normalized_flags = list(quality_flags)
-    normalized_kind = position_kind
-    normalized_unit = ground_coordinate_unit
-
-    valid_kinds = {"relative_ground_estimate", "calibrated_ground_plane"}
-    if normalized_kind not in valid_kinds:
-        normalized_kind = "relative_ground_estimate"
-        normalized_unit = "relative_units"
-        normalized_flags.append("position_kind_normalized:unknown_kind")
-
-    if normalized_kind == "relative_ground_estimate":
-        if normalized_unit != "relative_units":
-            normalized_unit = "relative_units"
-            normalized_flags.append("ground_unit_normalized:relative_units")
-        return normalized_kind, normalized_unit, normalized_flags
-
-    if not isinstance(normalized_unit, str) or not normalized_unit.strip() or normalized_unit == "relative_units":
-        normalized_kind = "relative_ground_estimate"
-        normalized_unit = "relative_units"
-        normalized_flags.append("position_kind_normalized:invalid_calibrated_unit")
-
-    return normalized_kind, normalized_unit, normalized_flags
-
-
-def estimate_relative_depth_from_image_geometry(
-    x1: float,
-    y1: float,
-    x2: float,
-    y2: float,
-    frame_width: int,
-    frame_height: int,
-) -> float | None:
-    # Estimates relative depth from image geometry using deterministic heuristics.
-    if frame_width <= 0 or frame_height <= 0:
-        return None
-
-    bbox_width = float(x2) - float(x1)
-    bbox_height = float(y2) - float(y1)
-    if bbox_width <= 0 or bbox_height <= 0:
-        return None
-
-    clamped_bottom_y = max(0.0, min(float(y2), float(frame_height)))
-    vertical_depth = (float(frame_height) - clamped_bottom_y) / float(frame_height)
-
-    normalized_height = max(0.0, min(bbox_height / float(frame_height), 1.0))
-    scale_depth = 1.0 - normalized_height
-
-    relative_depth = 0.7 * vertical_depth + 0.3 * scale_depth
-    relative_depth = max(0.0, min(relative_depth, 1.0))
-    return round(relative_depth, 3)
-
-
-def apply_tracking_agent_updates_to_tracks(
-    tracks: dict[str, RadarTrackSnapshot],
-    tracking_agent_observation: TrackingAgentObservation,
-    track_trails: dict[str, deque[tuple[float, float]]] | None = None,
-) -> dict[str, int]:
-    # Applies validated tracking-agent updates to track state, quality flags, confidence, and bounded continuity corrections.
-    accepted = 0
-    rejected = 0
-    unmatched = 0
-
-    for update in tracking_agent_observation.updates:
-        track_key = update.detection_id
-        snapshot = tracks.get(track_key)
-        if snapshot is None:
-            unmatched += 1
-            continue
-
-        if update.accepted:
-            accepted += 1
-            if update.resolved_track_id != track_key:
-                snapshot.quality_flags.append(f"vlm_association_candidate:{update.resolved_track_id}")
-
-            if track_trails is not None and update.resolved_track_id:
-                resolved_trail = track_trails.get(update.resolved_track_id)
-                if isinstance(resolved_trail, deque) and len(resolved_trail) > 0:
-                    anchor_x, anchor_z = resolved_trail[-1]
-                    current_x = snapshot.ground_position.x
-                    current_z = snapshot.ground_position.z
-                    delta_x = anchor_x - current_x
-                    delta_z = anchor_z - current_z
-                    distance = (delta_x * delta_x + delta_z * delta_z) ** 0.5
-                    if distance > 0:
-                        bounded_scale = min(
-                            1.0,
-                            AGENT_GROUND_MAX_CORRECTION / distance,
-                        )
-                        blended_x = current_x + (delta_x * AGENT_GROUND_BLEND_FACTOR * bounded_scale)
-                        blended_z = current_z + (delta_z * AGENT_GROUND_BLEND_FACTOR * bounded_scale)
-                        snapshot.ground_position = GroundPosition(x=blended_x, z=blended_z)
-                        snapshot.quality_flags.append("tracking_agent_ground_anchor_blend")
-
-            if any(
-                reason in {"depth_conflict_with_reliable_measurement", "ground_position_conflict_with_calibrated_mapping"}
-                for reason in update.rejection_reasons
-            ):
-                snapshot.quality_flags.append("tracking_agent_conflict_flagged")
-                if isinstance(snapshot.confidence, (int, float)):
-                    snapshot.confidence = max(0.0, snapshot.confidence * 0.9)
-        else:
-            rejected += 1
-            snapshot.quality_flags.append("vlm_association_rejected")
-            snapshot.quality_flags.append("cross_agent_review_required")
-            for reason in update.rejection_reasons:
-                snapshot.quality_flags.append(f"vlm_rejection:{reason}")
-            if isinstance(snapshot.confidence, (int, float)):
-                snapshot.confidence = max(0.0, snapshot.confidence * 0.85)
-
-    return {
-        "accepted": accepted,
-        "rejected": rejected,
-        "unmatched": unmatched,
-    }
+    return build_tracking_frame_message(timestamp, detections)
 
 
 def run_live_tracking_loop(state: SharedDashboardState) -> None:
@@ -464,243 +226,62 @@ def run_live_tracking_loop(state: SharedDashboardState) -> None:
                 continue
 
             now = time.time()
-            tracks: dict[str, RadarTrackSnapshot] = {}
-            detections_for_file: list[dict] = []
-            tracking_candidates: list[DetectionCandidate] = []
-            selected_event_reasons: list[str] = []
+            tracks, detections_for_file, tracking_candidates, selected_event_reasons = build_tracking_frame_outputs(
+                boxes=result.boxes,
+                model_names=model.names,
+                now=now,
+                frame_shape=frame.shape,
+                calibration=calibration,
+                track_trails=state.track_trails,
+                max_ground_x=MAX_GROUND_X,
+                max_ground_z=MAX_GROUND_Z,
+            )
 
-            boxes = result.boxes
-            if boxes is not None and boxes.id is not None:
-                coordinates = boxes.xyxy.cpu().tolist()
-                track_ids = boxes.id.int().cpu().tolist()
-                classes = boxes.cls.int().cpu().tolist()
-                confidences = boxes.conf.cpu().tolist()
-
-                frame_height, frame_width = frame.shape[:2]
-
-                for bbox, track_id, cls_idx, confidence in zip(
-                    coordinates,
-                    track_ids,
-                    classes,
-                    confidences,
-                ):
-                    x1, y1, x2, y2 = bbox
-                    center_x = (x1 + x2) / 2.0
-                    center_y = y2
-                    relative_depth = estimate_relative_depth_from_image_geometry(
-                        x1,
-                        y1,
-                        x2,
-                        y2,
-                        frame_width,
-                        frame_height,
-                    )
-                    quality_flags: list[str] = []
-                    position_kind = "relative_ground_estimate"
-                    ground_unit = "relative_units"
-
-                    if calibration is not None:
-                        try:
-                            ground_x, ground_z = map_image_to_ground(
-                                calibration.matrix,
-                                center_x,
-                                center_y,
-                            )
-                            position_kind = "calibrated_ground_plane"
-                            ground_unit = calibration.unit
-                            quality_flags.append("ground_plane_homography")
-                        except Exception:
-                            ground_x, ground_z = image_to_relative_ground(
-                                center_x,
-                                center_y,
-                                frame_width,
-                                frame_height,
-                                MAX_GROUND_X,
-                                MAX_GROUND_Z,
-                            )
-                            quality_flags.append("calibration_projection_failed")
-                            quality_flags.append("estimated_ground_from_image")
-                    else:
-                        ground_x, _image_based_ground_z = image_to_relative_ground(
-                            center_x,
-                            center_y,
-                            frame_width,
-                            frame_height,
-                            MAX_GROUND_X,
-                            MAX_GROUND_Z,
-                        )
-                        if relative_depth is not None:
-                            ground_z = relative_depth * MAX_GROUND_Z
-                            quality_flags.append("estimated_ground_from_relative_depth")
-                        else:
-                            ground_z = _image_based_ground_z
-                        quality_flags.append("estimated_ground_from_image")
-
-                    position_kind, ground_unit, quality_flags = normalize_position_metadata(
-                        position_kind=position_kind,
-                        ground_coordinate_unit=ground_unit,
-                        quality_flags=quality_flags,
-                    )
-
-                    track_key = str(track_id)
-                    detection_id = build_tracking_detection_id(track_key)
-                    if relative_depth is not None:
-                        quality_flags.append("relative_depth_estimate:image_geometry")
-                    else:
-                        quality_flags.append("relative_depth_unavailable")
-
-                    motion_history = []
-                    existing_trail = state.track_trails.get(track_key)
-                    if existing_trail is not None:
-                        for index, (trail_x, trail_z) in enumerate(existing_trail):
-                            motion_history.append(
-                                {
-                                    "history_index": index,
-                                    "ground_x": trail_x,
-                                    "ground_z": trail_z,
-                                }
-                            )
-                    observation = Observation(
-                        track_id=track_key,
-                        timestamp=now,
-                        source="camera",
-                        bbox_xyxy=[x1, y1, x2, y2],
-                        pixel_position=PixelPosition(x=center_x, y=center_y),
-                        ground_position=GroundPosition(x=ground_x, z=ground_z),
-                        ground_coordinate_unit=ground_unit,
-                        position_kind=position_kind,
-                        detection_confidence=round(float(confidence), 3),
-                        quality_flags=quality_flags,
-                    )
-
-                    tracks[track_key] = RadarTrackSnapshot(
-                        track_id=track_key,
-                        timestamp=now,
-                        pixel_position=observation.pixel_position,
-                        ground_position=observation.ground_position,
-                        ground_coordinate_unit=observation.ground_coordinate_unit,
-                        position_kind=observation.position_kind,
-                        quality_flags=observation.quality_flags,
-                        confidence=observation.detection_confidence,
-                        relative_depth=relative_depth,
-                    )
-
-                    tracking_candidates.append(
-                        DetectionCandidate(
-                            detection_id=detection_id,
-                            timestamp=now,
-                            yolo_track_id=track_key,
-                            label=model.names[int(cls_idx)],
-                            detection_confidence=round(float(confidence), 3),
-                            pixel_bbox=BoundingBox(x1=float(x1), y1=float(y1), x2=float(x2), y2=float(y2)),
-                            pixel_center_x=float(center_x),
-                            pixel_center_y=float(center_y),
-                            relative_depth=relative_depth,
-                            ground_x=float(ground_x),
-                            ground_z=float(ground_z),
-                            ground_coordinate_unit=ground_unit,
-                            position_kind=position_kind,
-                            motion_history=motion_history,
-                        )
-                    )
-
-                    if float(confidence) < 0.5:
-                        selected_event_reasons.append("low_detection_confidence")
-                    if "calibration_projection_failed" in quality_flags:
-                        selected_event_reasons.append("calibration_projection_failed")
-
-                    detections_for_file.append(
-                        {
-                            "id": int(track_id),
-                            "label": model.names[int(cls_idx)],
-                            "confidence": round(float(confidence), 3),
-                            "x": round(center_x, 2),
-                            "y": round(center_y, 2),
-                            "relative_depth": relative_depth,
-                            "position_kind": position_kind,
-                            "ground_coordinate_unit": ground_unit,
-                            "position_frame": position_kind,
-                        }
-                    )
-
-            frame_reference = None
-            if tracking_candidates:
-                selected_event_reasons.append("periodic_visual_continuity_check")
-                try:
-                    frame_reference = encode_frame_as_data_url(frame)
-                except Exception:
-                    frame_reference = None
-
-                did_submit = tracking_runtime.submit_if_needed(
-                    now=now,
-                    frame_reference=frame_reference,
-                    detections=tracking_candidates,
-                    event_reasons=selected_event_reasons,
-                    request_timeout_seconds=1.0,
-                )
-                if did_submit:
-                    with state.lock:
-                        state.tracking_agent_submissions += 1
-
-            tracking_agent_observation = tracking_runtime.poll_latest_observation()
-            if tracking_agent_observation is not None:
+            did_submit = submit_tracking_runtime_candidates(
+                runtime=tracking_runtime,
+                now=now,
+                frame=frame,
+                detections=tracking_candidates,
+                event_reasons=selected_event_reasons,
+                encode_frame=encode_frame_as_data_url,
+                request_timeout_seconds=1.0,
+            )
+            if did_submit:
                 with state.lock:
-                    current_trails = {
-                        key: deque(value, maxlen=RADAR_TRAIL_LENGTH)
-                        for key, value in state.track_trails.items()
-                    }
-                summary = apply_tracking_agent_updates_to_tracks(
-                    tracks,
-                    tracking_agent_observation,
-                    track_trails=current_trails,
+                    state.tracking_agent_submissions += 1
+
+            with state.lock:
+                track_trails_snapshot = dict(state.track_trails)
+            tracking_agent_observation, metric_update = collect_tracking_runtime_observation_update(
+                runtime=tracking_runtime,
+                tracks=tracks,
+                track_trails=track_trails_snapshot,
+                trail_length=RADAR_TRAIL_LENGTH,
+            )
+            if tracking_agent_observation is not None and metric_update is not None:
+                apply_tracking_agent_metric_update_to_state(
+                    state=state,
+                    metric_update=metric_update,
                 )
-                with state.lock:
-                    state.tracking_agent_completions += 1
-                    state.tracking_agent_last_latency_ms = tracking_agent_observation.proposal_latency_ms
-                    state.tracking_agent_total_updates_accepted += summary["accepted"]
-                    state.tracking_agent_total_updates_rejected += summary["rejected"]
-                    state.tracking_agent_total_updates_unmatched += summary["unmatched"]
-
-                    uncertainty_values = set(tracking_agent_observation.uncertainties)
-                    if any(item.startswith("vlm_") for item in uncertainty_values):
-                        state.tracking_agent_unavailable_count += 1
-
-                    last_error = None
-                    for item in tracking_agent_observation.uncertainties:
-                        if isinstance(item, str) and item.startswith("vlm_"):
-                            last_error = item
-                            break
-                    state.tracking_agent_last_error = last_error
 
             annotated = result.plot()
-            with state.lock:
-                state.latest_annotated_frame = annotated
-                state.frame_height, state.frame_width = annotated.shape[:2]
-                state.last_live_frame_time = now
-                state.last_observation_time = now
-                state.camera_status = "connected"
-                state.detector_status = "running"
+            commit_live_tracking_frame_state(
+                state=state,
+                now=now,
+                annotated_frame=annotated,
+                tracks=tracks,
+                tracking_agent_observation=tracking_agent_observation,
+                trail_length=RADAR_TRAIL_LENGTH,
+            )
 
-                state.active_tracks = tracks
-                if tracking_agent_observation is not None:
-                    state.latest_tracking_agent_observation = tracking_agent_observation.to_dict()
-                for track_key, snapshot in tracks.items():
-                    if track_key not in state.track_trails:
-                        state.track_trails[track_key] = deque(maxlen=RADAR_TRAIL_LENGTH)
-                    state.track_trails[track_key].append(
-                        (snapshot.ground_position.x, snapshot.ground_position.z)
-                    )
-
-            tracking_message = build_tracking_message(now, detections_for_file)
-            update_json(LATEST_TRACKING_FRAME_PATH, tracking_message)
-
-            try:
-                udp_socket.sendto(
-                    json.dumps(tracking_message).encode("utf-8"),
-                    (UDP_TRACKING_HOST, UDP_TRACKING_PORT),
-                )
-            except OSError:
-                pass
+            publish_tracking_frame_message(
+                tracking_frame_path=LATEST_TRACKING_FRAME_PATH,
+                timestamp=now,
+                detections=detections_for_file,
+                udp_socket=udp_socket,
+                udp_host=UDP_TRACKING_HOST,
+                udp_port=UDP_TRACKING_PORT,
+            )
     finally:
         with state.lock:
             state.camera_status = "stopped"
@@ -708,34 +289,6 @@ def run_live_tracking_loop(state: SharedDashboardState) -> None:
         udp_socket.close()
         tracking_runtime.shutdown()
         camera.release()
-
-
-def build_simulated_tracks(sim_time: float) -> dict[str, RadarTrackSnapshot]:
-    # Builds simulated tracks payloads for pipeline consumers.
-    simulated: dict[str, RadarTrackSnapshot] = {}
-
-    sim_tracks = [
-        ("sim-1", -4.0 + 0.8 * sim_time, 8.0 + 1.0 * (sim_time % 4.0)),
-        ("sim-2", 3.0 + 1.2 * (sim_time % 2.5), 5.5 + 0.8 * sim_time),
-    ]
-
-    for track_id, x_position, z_position in sim_tracks:
-        wrapped_x = ((x_position + MAX_GROUND_X) % (2 * MAX_GROUND_X)) - MAX_GROUND_X
-        wrapped_z = z_position % MAX_GROUND_Z
-
-        simulated[track_id] = RadarTrackSnapshot(
-            track_id=track_id,
-            timestamp=time.time(),
-            pixel_position=None,
-            ground_position=GroundPosition(x=wrapped_x, z=wrapped_z),
-            ground_coordinate_unit="relative_units",
-            position_kind="simulated_ground_track",
-            quality_flags=["simulated_data"],
-            confidence=None,
-            relative_depth=None,
-        )
-
-    return simulated
 
 
 def run_radar_loop(state: SharedDashboardState) -> None:
@@ -754,70 +307,37 @@ def run_radar_loop(state: SharedDashboardState) -> None:
         using_simulation = live_is_stale or camera_status in {"unavailable", "error", "frame_error", "stopped"}
 
         if using_simulation:
-            simulated_tracks = build_simulated_tracks(sim_step)
-            with state.lock:
-                state.mapping_mode = "simulation_fallback"
-                state.active_tracks = simulated_tracks
-                state.last_observation_time = now
-                for track_key, snapshot in simulated_tracks.items():
-                    if track_key not in state.track_trails:
-                        state.track_trails[track_key] = deque(maxlen=RADAR_TRAIL_LENGTH)
-                    state.track_trails[track_key].append(
-                        (snapshot.ground_position.x, snapshot.ground_position.z)
-                    )
+            simulated_tracks = build_tracking_simulated_tracks(
+                sim_step,
+                max_ground_x=MAX_GROUND_X,
+                max_ground_z=MAX_GROUND_Z,
+            )
+            apply_simulation_fallback_state(
+                state=state,
+                now=now,
+                simulated_tracks=simulated_tracks,
+                trail_length=RADAR_TRAIL_LENGTH,
+            )
             sim_step += sim_interval
         else:
             with state.lock:
                 state.mapping_mode = "relative_image_plane"
 
-        with state.lock:
-            snapshot_tracks = list(state.active_tracks.values())
-            coordinate_system = state.mapping_mode
-            camera_status = state.camera_status
-            detector_status = state.detector_status
-            calibration_status = state.calibration_status
-            last_observation_time = state.last_observation_time
-            tracking_agent_status = {
-                "model": state.tracking_agent_model,
-                "submissions": state.tracking_agent_submissions,
-                "completions": state.tracking_agent_completions,
-                "unavailable_count": state.tracking_agent_unavailable_count,
-                "total_updates_accepted": state.tracking_agent_total_updates_accepted,
-                "total_updates_rejected": state.tracking_agent_total_updates_rejected,
-                "total_updates_unmatched": state.tracking_agent_total_updates_unmatched,
-                "last_latency_ms": state.tracking_agent_last_latency_ms,
-                "last_error": state.tracking_agent_last_error,
-            }
-
-        if calibration_status == "loaded" and coordinate_system != "simulation_fallback":
-            coordinate_system = "calibrated_ground_plane"
-
-        relative_depth_coverage = compute_relative_depth_coverage(snapshot_tracks)
-
-        update_json(
-            LATEST_RADAR_STATE_PATH,
-            {
-                "timestamp": now,
-                "coordinate_system": coordinate_system,
-                "camera_status": camera_status,
-                "detector_status": detector_status,
-                "calibration_status": calibration_status,
-                "tracking_agent_status": tracking_agent_status,
-                "active_track_count": len(snapshot_tracks),
-                "last_observation_timestamp": last_observation_time,
-                "relative_depth_coverage": relative_depth_coverage,
-                "tracking_agent_observation": state.latest_tracking_agent_observation,
-                "tracks": [track.to_dict() for track in snapshot_tracks],
-            },
-        )
+        radar_publish_snapshot = collect_radar_publish_snapshot(state)
 
         try:
-            append_jsonl(
-                RADAR_DEPTH_COVERAGE_HISTORY_PATH,
-                {
-                    "timestamp": now,
-                    "coverage": relative_depth_coverage,
-                },
+            publish_tracking_radar_state(
+                radar_state_path=LATEST_RADAR_STATE_PATH,
+                radar_depth_coverage_history_path=RADAR_DEPTH_COVERAGE_HISTORY_PATH,
+                now=now,
+                coordinate_system=radar_publish_snapshot["coordinate_system"],
+                camera_status=radar_publish_snapshot["camera_status"],
+                detector_status=radar_publish_snapshot["detector_status"],
+                calibration_status=radar_publish_snapshot["calibration_status"],
+                tracking_agent_status=radar_publish_snapshot["tracking_agent_status"],
+                last_observation_timestamp=radar_publish_snapshot["last_observation_time"],
+                tracking_agent_observation=radar_publish_snapshot["tracking_agent_observation"],
+                tracks=radar_publish_snapshot["tracks"],
             )
         except OSError:
             pass

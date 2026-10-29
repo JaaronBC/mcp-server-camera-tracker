@@ -6,10 +6,10 @@ import time
 from pathlib import Path
 from typing import Any
 
-from . import dashboardReasoning
-from .registry import mcp
+from ..reasoning import tools_reasoning_assessment as dashboardReasoning
+from ..registry import mcp
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 AGENT_EVENTS_PATH = PROJECT_ROOT / "captures" / "agent_events.jsonl"
 AGENT_EVENT_HEALTH_FRESHNESS_SECONDS = 30.0
 MAX_EVIDENCE_STR_LIST_ITEMS = 5

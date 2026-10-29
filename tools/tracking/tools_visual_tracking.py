@@ -5,10 +5,10 @@ import asyncio
 import time
 from typing import Any
 
-from .agent_contracts import BoundingBox, DetectionCandidate
-from .agent_coordinator import AgentCoordinator
-from .registry import mcp
-from .visual_tracking_agent import TRACKING_VLM_MODEL, LLMVisualTrackingAgent
+from ..contracts import BoundingBox, DetectionCandidate
+from ..coordinator import AgentCoordinator
+from ..registry import mcp
+from .agent_tracking import TRACKING_VLM_MODEL, LLMVisualTrackingAgent
 
 
 def _to_float(value: Any) -> float | None:

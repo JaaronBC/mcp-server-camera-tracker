@@ -7,9 +7,9 @@ from typing import Any
 
 from tools.components.calibration import load_ground_plane_calibration
 
-from .registry import mcp
+from ..registry import mcp
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CALIBRATION_PATH = PROJECT_ROOT / "captures" / "ground_plane_calibration.json"
 
 

@@ -2,7 +2,7 @@
 import unittest
 from collections import deque
 
-from tools.agent_contracts import TrackingAgentObservation, VisualAssociationUpdate
+from tools.contracts import TrackingAgentObservation, VisualAssociationUpdate
 from tools.components.dashboard_types import GroundPosition, RadarTrackSnapshot
 from tools.components.liveTrackingDisplay import (
     apply_tracking_agent_updates_to_tracks,

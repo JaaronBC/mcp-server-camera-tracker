@@ -5,9 +5,9 @@ import asyncio
 import time
 import unittest
 
-from tools.agent_contracts import BoundingBox, DetectionCandidate, VisualAssociationProposal
-from tools.agent_coordinator import AgentCoordinator
-from tools.visual_tracking_agent import AsyncVisualTrackingRuntime, VisualTrackingAgentResult
+from tools.contracts import BoundingBox, DetectionCandidate, VisualAssociationProposal
+from tools.coordinator import AgentCoordinator
+from tools.tracking.agent_tracking import AsyncVisualTrackingRuntime, VisualTrackingAgentResult
 
 
 class FakeVisualTrackingAgent:

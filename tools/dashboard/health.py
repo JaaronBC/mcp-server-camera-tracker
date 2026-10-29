@@ -6,9 +6,9 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .registry import mcp
+from ..registry import mcp
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 RADAR_STATE_PATH = PROJECT_ROOT / "captures" / "latest_radar_state.json"
 
 

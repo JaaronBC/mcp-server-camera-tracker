@@ -8,14 +8,10 @@ import time
 from pathlib import Path
 from typing import Any
 import sys
-from dotenv import load_dotenv
-from openai import AsyncOpenAI
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-SKILL_PATH = PROJECT_ROOT / "Skills.md"
-SKILL_FALLBACK_PATH = PROJECT_ROOT / "design.md"
 SERVER_PATH = PROJECT_ROOT / "server.py"
 
 TRACKING_ADDRESS = ("127.0.0.1", 5005)
@@ -35,8 +31,6 @@ DEPTH_COVERAGE_SAMPLE_LIMIT = 50
 AGENT_OPS_HEALTH_FRESHNESS_SECONDS = 30.0
 HANDOFF_DEGRADED_WARN_RATE = 0.1
 HANDOFF_DEGRADED_CRITICAL_RATE = 0.3
-OPENAI_BASE_URL = "https://128.171.10.83:9443/v1"
-OPENAI_MODEL = "openai/gpt-oss-120b"
 
 
 def _positive_float(value: str) -> float:
@@ -190,44 +184,6 @@ def parse_cli_args(args: list[str]) -> argparse.Namespace:
     if options.handoff_degraded_critical_rate < options.handoff_degraded_warn_rate:
         parser.error("--handoff-degraded-critical-rate must be greater than or equal to --handoff-degraded-warn-rate")
     return options
-
-def load_system_skill() -> str:
-    # Loads system skill data from storage for downstream processing.
-    """Load instructions used to summarize YOLO tracking frames."""
-    selected_path = None
-    for candidate in (SKILL_PATH, SKILL_FALLBACK_PATH):
-        if candidate.is_file():
-            selected_path = candidate
-            break
-
-    if selected_path is None:
-        raise FileNotFoundError(
-            f"System skill not found: checked {SKILL_PATH} and {SKILL_FALLBACK_PATH}"
-        )
-
-    system_skill = selected_path.read_text(encoding="utf-8")
-    return (
-        "You are the Object Behavior Assistant, an agent that interprets "
-        "real-time object tracking observations.\n\n"
-        "Follow the movement-analysis skill below whenever interpreting "
-        "a tracking frame.\n\n"
-        f"{system_skill}"
-    )
-
-
-def create_openai_client() -> AsyncOpenAI:
-    # Implements create openai client behavior for this module.
-    """Create the configured summarization client from the environment."""
-    load_dotenv()
-    api_key = os.environ.get("OPENROUTER_API_KEY")
-    if not api_key:
-        raise RuntimeError(
-            "OPENROUTER_API_KEY is not set. Add it to the environment or .env."
-        )
-
-    base_url = os.environ.get("OPENAI_BASE_URL", OPENAI_BASE_URL)
-
-    return AsyncOpenAI(base_url=base_url, api_key=api_key)
 
 async def verify_required_tools(session: ClientSession) -> None:
     # Verifies required tools contract/availability requirements.
@@ -994,36 +950,8 @@ async def print_pipeline_contract_startup_snapshot(
     )
 
 
-async def summarize_frame(
-    client: AsyncOpenAI,
-    system_prompt: str,
-    frame_data: str,
-) -> str:
-    # Implements summarize frame behavior for this module.
-    """Ask the language model to describe a YOLO frame returned by MCP."""
-    response = await client.chat.completions.create(
-        model=OPENAI_MODEL,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {
-                "role": "user",
-                "content": (
-                    "Summarize the objects and their positions in this latest "
-                    f"YOLO tracking frame:\n{frame_data}"
-                ),
-            },
-        ],
-    )
-
-    if not response.choices:
-        raise RuntimeError("The language model returned no choices.")
-
-    return response.choices[0].message.content or "(no summary returned)"
-
 async def monitor_movement(
     session: ClientSession,
-    client: AsyncOpenAI,
-    system_prompt: str,
     enable_agent_ops_heartbeat: bool = True,
     agent_ops_interval_seconds: float = AGENT_OPS_INTERVAL_SECONDS,
     agent_ops_max_tracks: int = AGENT_OPS_MAX_TRACKS,
@@ -1045,7 +973,6 @@ async def monitor_movement(
     )
 
     loop = asyncio.get_running_loop()
-    summary_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=1)
     agent_ops_enabled = enable_agent_ops_heartbeat
     last_agent_ops_cycle_at = -agent_ops_interval_seconds
     agent_ops_summary_enabled = enable_agent_ops_heartbeat and agent_ops_summary_every_cycles > 0
@@ -1057,21 +984,6 @@ async def monitor_movement(
     completed_agent_ops_cycles = 0
     agent_ops_cycle_task: asyncio.Task[dict[str, Any]] | None = None
 
-    async def summarize_frames() -> None:
-        # Implements summarize frames behavior for this module.
-        while True:
-            frame_data = await summary_queue.get()
-            try:
-                summary = await summarize_frame(client, system_prompt, frame_data)
-            except Exception as error:
-                print(
-                    f"Movement summary failed ({type(error).__name__}): {error}",
-                    flush=True,
-                )
-            else:
-                print(f"\nMovement summary:\n{summary}", flush=True)
-
-    summary_task = asyncio.create_task(summarize_frames())
     try:
         while True:
             iteration_started_at = loop.time()
@@ -1121,13 +1033,6 @@ async def monitor_movement(
                     print("Movement analysis returned no frame data.", flush=True)
                 else:
                     print(f"\nYOLO frame:\n{frame_data}", flush=True)
-                    if summary_queue.full():
-                        summary_queue.get_nowait()
-                        print(
-                            "Replacing queued movement summary with the latest frame.",
-                            flush=True,
-                        )
-                    summary_queue.put_nowait(frame_data)
 
                     now = loop.time()
                     if agent_ops_enabled and (now - last_agent_ops_cycle_at) >= agent_ops_interval_seconds:
@@ -1158,11 +1063,6 @@ async def monitor_movement(
             elapsed = loop.time() - iteration_started_at
             await asyncio.sleep(max(0, ANALYSIS_INTERVAL_SECONDS - elapsed))
     finally:
-        summary_task.cancel()
-        try:
-            await summary_task
-        except asyncio.CancelledError:
-            pass
         if agent_ops_cycle_task is not None and not agent_ops_cycle_task.done():
             agent_ops_cycle_task.cancel()
             try:
@@ -1188,8 +1088,6 @@ async def run_agent(
 ) -> None:
     # Initializes MCP session, startup snapshots, and movement monitoring runtime.
     """Connect to the MCP server, start tracking, and analyze its feed."""
-    system_prompt = load_system_skill()
-    client = create_openai_client()
     server_params = StdioServerParameters(
         command=sys.executable,
         args=[str(SERVER_PATH)],
@@ -1213,38 +1111,33 @@ async def run_agent(
             flush=True,
         )
 
-    try:
-        async with stdio_client(server_params) as (read_stream, write_stream):
-            async with ClientSession(read_stream, write_stream) as session:
-                await session.initialize()
-                if show_startup_depth_snapshot:
-                    await print_depth_coverage_startup_snapshot(
-                        session,
-                        sample_limit=depth_coverage_sample_limit,
-                    )
-                if show_startup_pipeline_contract_snapshot:
-                    await print_pipeline_contract_startup_snapshot(
-                        session,
-                        max_observation_age_seconds=3.0,
-                        require_live_pipeline=False,
-                    )
-                await verify_required_tools(session)
-                await start_live_tracking(session)
-                await monitor_movement(
+    async with stdio_client(server_params) as (read_stream, write_stream):
+        async with ClientSession(read_stream, write_stream) as session:
+            await session.initialize()
+            if show_startup_depth_snapshot:
+                await print_depth_coverage_startup_snapshot(
                     session,
-                    client,
-                    system_prompt,
-                    enable_agent_ops_heartbeat=enable_agent_ops_heartbeat,
-                    agent_ops_interval_seconds=agent_ops_interval_seconds,
-                    agent_ops_max_tracks=agent_ops_max_tracks,
-                    agent_ops_summary_every_cycles=agent_ops_summary_every_cycles,
-                    agent_ops_summary_window_size=agent_ops_summary_window_size,
-                    depth_coverage_summary_enabled=depth_coverage_summary_enabled,
-                    depth_coverage_summary_every_cycles=depth_coverage_summary_every_cycles,
-                    depth_coverage_sample_limit=depth_coverage_sample_limit,
+                    sample_limit=depth_coverage_sample_limit,
                 )
-    finally:
-        await client.close()
+            if show_startup_pipeline_contract_snapshot:
+                await print_pipeline_contract_startup_snapshot(
+                    session,
+                    max_observation_age_seconds=3.0,
+                    require_live_pipeline=False,
+                )
+            await verify_required_tools(session)
+            await start_live_tracking(session)
+            await monitor_movement(
+                session,
+                enable_agent_ops_heartbeat=enable_agent_ops_heartbeat,
+                agent_ops_interval_seconds=agent_ops_interval_seconds,
+                agent_ops_max_tracks=agent_ops_max_tracks,
+                agent_ops_summary_every_cycles=agent_ops_summary_every_cycles,
+                agent_ops_summary_window_size=agent_ops_summary_window_size,
+                depth_coverage_summary_enabled=depth_coverage_summary_enabled,
+                depth_coverage_summary_every_cycles=depth_coverage_summary_every_cycles,
+                depth_coverage_sample_limit=depth_coverage_sample_limit,
+            )
 
 def main() -> None:
     # Implements main behavior for this module.
