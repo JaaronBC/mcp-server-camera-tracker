@@ -1,10 +1,10 @@
 # Handles server behavior.
-from tools.registry import mcp
+from agents.registry import mcp
 
 # Import tools
-from tools.orchestration import tools_orchestration
-from tools.reasoning import tools_reasoning_assessment
-from tools.tracking import tools_visual_tracking
+from agents.orchestration.tools import orchestration as _orchestration_tools
+from agents.reasoning import agents as _reasoning_tools
+from agents.tracking import agents as _tracking_tools
 
 if __name__ == "__main__":
     mcp.run()

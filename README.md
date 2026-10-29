@@ -46,8 +46,8 @@ RUN_LIVE_LLM_TESTS=1 python -m unittest tests.test_orchestration_reasoning_live_
 
 ## Migration summary (dashboard → orchestration)
 
-Canonical control-plane imports are now under `tools/orchestration/*`.
-The legacy `tools/dashboard/*` package has been removed.
+Canonical control-plane imports are now under `agents/orchestration/*`.
+The legacy `agents/dashboard/*` package has been removed.
 
 - `tools.dashboard.agent_ops` → `tools.orchestration.agent_ops`
 - `tools.dashboard.calibration` → `tools.orchestration.calibration`
@@ -63,7 +63,7 @@ Dashboard-oriented test modules were also renamed to orchestration naming (for e
 ### Post-migration cleanup checklist
 
 - Confirm no legacy dashboard imports remain in Python sources:
-  `python - <<'PY'\nfrom pathlib import Path\npatterns=['tools.dashboard','from ..dashboard','from .dashboard']\nfor p in Path('.').rglob('*.py'):\n    if any(x in p.parts for x in ['.git','.venv','source','__pycache__']):\n        continue\n    t=p.read_text(encoding='utf-8')\n    if any(s in t for s in patterns):\n        print(p)\nPY`
+  `python - <<'PY'\nfrom pathlib import Path\npatterns=['agents.dashboard','from ..dashboard','from .dashboard']\nfor p in Path('.').rglob('*.py'):\n    if any(x in p.parts for x in ['.git','.venv','source','__pycache__']):\n        continue\n    t=p.read_text(encoding='utf-8')\n    if any(s in t for s in patterns):\n        print(p)\nPY`
 - Run full test discovery:
   `python -m unittest discover -s tests -p 'test_*.py'`
 - If desired, clear local project bytecode caches (keeps `.venv` intact):
@@ -120,7 +120,7 @@ Existing dashboard-prefixed names are retained as compatibility aliases.
 
 ## Object Tracking Dashboard Demo
 
-The dashboard demo is implemented in `tools/components/liveTrackingDisplay.py`.
+The dashboard demo is implemented in `agents/dashboard/live_tracking_display.py`.
 
 The Tracking Agent now uses a vision-capable VLM (`qwen-3.8-27b`) asynchronously on selected frames/events while preserving YOLO detections as primary measurements.
 
@@ -143,6 +143,7 @@ It renders:
 - live webcam feed with YOLO + ByteTrack overlays,
 - a radar-style panel with track markers and short trails,
 - status line (`camera`, `detector`, active tracks, last observation, mapping mode),
+- latest validated assessment summary (`status`, `assessment label`, `handoff quality`, freshness) plus limitations/error codes,
 - track detail panel (ID, timestamp, pixel position, ground estimate, quality flags).
 
 Tracking-agent inputs include YOLO detections, pixel coordinates, bounding boxes, timestamps, optional relative depth field, and motion history snippets. The VLM proposes association continuity and uncertainty; the coordinator validates proposals before use and rejects conflicting overrides.
@@ -153,7 +154,7 @@ If webcam or detector input is unavailable, the radar automatically switches to 
 
 Run from project root:
 
-`python tools/components/liveTrackingDisplay.py`
+`python agents/dashboard/live_tracking_display.py`
 
 You can tune radar depth scaling (away-from-camera range) without editing code:
 
@@ -161,7 +162,7 @@ You can tune radar depth scaling (away-from-camera range) without editing code:
 
 Example:
 
-`DASHBOARD_MAX_GROUND_Z=8 python tools/components/liveTrackingDisplay.py`
+`DASHBOARD_MAX_GROUND_Z=8 python agents/dashboard/live_tracking_display.py`
 
 You can control the periodic agent-ops heartbeat in `main.py`:
 
@@ -193,7 +194,6 @@ Controls:
 - `q`: quit dashboard
 - `n`: next track selection
 - `p`: previous track selection
-- `h`: toggle tracking-agent diagnostics (concise/detailed)
 
 Live JSON state snapshots are written to:
 
@@ -228,33 +228,33 @@ Coordinate semantics are preserved:
 
 A stricter call-site matrix and remaining manual live-verification items are documented in `pipeline_trace_matrix.md`.
 
-1. **Frame capture + tracking:** `tools/components/liveTrackingDisplay.py::run_live_tracking_loop`
+1. **Frame capture + tracking:** `agents/dashboard/live_tracking_display.py::run_live_tracking_loop`
 
 - Captures webcam frame and runs YOLO/ByteTrack.
 - Builds per-track evidence including `pixel_position`, `ground_position`, `ground_coordinate_unit`, `position_kind`, `relative_depth`, `confidence`, and `quality_flags`.
 
-2. **Tracking-agent reasoning:** `tools/visual_tracking_agent.py::LLMVisualTrackingAgent.propose_associations`
+2. **Tracking-agent reasoning:** `agents/visual_tracking_agent.py::LLMVisualTrackingAgent.propose_associations`
 
 - Receives frame reference + structured detections.
 - Returns association proposals used to build `tracking_agent_observation`.
 
-3. **Shared state write:** `tools/components/liveTrackingDisplay.py::run_radar_loop`
+3. **Shared state write:** `agents/dashboard/live_tracking_display.py::run_radar_loop`
 
 - Writes `captures/latest_radar_state.json` with `tracks`, `tracking_agent_observation`, `coordinate_system`, and calibration/status fields.
 
-4. **Observation ingestion:** `tools/reasoning/tools_reasoning_assessment.py::_load_radar_state` and `_ingest_latest_tracks`
+4. **Observation ingestion:** `agents/reasoning/agents/_shared.py::_load_radar_state` and `_ingest_latest_tracks`
 
 - Ingests `tracks` into coordinator history records.
 
-5. **Observation LLM input assembly:** `tools/reasoning/tools_reasoning_assessment.py::_build_observation_llm_input`
+5. **Observation LLM input assembly:** `agents/reasoning/agents/_shared.py::_build_observation_llm_input`
 
 - Packages `history_records` plus `latest_track_snapshot`, `tracking_agent_context`, and `coordinate_context` for Observation agent invocation.
 
-6. **Reasoning cross-check:** `tools/reasoning/tools_reasoning_assessment.py::_build_reasoning_handoff_payload`
+6. **Reasoning cross-check:** `agents/reasoning/agents/_shared.py::_build_reasoning_handoff_payload`
 
 - Validates `supporting_observation_ids` against ingested history before Reasoning invocation.
 
-7. **Ops/event output:** `tools/orchestration/agent_ops.py::run_reasoning_cycle_and_log`
+7. **Ops/event output:** `agents/orchestration/agent_ops.py::run_reasoning_cycle_and_log`
 
 - Logs per-track status, agent metadata, handoff validation, and latency to `captures/agent_events.jsonl` for dashboard/health summaries.
 
@@ -262,8 +262,8 @@ A stricter call-site matrix and remaining manual live-verification items are doc
 
 Typed contracts and bounded coordinator logic for the Tracking / Observation / Reasoning flow are now scaffolded in:
 
-- `tools/contracts.py`
-- `tools/coordinator.py`
+- `agents/contracts.py`
+- `agents/coordinator.py`
 
 Current coordinator tests:
 

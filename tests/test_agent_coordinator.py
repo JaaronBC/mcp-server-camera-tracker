@@ -3,14 +3,14 @@ from __future__ import annotations
 
 import unittest
 
-from tools.contracts import (
+from agents.contracts import (
     BoundingBox,
     DetectionCandidate,
     GroundPoint,
     TrackingObservationRecord,
     VisualAssociationProposal,
 )
-from tools.coordinator import AgentCoordinator
+from agents.coordinator import AgentCoordinator
 
 
 class TestAgentCoordinator(unittest.TestCase):

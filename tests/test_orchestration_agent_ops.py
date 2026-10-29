@@ -7,8 +7,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from tools.orchestration import agent_ops as orchestrationAgentOps
-from tools.reasoning import tools_reasoning_assessment as orchestrationReasoning
+from agents.orchestration.tools import ops as orchestrationAgentOps
+from agents.reasoning.tools import _shared as orchestrationReasoning
 
 
 class TestOrchestrationAgentOps(unittest.TestCase):
@@ -22,8 +22,8 @@ class TestOrchestrationAgentOps(unittest.TestCase):
             missing_radar = Path(temp_dir) / "latest_radar_state.json"
             events_path = Path(temp_dir) / "agent_events.jsonl"
 
-            with patch("tools.reasoning.tools_reasoning_assessment.RADAR_STATE_PATH", missing_radar):
-                with patch("tools.orchestration.agent_ops.AGENT_EVENTS_PATH", events_path):
+            with patch("agents.reasoning.tools._shared.RADAR_STATE_PATH", missing_radar):
+                with patch("agents.orchestration.tools.ops.AGENT_EVENTS_PATH", events_path):
                     result = orchestrationAgentOps.run_reasoning_cycle_and_log()
 
         self.assertFalse(result["available"])
@@ -54,10 +54,10 @@ class TestOrchestrationAgentOps(unittest.TestCase):
             radar_path.write_text(json.dumps(payload), encoding="utf-8")
             events_path = Path(temp_dir) / "agent_events.jsonl"
 
-            with patch("tools.reasoning.tools_reasoning_assessment.RADAR_STATE_PATH", radar_path):
-                with patch("tools.orchestration.agent_ops.AGENT_EVENTS_PATH", events_path):
+            with patch("agents.reasoning.tools._shared.RADAR_STATE_PATH", radar_path):
+                with patch("agents.orchestration.tools.ops.AGENT_EVENTS_PATH", events_path):
                     with patch(
-                        "tools.reasoning.tools_reasoning_assessment.simulate_reasoning_assessment",
+                        "agents.reasoning.tools._shared.simulate_reasoning_assessment",
                         return_value={
                             "available": True,
                             "summary": {
@@ -120,11 +120,18 @@ class TestOrchestrationAgentOps(unittest.TestCase):
                     lines = events_path.read_text(encoding="utf-8").splitlines()
 
         self.assertTrue(result["available"])
+        self.assertIn("cycle_id", result["cycle"])
+        self.assertIsInstance(result["cycle"]["cycle_id"], str)
+        self.assertTrue(result["cycle"]["cycle_id"].startswith("cycle-"))
         self.assertEqual(result["cycle"]["evaluated_tracks"], 1)
         self.assertEqual(len(result["events"]), 1)
         self.assertEqual(len(lines), 1)
         event_payload = json.loads(lines[0])
         self.assertEqual(event_payload["event_type"], "reasoning_cycle")
+        self.assertEqual(event_payload["cycle_id"], result["cycle"]["cycle_id"])
+        self.assertIsInstance(event_payload["task_id"], str)
+        self.assertTrue(event_payload["task_id"].startswith(f"{result['cycle']['cycle_id']}:track-"))
+        self.assertIsNone(event_payload["parent_task_id"])
         self.assertIn("latency_ms", event_payload)
         self.assertEqual(event_payload["observation_agent_model"], "gpt-oss-120b")
         self.assertEqual(event_payload["reasoning_agent_model"], "gpt-oss-120b")
@@ -137,6 +144,8 @@ class TestOrchestrationAgentOps(unittest.TestCase):
         self.assertEqual(event_payload["handoff_validation_error"], None)
         self.assertEqual(event_payload["handoff_quality"], "healthy")
         self.assertEqual(event_payload["agent_error_digest"], "obs(none),rea(none)")
+        self.assertEqual(event_payload["conflicts"], [])
+        self.assertEqual(event_payload["limitations"], [])
         self.assertIn("evidence_trace", event_payload)
         self.assertTrue(event_payload["evidence_trace"]["latest_track_snapshot"]["available"])
         self.assertEqual(
@@ -166,9 +175,9 @@ class TestOrchestrationAgentOps(unittest.TestCase):
             radar_path = Path(temp_dir) / "latest_radar_state.json"
             radar_path.write_text(json.dumps(payload), encoding="utf-8")
 
-            with patch("tools.reasoning.tools_reasoning_assessment.RADAR_STATE_PATH", radar_path):
+            with patch("agents.reasoning.tools._shared.RADAR_STATE_PATH", radar_path):
                 with patch(
-                    "tools.reasoning.tools_reasoning_assessment.simulate_reasoning_assessment",
+                    "agents.reasoning.tools._shared.simulate_reasoning_assessment",
                     return_value={
                         "available": True,
                         "summary": {"needs_more_observations": False},
@@ -187,7 +196,7 @@ class TestOrchestrationAgentOps(unittest.TestCase):
                     },
                 ):
                     with patch(
-                        "tools.orchestration.agent_ops._append_event",
+                        "agents.orchestration.tools.ops._append_event",
                         side_effect=OSError("disk full"),
                     ):
                         result = orchestrationAgentOps.run_reasoning_cycle_and_log(max_tracks=1)
@@ -198,6 +207,171 @@ class TestOrchestrationAgentOps(unittest.TestCase):
         self.assertEqual(result["event_log_error_count"], 1)
         self.assertIn("OSError:disk full", result["event_log_last_error"])
         self.assertEqual(len(result["events"]), 1)
+
+    def test_run_reasoning_cycle_and_log_emits_evidence_followup_task_links(self) -> None:
+        # Performs test run reasoning cycle and log emits evidence followup task links logic.
+        payload = {
+            "timestamp": 1000.0,
+            "tracks": [
+                {
+                    "track_id": "track-1",
+                    "timestamp": 1000.0,
+                    "ground_position": {"x": 1.0, "z": 2.0},
+                    "confidence": 0.9,
+                }
+            ],
+        }
+
+        with TemporaryDirectory() as temp_dir:
+            radar_path = Path(temp_dir) / "latest_radar_state.json"
+            radar_path.write_text(json.dumps(payload), encoding="utf-8")
+            events_path = Path(temp_dir) / "agent_events.jsonl"
+
+            with patch("agents.reasoning.tools._shared.RADAR_STATE_PATH", radar_path):
+                with patch("agents.orchestration.tools.ops.AGENT_EVENTS_PATH", events_path):
+                    with patch(
+                        "agents.reasoning.tools._shared.simulate_reasoning_assessment",
+                        return_value={
+                            "available": True,
+                            "summary": {"needs_more_observations": True},
+                            "assessment": {"assessment_label": "requires_more_observation"},
+                            "evidence_request": {
+                                "track_id": "track-1",
+                                "reason": "llm_requested_more_observations",
+                                "requested_at": 1000.1,
+                                "request_index": 2,
+                            },
+                            "handoff_validation": {
+                                "status": "ok",
+                                "error_code": None,
+                                "error": None,
+                            },
+                            "agents": {
+                                "observation": {
+                                    "status": "ok",
+                                    "model": "gpt-oss-120b",
+                                    "latency_ms": 7.1,
+                                    "error_code": None,
+                                    "attempts": 1,
+                                    "retry_count": 0,
+                                },
+                                "reasoning": {
+                                    "status": "ok",
+                                    "model": "gpt-oss-120b",
+                                    "latency_ms": 9.4,
+                                    "error_code": None,
+                                    "attempts": 1,
+                                    "retry_count": 0,
+                                },
+                            },
+                            "error": None,
+                        },
+                    ):
+                        result = orchestrationAgentOps.run_reasoning_cycle_and_log(max_tracks=1)
+
+        self.assertTrue(result["available"])
+        self.assertEqual(len(result["events"]), 1)
+        event_payload = result["events"][0]
+        self.assertIn("evidence_followup_task_id", event_payload)
+        self.assertIn("evidence_followup_parent_task_id", event_payload)
+        self.assertIn("evidence_followup_previous_task_id", event_payload)
+        self.assertEqual(
+            event_payload["evidence_followup_parent_task_id"],
+            event_payload["task_id"],
+        )
+        self.assertTrue(event_payload["evidence_followup_task_id"].endswith(":evidence-2"))
+        self.assertTrue(event_payload["evidence_followup_previous_task_id"].endswith(":evidence-1"))
+
+    def test_run_reasoning_cycle_and_log_emits_conflicts_and_limitations(self) -> None:
+        # Performs test run reasoning cycle and log emits conflicts and limitations logic.
+        payload = {
+            "timestamp": 1000.0,
+            "tracks": [
+                {
+                    "track_id": "track-1",
+                    "timestamp": 1000.0,
+                    "ground_position": {"x": 1.0, "z": 2.0},
+                    "confidence": 0.9,
+                }
+            ],
+        }
+
+        with TemporaryDirectory() as temp_dir:
+            radar_path = Path(temp_dir) / "latest_radar_state.json"
+            radar_path.write_text(json.dumps(payload), encoding="utf-8")
+
+            with patch("agents.reasoning.tools._shared.RADAR_STATE_PATH", radar_path):
+                with patch(
+                    "agents.reasoning.tools._shared.simulate_reasoning_assessment",
+                    return_value={
+                        "available": False,
+                        "summary": {
+                            "needs_more_observations": True,
+                            "uncertainties": ["insufficient_history"],
+                        },
+                        "assessment": {
+                            "assessment_label": "requires_more_observation",
+                            "uncertainties": ["conflicting_inputs"],
+                        },
+                        "evidence_request": None,
+                        "handoff_validation": {
+                            "status": "error",
+                            "error_code": "invalid_handoff_payload",
+                            "error": "missing_supporting_observation_ids",
+                        },
+                        "agents": {
+                            "observation": {
+                                "status": "ok",
+                                "model": "gpt-oss-120b",
+                                "latency_ms": 7.1,
+                                "error_code": "timeout",
+                                "attempts": 1,
+                                "retry_count": 0,
+                            },
+                            "reasoning": {
+                                "status": "error",
+                                "model": "gpt-oss-120b",
+                                "latency_ms": 9.4,
+                                "error_code": "invalid_response_format",
+                                "attempts": 1,
+                                "retry_count": 0,
+                            },
+                        },
+                        "error": "radar_state_stale",
+                    },
+                ):
+                    result = orchestrationAgentOps.run_reasoning_cycle_and_log(max_tracks=1)
+
+        self.assertTrue(result["available"])
+        self.assertEqual(len(result["events"]), 1)
+        event_payload = result["events"][0]
+        self.assertIn("handoff_validation_failed", event_payload["conflicts"])
+        self.assertIn(
+            "handoff_validation_error:invalid_handoff_payload",
+            event_payload["conflicts"],
+        )
+        self.assertIn(
+            "agent_status_mismatch:obs=ok,rea=error",
+            event_payload["conflicts"],
+        )
+        self.assertIn(
+            "agent_error_code_divergence:obs=timeout,rea=invalid_response_format",
+            event_payload["conflicts"],
+        )
+        self.assertIn("cycle_error:radar_state_stale", event_payload["limitations"])
+        self.assertIn("bounded_out", event_payload["limitations"])
+        self.assertIn(
+            "handoff_validation_error:invalid_handoff_payload",
+            event_payload["limitations"],
+        )
+        self.assertIn(
+            "summary_uncertainty:insufficient_history",
+            event_payload["limitations"],
+        )
+        self.assertIn(
+            "assessment_uncertainty:conflicting_inputs",
+            event_payload["limitations"],
+        )
 
     def test_get_recent_agent_events_parses_and_drops_invalid(self) -> None:
         # Performs test get recent agent events parses and drops invalid logic.
@@ -214,7 +388,7 @@ class TestOrchestrationAgentOps(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with patch("tools.orchestration.agent_ops.AGENT_EVENTS_PATH", events_path):
+            with patch("agents.orchestration.tools.ops.AGENT_EVENTS_PATH", events_path):
                 result = orchestrationAgentOps.get_recent_agent_events(limit=10)
 
         self.assertTrue(result["available"])
@@ -234,7 +408,7 @@ class TestOrchestrationAgentOps(unittest.TestCase):
         # Performs test summarize agent event health missing file logic.
         with TemporaryDirectory() as temp_dir:
             events_path = Path(temp_dir) / "agent_events.jsonl"
-            with patch("tools.orchestration.agent_ops.AGENT_EVENTS_PATH", events_path):
+            with patch("agents.orchestration.tools.ops.AGENT_EVENTS_PATH", events_path):
                 result = orchestrationAgentOps.summarize_agent_event_health(window_size=10)
 
         self.assertFalse(result["available"])
@@ -281,6 +455,15 @@ class TestOrchestrationAgentOps(unittest.TestCase):
                                 "reasoning_agent_error_code": "invalid_response_format",
                                 "handoff_validation_status": "error",
                                 "handoff_validation_error_code": "invalid_handoff_payload",
+                                "conflicts": [
+                                    "handoff_validation_failed",
+                                    "agent_status_mismatch:obs=ok,rea=error",
+                                ],
+                                "limitations": [
+                                    "cycle_error:radar_state_stale",
+                                    "assessment_uncertainty:conflicting_inputs",
+                                    "bounded_out",
+                                ],
                             }
                         ),
                     ]
@@ -288,8 +471,8 @@ class TestOrchestrationAgentOps(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with patch("tools.orchestration.agent_ops.AGENT_EVENTS_PATH", events_path):
-                with patch("tools.orchestration.agent_ops.time.time", return_value=120.0):
+            with patch("agents.orchestration.tools.ops.AGENT_EVENTS_PATH", events_path):
+                with patch("agents.orchestration.tools.ops.time.time", return_value=120.0):
                     result = orchestrationAgentOps.summarize_agent_event_health(window_size=10)
 
         self.assertTrue(result["available"])
@@ -328,6 +511,12 @@ class TestOrchestrationAgentOps(unittest.TestCase):
         self.assertEqual(result["handoff_validation"]["quality_counts"]["degraded"], 1)
         self.assertEqual(result["handoff_validation"]["degraded_count"], 1)
         self.assertAlmostEqual(result["handoff_validation"]["degraded_rate"], 1 / 3, places=6)
+        self.assertEqual(result["collaboration_signals"]["conflict_event_count"], 1)
+        self.assertAlmostEqual(result["collaboration_signals"]["conflict_event_rate"], 1 / 3, places=6)
+        self.assertEqual(result["collaboration_signals"]["conflict_item_count"], 2)
+        self.assertEqual(result["collaboration_signals"]["limitation_event_count"], 1)
+        self.assertAlmostEqual(result["collaboration_signals"]["limitation_event_rate"], 1 / 3, places=6)
+        self.assertEqual(result["collaboration_signals"]["limitation_item_count"], 3)
         self.assertEqual(
             result["agent_error_trends"]["handoff_validation"]["top_error_code"],
             "invalid_handoff_payload",
@@ -364,8 +553,8 @@ class TestOrchestrationAgentOps(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with patch("tools.orchestration.agent_ops.AGENT_EVENTS_PATH", events_path):
-                with patch("tools.orchestration.agent_ops.time.time", return_value=200.0):
+            with patch("agents.orchestration.tools.ops.AGENT_EVENTS_PATH", events_path):
+                with patch("agents.orchestration.tools.ops.time.time", return_value=200.0):
                     result = orchestrationAgentOps.summarize_agent_event_health(window_size=10)
 
         self.assertTrue(result["available"])
@@ -442,7 +631,7 @@ class TestOrchestrationAgentOps(unittest.TestCase):
         # Performs test prune agent event log missing file logic.
         with TemporaryDirectory() as temp_dir:
             events_path = Path(temp_dir) / "agent_events.jsonl"
-            with patch("tools.orchestration.agent_ops.AGENT_EVENTS_PATH", events_path):
+            with patch("agents.orchestration.tools.ops.AGENT_EVENTS_PATH", events_path):
                 result = orchestrationAgentOps.prune_agent_event_log(max_events_keep=10)
 
         self.assertFalse(result["available"])
@@ -457,7 +646,7 @@ class TestOrchestrationAgentOps(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with patch("tools.orchestration.agent_ops.AGENT_EVENTS_PATH", events_path):
+            with patch("agents.orchestration.tools.ops.AGENT_EVENTS_PATH", events_path):
                 result = orchestrationAgentOps.prune_agent_event_log(max_events_keep=5)
 
         self.assertTrue(result["available"])
@@ -480,8 +669,8 @@ class TestOrchestrationAgentOps(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with patch("tools.orchestration.agent_ops.AGENT_EVENTS_PATH", events_path):
-                with patch("tools.orchestration.agent_ops.time.strftime", return_value="20261026_120000"):
+            with patch("agents.orchestration.tools.ops.AGENT_EVENTS_PATH", events_path):
+                with patch("agents.orchestration.tools.ops.time.strftime", return_value="20261026_120000"):
                     result = orchestrationAgentOps.prune_agent_event_log(max_events_keep=2)
 
             remaining_lines = events_path.read_text(encoding="utf-8").splitlines()

@@ -7,7 +7,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from tools.orchestration import calibration as orchestrationCalibration
+from agents.orchestration.tools import calibration as orchestrationCalibration
 
 
 class TestOrchestrationCalibrationTools(unittest.TestCase):
@@ -15,7 +15,7 @@ class TestOrchestrationCalibrationTools(unittest.TestCase):
         # Performs test get calibration missing logic.
         with TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "ground_plane_calibration.json"
-            with patch("tools.orchestration.calibration.CALIBRATION_PATH", path):
+            with patch("agents.orchestration.tools.calibration.CALIBRATION_PATH", path):
                 result = orchestrationCalibration.get_ground_plane_calibration()
 
         self.assertFalse(result["available"])
@@ -31,7 +31,7 @@ class TestOrchestrationCalibrationTools(unittest.TestCase):
 
         with TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "ground_plane_calibration.json"
-            with patch("tools.orchestration.calibration.CALIBRATION_PATH", path):
+            with patch("agents.orchestration.tools.calibration.CALIBRATION_PATH", path):
                 set_result = orchestrationCalibration.set_ground_plane_calibration(payload)
                 get_result = orchestrationCalibration.get_ground_plane_calibration()
                 validate_result = orchestrationCalibration.validate_ground_plane_calibration()
@@ -53,7 +53,7 @@ class TestOrchestrationCalibrationTools(unittest.TestCase):
             path = Path(temp_dir) / "ground_plane_calibration.json"
             path.write_text(json.dumps({"matrix": [[1, 2], [3, 4]]}), encoding="utf-8")
 
-            with patch("tools.orchestration.calibration.CALIBRATION_PATH", path):
+            with patch("agents.orchestration.tools.calibration.CALIBRATION_PATH", path):
                 result = orchestrationCalibration.validate_ground_plane_calibration()
 
         self.assertFalse(result["valid"])
@@ -69,7 +69,7 @@ class TestOrchestrationCalibrationTools(unittest.TestCase):
 
         with TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "ground_plane_calibration.json"
-            with patch("tools.orchestration.calibration.CALIBRATION_PATH", path):
+            with patch("agents.orchestration.tools.calibration.CALIBRATION_PATH", path):
                 orchestrationCalibration.set_ground_plane_calibration(payload)
                 clear_result = orchestrationCalibration.clear_ground_plane_calibration()
                 get_result = orchestrationCalibration.get_ground_plane_calibration()

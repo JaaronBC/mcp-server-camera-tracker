@@ -266,6 +266,77 @@ class TestMainAgentOps(unittest.IsolatedAsyncioTestCase):
         summary_mock.assert_not_awaited()
         depth_mock.assert_not_awaited()
 
+    async def test_start_orchestration_agents_confirms_all_four_agents(self) -> None:
+        # Performs test start orchestration agents confirms all four agents logic.
+        session = SequenceSession(
+            responses=[
+                FakeResult([FakeItem(json_payload={"available": True, "track_count": 1})]),
+                FakeResult(
+                    [
+                        FakeItem(
+                            json_payload={
+                                "cycle": {
+                                    "evaluated_tracks": 1,
+                                    "success_count": 1,
+                                    "error_count": 0,
+                                    "started_at": 1000.0,
+                                },
+                                "events": [
+                                    {
+                                        "observation_agent_status": "ok",
+                                        "reasoning_agent_status": "ok",
+                                    }
+                                ],
+                            }
+                        )
+                    ]
+                ),
+            ]
+        )
+
+        enabled = await main.start_orchestration_agents(
+            session,
+            enable_agent_ops_heartbeat=True,
+            agent_ops_max_tracks=3,
+            max_attempts=1,
+            retry_seconds=0,
+        )
+
+        self.assertTrue(enabled)
+
+    async def test_start_orchestration_agents_returns_false_when_not_fully_activated(self) -> None:
+        # Performs test start orchestration agents returns false when not fully activated logic.
+        session = SequenceSession(
+            responses=[
+                FakeResult([FakeItem(text="frame-ready")]),
+                FakeResult(
+                    [
+                        FakeItem(
+                            json_payload={
+                                "cycle": {
+                                    "evaluated_tracks": 0,
+                                    "success_count": 0,
+                                    "error_count": 0,
+                                    "started_at": 1000.0,
+                                },
+                                "events": [],
+                            }
+                        )
+                    ]
+                ),
+            ]
+        )
+
+        enabled = await main.start_orchestration_agents(
+            session,
+            enable_agent_ops_heartbeat=True,
+            agent_ops_max_tracks=3,
+            max_attempts=1,
+            retry_seconds=0,
+        )
+
+        self.assertFalse(enabled)
+
     async def test_monitor_movement_skips_overlapping_agent_ops_cycle(self) -> None:
         # Performs test monitor movement skips overlapping agent ops cycle logic.
         session = SequenceSession(
@@ -298,6 +369,33 @@ class TestMainAgentOps(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(cycle_mock.await_count, 1)
         self.assertIn("Skipping agent ops trigger: prior cycle still running.", stream.getvalue())
+
+    async def test_monitor_movement_respects_agent_ops_interval(self) -> None:
+        # Performs test monitor movement respects agent ops interval logic.
+        session = SequenceSession(
+            responses=[
+                FakeResult([FakeItem(text="frame-1")]),
+                FakeResult([FakeItem(text="frame-2")]),
+                KeyboardInterrupt(),
+            ]
+        )
+
+        stream = io.StringIO()
+        with patch("main.ANALYSIS_INTERVAL_SECONDS", 0):
+            with patch("main.run_agent_ops_cycle", new=AsyncMock(return_value=True)) as cycle_mock:
+                with redirect_stdout(stream):
+                    with self.assertRaises(KeyboardInterrupt):
+                        await main.monitor_movement(
+                            session,
+                            enable_agent_ops_heartbeat=True,
+                            agent_ops_interval_seconds=999,
+                            agent_ops_max_tracks=2,
+                            agent_ops_summary_every_cycles=100,
+                            depth_coverage_summary_enabled=False,
+                            depth_coverage_summary_every_cycles=100,
+                        )
+
+        self.assertEqual(cycle_mock.await_count, 1)
 
     async def test_run_depth_coverage_summary_success(self) -> None:
         # Performs test run depth coverage summary success logic.
@@ -408,6 +506,12 @@ class TestMainAgentOps(unittest.IsolatedAsyncioTestCase):
                     },
                     "degraded_rate": 0.3,
                 },
+                "collaboration_signals": {
+                    "conflict_event_count": 2,
+                    "conflict_event_rate": 0.2,
+                    "limitation_event_count": 4,
+                    "limitation_event_rate": 0.4,
+                },
                 "returned_events": 10,
                 "time_window": {
                     "last_timestamp": now,
@@ -439,6 +543,10 @@ class TestMainAgentOps(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn(
             "handoff_severity=critical",
+            text,
+        )
+        self.assertIn(
+            "collaboration_signals=conflicts=2@0.200,limitations=4@0.400",
             text,
         )
 
@@ -783,6 +891,23 @@ class TestMainAgentOps(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("Initializing MCP pipeline and connecting to server.py", output)
         self.assertNotIn("Runtime config:", output)
+
+    async def test_run_agent_continues_when_startup_activation_pending(self) -> None:
+        # Performs test run agent continues when startup activation pending logic.
+        with patch("main.stdio_client", return_value=FakeStdioContext()):
+            with patch("main.ClientSession", FakeClientSessionContext):
+                with patch("main.verify_required_tools", new=AsyncMock(return_value=None)):
+                    with patch("main.start_live_tracking", new=AsyncMock(return_value=None)):
+                        with patch("main.start_orchestration_agents", new=AsyncMock(return_value=False)):
+                            with patch("main.monitor_movement", new=AsyncMock(return_value=None)) as monitor_mock:
+                                await main.run_agent(
+                                    show_startup_banner=False,
+                                    show_startup_depth_snapshot=False,
+                                    show_startup_pipeline_contract_snapshot=False,
+                                    enable_agent_ops_heartbeat=True,
+                                )
+
+        monitor_mock.assert_awaited_once()
 
     def test_format_runtime_config_banner_enabled_summary(self) -> None:
         # Performs test format runtime config banner enabled summary logic.

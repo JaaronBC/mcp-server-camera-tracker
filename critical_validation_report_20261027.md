@@ -16,7 +16,7 @@ Continuation of critical-system closure with evidence-based validation of the co
 ### Contract check executed
 
 ```bash
-/Users/jaaroncabsaban/Documents/GitHub/mcp-server-camera-tracker/.venv/bin/python -c "from tools.dashboard.health import verify_dashboard_pipeline_contract; import json; print(json.dumps(verify_dashboard_pipeline_contract(), indent=2))"
+/Users/jaaroncabsaban/Documents/GitHub/mcp-server-camera-tracker/.venv/bin/python -c "from agents.dashboard.health import verify_dashboard_pipeline_contract; import json; print(json.dumps(verify_dashboard_pipeline_contract(), indent=2))"
 ```
 
 Observed findings before fix:
@@ -33,11 +33,11 @@ Observed findings before fix:
 ### Fix applied
 
 1. **Schema serialization update**
-   - File: `tools/components/dashboard_types.py`
+   - File: `agents/components/dashboard_types.py`
    - Change: add `ground_coordinate_unit` field to `RadarTrackSnapshot` and include it in `to_dict()`.
 
 2. **Producer updates**
-   - File: `tools/components/liveTrackingDisplay.py`
+   - File: `agents/components/liveTrackingDisplay.py`
    - Change: populate `ground_coordinate_unit` when creating:
      - live `RadarTrackSnapshot` entries
      - simulated fallback `RadarTrackSnapshot` entries (`relative_units`)
@@ -105,7 +105,7 @@ This confirms the previous `coordinate_unit_mismatch` defect is resolved in live
 Command:
 
 ```bash
-/Users/jaaroncabsaban/Documents/GitHub/mcp-server-camera-tracker/.venv/bin/python -c "from tools.dashboard.health import verify_dashboard_pipeline_contract; import json; print(json.dumps(verify_dashboard_pipeline_contract(require_live_pipeline=True), indent=2))"
+/Users/jaaroncabsaban/Documents/GitHub/mcp-server-camera-tracker/.venv/bin/python -c "from agents.dashboard.health import verify_dashboard_pipeline_contract; import json; print(json.dumps(verify_dashboard_pipeline_contract(require_live_pipeline=True), indent=2))"
 ```
 
 Observed result:
@@ -122,7 +122,7 @@ Command sequence:
 ```bash
 /Users/jaaroncabsaban/Documents/GitHub/mcp-server-camera-tracker/.venv/bin/python -u main.py > /tmp/mcp_runtime_recovery.log 2>&1 & pid=$!
 sleep 6
-/Users/jaaroncabsaban/Documents/GitHub/mcp-server-camera-tracker/.venv/bin/python -c "from tools.dashboard.health import verify_dashboard_pipeline_contract; import json; print(json.dumps(verify_dashboard_pipeline_contract(require_live_pipeline=True), indent=2))"
+/Users/jaaroncabsaban/Documents/GitHub/mcp-server-camera-tracker/.venv/bin/python -c "from agents.dashboard.health import verify_dashboard_pipeline_contract; import json; print(json.dumps(verify_dashboard_pipeline_contract(require_live_pipeline=True), indent=2))"
 kill -INT "$pid" >/dev/null 2>&1
 wait "$pid" >/dev/null 2>&1 || true
 ```
@@ -146,5 +146,5 @@ python -u main.py
 In another shell while runtime is active:
 
 ```bash
-/Users/jaaroncabsaban/Documents/GitHub/mcp-server-camera-tracker/.venv/bin/python -c "from tools.dashboard.health import verify_dashboard_pipeline_contract; import json; print(json.dumps(verify_dashboard_pipeline_contract(require_live_pipeline=True), indent=2))"
+/Users/jaaroncabsaban/Documents/GitHub/mcp-server-camera-tracker/.venv/bin/python -c "from agents.dashboard.health import verify_dashboard_pipeline_contract; import json; print(json.dumps(verify_dashboard_pipeline_contract(require_live_pipeline=True), indent=2))"
 ```

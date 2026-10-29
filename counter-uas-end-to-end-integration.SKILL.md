@@ -176,7 +176,7 @@ Before implementing an integration change, trace a real observation end to end:
 4. Where the canonical observation is published or stored.
 5. How the Tracking Agent receives it.
 6. How Observation and Reasoning receive evidence and return validated results.
-7. How MCP tools/coordinator route requests and assessments.
+7. How MCP agents/coordinator route requests and assessments.
 8. How the dashboard consumes the same track update and assessment event.
 
 Report every missing connection explicitly. Do not substitute a mock-only pathway for a missing live integration. Use simulated data only for a clearly labeled fallback or tests.

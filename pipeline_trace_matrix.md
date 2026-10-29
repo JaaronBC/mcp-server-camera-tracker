@@ -27,12 +27,12 @@ This matrix traces the **actual repository call sites** for the connected pipeli
 ## 2) Live perception path (camera -> YOLO -> ByteTrack -> track records)
 
 1. **Live tracking process entry**
-   - File: `tools/liveTracking.py`
+   - File: `agents/liveTracking.py`
    - Tool: `live_tracking()`
    - Calls: `start_dashboard_process()` (background process)
 
 2. **Camera + detector loop**
-   - File: `tools/components/liveTrackingDisplay.py`
+   - File: `agents/components/liveTrackingDisplay.py`
    - Function: `run_live_tracking_loop(state)`
    - Key calls:
      - `camera = cv2.VideoCapture(0)`
@@ -40,7 +40,7 @@ This matrix traces the **actual repository call sites** for the connected pipeli
      - `result = model.track(..., tracker="bytetrack.yaml", persist=True)[0]`
 
 3. **Track evidence attached per detection**
-   - File: `tools/components/liveTrackingDisplay.py`
+   - File: `agents/components/liveTrackingDisplay.py`
    - Within `run_live_tracking_loop(...)`
    - Attached fields include:
      - `track_id`, `timestamp`
@@ -52,25 +52,25 @@ This matrix traces the **actual repository call sites** for the connected pipeli
      - `quality_flags`
 
 4. **Coordinate metadata normalization (producer boundary)**
-   - File: `tools/components/liveTrackingDisplay.py`
+   - File: `agents/components/liveTrackingDisplay.py`
    - Function: `normalize_position_metadata(...)`
    - Ensures consistency between `position_kind` and `ground_coordinate_unit`.
 
 ## 3) Shared state and outward publication
 
 1. **Shared in-memory dashboard state**
-   - File: `tools/components/liveTrackingDisplay.py`
+   - File: `agents/components/liveTrackingDisplay.py`
    - `state.active_tracks` updated with `RadarTrackSnapshot` objects.
 
 2. **Latest tracking frame artifact + UDP event stream**
-   - File: `tools/components/liveTrackingDisplay.py`
+   - File: `agents/components/liveTrackingDisplay.py`
    - Functions/calls:
      - `build_tracking_message(...)`
      - `update_json(LATEST_TRACKING_FRAME_PATH, tracking_message)`
      - `udp_socket.sendto(json.dumps(tracking_message).encode("utf-8"), ... )`
 
 3. **Radar/shared snapshot artifact**
-   - File: `tools/components/liveTrackingDisplay.py`
+   - File: `agents/components/liveTrackingDisplay.py`
    - Function: `run_radar_loop(state)`
    - Writes: `captures/latest_radar_state.json`
    - Payload fields include:
@@ -87,14 +87,14 @@ This matrix traces the **actual repository call sites** for the connected pipeli
 ## 4) Agent toolchain path (state -> observation/reasoning -> events)
 
 1. **Reasoning ingestion/readiness**
-   - File: `tools/dashboardReasoning.py`
+   - File: `agents/dashboardReasoning.py`
    - Flow:
      - `_load_radar_state()` reads latest radar payload
      - `_prepare_track_analysis(track_id)` enforces freshness (`radar_state_stale` guard)
      - `_ingest_latest_tracks(...)` maps track payload to coordinator observations
 
 2. **Observation + reasoning tool endpoints**
-   - File: `tools/dashboardReasoning.py`
+   - File: `agents/dashboardReasoning.py`
    - MCP tools:
      - `simulate_observation_summary(track_id)`
      - `simulate_reasoning_assessment(track_id, request_evidence_on_uncertainty=True)`
@@ -103,7 +103,7 @@ This matrix traces the **actual repository call sites** for the connected pipeli
      - `handoff_validation` included in outputs
 
 3. **Cycle orchestration + event log**
-   - File: `tools/dashboardAgentOps.py`
+   - File: `agents/dashboardAgentOps.py`
    - MCP tool: `run_reasoning_cycle_and_log(...)`
    - Captures:
      - per-track result status
@@ -113,20 +113,20 @@ This matrix traces the **actual repository call sites** for the connected pipeli
      - bounded-out and evidence trace fields
 
 4. **Health aggregation over event stream**
-   - File: `tools/dashboardAgentOps.py`
+   - File: `agents/dashboardAgentOps.py`
    - MCP tool: `summarize_agent_event_health(window_size=...)`
    - Includes cycle-level error trends and top error digests.
 
 ## 5) Dashboard contract verification
 
 1. **Read and parse contract source**
-   - File: `tools/dashboardHealth.py`
+   - File: `agents/dashboardHealth.py`
    - Functions:
      - `_read_radar_state_payload()`
      - `_parse_radar_state(...)`
 
 2. **Contract verifier MCP endpoint**
-   - File: `tools/dashboardHealth.py`
+   - File: `agents/dashboardHealth.py`
    - Tool: `verify_dashboard_pipeline_contract(max_observation_age_seconds=3.0, require_live_pipeline=False)`
    - Validates:
      - freshness (`stale_observation`)
@@ -142,7 +142,7 @@ This matrix traces the **actual repository call sites** for the connected pipeli
    - MCP call: `session.call_tool("detect_objects", arguments={"address": [...]})`
 
 2. **UDP frame source tool**
-   - File: `tools/detectObjects.py`
+   - File: `agents/detectObjects.py`
    - Tool: `detect_objects(address)`
    - Reads newest UDP packet and returns latest tracking JSON payload.
 

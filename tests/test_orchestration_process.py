@@ -5,7 +5,7 @@ import subprocess
 import unittest
 from unittest.mock import patch
 
-from tools.orchestration import process as orchestration_process
+from agents.orchestration import process as orchestration_process
 
 
 class DummyProcess:
@@ -42,15 +42,15 @@ class TestOrchestrationProcess(unittest.TestCase):
         # Performs tearDown logic.
         orchestration_process._dashboard_process = None
 
-    @patch("tools.orchestration.process.DASHBOARD_SCRIPT_PATH")
+    @patch("agents.orchestration.process.DASHBOARD_SCRIPT_PATH")
     def test_start_dashboard_process_when_script_missing(self, mock_path) -> None:
         # Performs test start dashboard process when script missing logic.
         mock_path.is_file.return_value = False
         with self.assertRaises(FileNotFoundError):
             orchestration_process.start_dashboard_process()
 
-    @patch("tools.orchestration.process.subprocess.Popen")
-    @patch("tools.orchestration.process.DASHBOARD_SCRIPT_PATH")
+    @patch("agents.orchestration.process.subprocess.Popen")
+    @patch("agents.orchestration.process.DASHBOARD_SCRIPT_PATH")
     def test_start_dashboard_process_starts_subprocess(self, mock_path, mock_popen) -> None:
         # Performs test start dashboard process starts subprocess logic.
         mock_path.is_file.return_value = True

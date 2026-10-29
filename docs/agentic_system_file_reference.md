@@ -19,26 +19,26 @@ At runtime, the system has two main processes:
    - Polls detections
    - Periodically runs agent-ops/reasoning health loops
 
-2. **MCP Server (`server.py` + `tools/*`)**
+2. **MCP Server (`server.py` + `agents/*`)**
    - Registers all `@mcp.tool()` endpoints by importing tool modules
    - Hosts tracking, observation/reasoning, lifecycle/control, and health/metrics tools
 
 High-level call chain:
 
-`main.py` → MCP call `live_tracking` → `tools/liveTracking.py` → `tools/dashboard_process.py` → `tools/components/liveTrackingDisplay.py`
+`main.py` → MCP call `live_tracking` → `agents/liveTracking.py` → `agents/dashboard_process.py` → `agents/components/liveTrackingDisplay.py`
 
 Then continuously:
 
-`main.py` → MCP call `detect_objects` → `tools/detectObjects.py` (reads UDP tracking frames)
+`main.py` → MCP call `detect_objects` → `agents/detectObjects.py` (reads UDP tracking frames)
 
 And periodically:
 
 `main.py` → MCP calls
 
-- `run_reasoning_cycle_and_log` (`tools/dashboardAgentOps.py`)
-- `summarize_agent_event_health` (`tools/dashboardAgentOps.py`)
-- `dashboard_depth_coverage_metrics` (`tools/dashboardMetrics.py`)
-- `verify_dashboard_pipeline_contract` (`tools/dashboardHealth.py`)
+- `run_reasoning_cycle_and_log` (`agents/dashboardAgentOps.py`)
+- `summarize_agent_event_health` (`agents/dashboardAgentOps.py`)
+- `dashboard_depth_coverage_metrics` (`agents/dashboardMetrics.py`)
+- `verify_dashboard_pipeline_contract` (`agents/dashboardHealth.py`)
 
 ---
 
@@ -85,7 +85,7 @@ And periodically:
 
 ---
 
-### `tools/registry.py`
+### `agents/registry.py`
 
 **Role**
 
@@ -99,7 +99,7 @@ And periodically:
 
 ## 3) Tool modules (control, data, health, metrics)
 
-### `tools/liveTracking.py`
+### `agents/liveTracking.py`
 
 **Role**
 
@@ -107,7 +107,7 @@ And periodically:
 
 **Calls**
 
-- `live_tracking()` → `start_dashboard_process()` (`tools/dashboard_process.py`).
+- `live_tracking()` → `start_dashboard_process()` (`agents/dashboard_process.py`).
 
 **Why important**
 
@@ -115,7 +115,7 @@ And periodically:
 
 ---
 
-### `tools/detectObjects.py`
+### `agents/detectObjects.py`
 
 **Role**
 
@@ -131,7 +131,7 @@ And periodically:
 
 ---
 
-### `tools/dashboard_process.py`
+### `agents/dashboard_process.py`
 
 **Role**
 
@@ -139,7 +139,7 @@ And periodically:
 
 **Important functions**
 
-- `start_dashboard_process()` launches `tools/components/liveTrackingDisplay.py`.
+- `start_dashboard_process()` launches `agents/components/liveTrackingDisplay.py`.
 - `stop_dashboard_process(force=False)` and `dashboard_process_status()`.
 
 **Why important**
@@ -148,7 +148,7 @@ And periodically:
 
 ---
 
-### `tools/dashboardControl.py`
+### `agents/dashboardControl.py`
 
 **Role**
 
@@ -170,7 +170,7 @@ And periodically:
 
 ---
 
-### `tools/dashboardCalibration.py`
+### `agents/dashboardCalibration.py`
 
 **Role**
 
@@ -191,7 +191,7 @@ And periodically:
 
 ---
 
-### `tools/dashboardHealth.py`
+### `agents/dashboardHealth.py`
 
 **Role**
 
@@ -209,7 +209,7 @@ And periodically:
 
 ---
 
-### `tools/dashboardMetrics.py`
+### `agents/dashboardMetrics.py`
 
 **Role**
 
@@ -231,7 +231,7 @@ And periodically:
 
 ---
 
-### `tools/dashboardAgentOps.py`
+### `agents/dashboardAgentOps.py`
 
 **Role**
 
@@ -257,7 +257,7 @@ And periodically:
 
 ## 4) Contracts and coordination core
 
-### `tools/contracts.py`
+### `agents/contracts.py`
 
 **Role**
 
@@ -274,7 +274,7 @@ And periodically:
 
 ---
 
-### `tools/coordinator.py`
+### `agents/coordinator.py`
 
 **Role**
 
@@ -296,7 +296,7 @@ And periodically:
 
 ## 5) Tracking subsystem
 
-### `tools/components/liveTrackingDisplay.py`
+### `agents/components/liveTrackingDisplay.py`
 
 **Role**
 
@@ -321,7 +321,7 @@ And periodically:
 
 ---
 
-### `tools/tracking/agent_tracking.py`
+### `agents/tracking/agent_tracking.py`
 
 **Role**
 
@@ -345,7 +345,7 @@ And periodically:
 
 ---
 
-### `tools/tracking/frame_transformer.py`
+### `agents/tracking/frame_transformer.py`
 
 **Role**
 
@@ -364,7 +364,7 @@ And periodically:
 
 ---
 
-### `tools/tracking/runtime_support.py`
+### `agents/tracking/runtime_support.py`
 
 **Role**
 
@@ -383,7 +383,7 @@ And periodically:
 
 ---
 
-### `tools/tracking/state_publisher.py`
+### `agents/tracking/state_publisher.py`
 
 **Role**
 
@@ -402,7 +402,7 @@ And periodically:
 
 ---
 
-### `tools/tracking/status_runtime.py`
+### `agents/tracking/status_runtime.py`
 
 **Role**
 
@@ -420,7 +420,7 @@ And periodically:
 
 ---
 
-### `tools/tracking/tools_visual_tracking.py`
+### `agents/tracking/agents/visual_tracking.py`
 
 **Role**
 
@@ -444,7 +444,7 @@ And periodically:
 
 ## 6) Observation + reasoning subsystem
 
-### `tools/observation/agent_observation.py`
+### `agents/observation/agent_observation.py`
 
 **Role**
 
@@ -463,7 +463,7 @@ And periodically:
 
 ---
 
-### `tools/reasoning/agent_reasoning.py`
+### `agents/reasoning/agent_reasoning.py`
 
 **Role**
 
@@ -481,7 +481,7 @@ And periodically:
 
 ---
 
-### `tools/reasoning/tools_reasoning_assessment.py`
+### `agents/reasoning/agents/_shared.py`
 
 **Role**
 
@@ -509,7 +509,7 @@ And periodically:
 
 ## 7) Shared geometry/data model helpers used by agentic runtime
 
-### `tools/components/dashboard_types.py`
+### `agents/components/dashboard_types.py`
 
 **Role**
 
@@ -521,7 +521,7 @@ And periodically:
 
 ---
 
-### `tools/components/calibration.py`
+### `agents/components/calibration.py`
 
 **Role**
 
@@ -537,7 +537,7 @@ And periodically:
 
 ---
 
-### `tools/components/geometry.py`
+### `agents/components/geometry.py`
 
 **Role**
 
@@ -557,11 +557,11 @@ And periodically:
 
 The following files exist primarily for package structure/import resolution and contain no runtime logic:
 
-- `tools/__init__.py`
-- `tools/tracking/__init__.py`
-- `tools/reasoning/__init__.py`
-- `tools/observation/__init__.py`
-- `tools/components/__init__.py`
+- `agents/__init__.py`
+- `agents/tracking/__init__.py`
+- `agents/reasoning/__init__.py`
+- `agents/observation/__init__.py`
+- `agents/components/__init__.py`
 
 These are still important for import stability across the agentic modules.
 
@@ -570,7 +570,7 @@ These are still important for import stability across the agentic modules.
 ## 9) Practical “why this matters” summary
 
 - **`main.py`** is the client orchestrator.
-- **`server.py` + `tools/registry.py`** expose the MCP surface.
+- **`server.py` + `agents/registry.py`** expose the MCP surface.
 - **`liveTrackingDisplay.py` + tracking helpers** produce the real-time artifact stream.
 - **`contracts.py` + `coordinator.py`** enforce deterministic guardrails.
 - **`agent_observation.py` + `agent_reasoning.py`** provide LLM-backed semantic layers with retry/validation.
