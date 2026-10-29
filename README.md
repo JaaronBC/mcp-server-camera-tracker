@@ -60,6 +60,15 @@ The legacy `tools/dashboard/*` package has been removed.
 
 Dashboard-oriented test modules were also renamed to orchestration naming (for example, `tests/test_dashboard_control.py` → `tests/test_orchestration_control.py`).
 
+### Post-migration cleanup checklist
+
+- Confirm no legacy dashboard imports remain in Python sources:
+  `python - <<'PY'\nfrom pathlib import Path\npatterns=['tools.dashboard','from ..dashboard','from .dashboard']\nfor p in Path('.').rglob('*.py'):\n    if any(x in p.parts for x in ['.git','.venv','source','__pycache__']):\n        continue\n    t=p.read_text(encoding='utf-8')\n    if any(s in t for s in patterns):\n        print(p)\nPY`
+- Run full test discovery:
+  `python -m unittest discover -s tests -p 'test_*.py'`
+- If desired, clear local project bytecode caches (keeps `.venv` intact):
+  `find . \( -path './.git' -o -path './.venv' -o -path './source' \) -prune -o -type d -name '__pycache__' -exec rm -rf {} +`
+
 ## Setup (LLM)
 
 The LLM we connected to was Claude Desktop. In order to connect, go to the claude_desktop_config.json file. It's accessible through the path: file->settings->Developer->Edit Config
