@@ -305,3 +305,35 @@ def wait_for_dashboard_ready(
             }
 
         time.sleep(min(poll_interval_seconds, max(0.0, deadline - now)))
+
+
+@mcp.tool()
+def orchestration_health_status() -> dict[str, Any]:
+    # Implements orchestration health status behavior for this module.
+    return dashboard_health_status()
+
+
+@mcp.tool()
+def verify_orchestration_pipeline_contract(
+    max_observation_age_seconds: float = 3.0,
+    require_live_pipeline: bool = False,
+) -> dict[str, Any]:
+    # Verifies orchestration pipeline contract contract/availability requirements.
+    return verify_dashboard_pipeline_contract(
+        max_observation_age_seconds=max_observation_age_seconds,
+        require_live_pipeline=require_live_pipeline,
+    )
+
+
+@mcp.tool()
+def wait_for_orchestration_ready(
+    timeout_seconds: float = 10.0,
+    max_observation_age_seconds: float = 3.0,
+    poll_interval_seconds: float = 0.25,
+) -> dict[str, Any]:
+    # Waits for for orchestration ready conditions within configured limits.
+    return wait_for_dashboard_ready(
+        timeout_seconds=timeout_seconds,
+        max_observation_age_seconds=max_observation_age_seconds,
+        poll_interval_seconds=poll_interval_seconds,
+    )

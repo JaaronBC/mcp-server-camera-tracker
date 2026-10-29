@@ -88,6 +88,9 @@ Edit the "mcpServers" list to include the mcp-server-camera-tracker through the 
 
 ## Available tools
 
+Canonical orchestration-prefixed tool names are available for control-plane operations.
+Existing dashboard-prefixed names are retained as compatibility aliases.
+
 - `start_dashboard_demo()`: starts the webcam + radar dashboard demo in a background process.
 - `start_dashboard_and_wait_ready(timeout_seconds=10.0, max_observation_age_seconds=3.0, poll_interval_seconds=0.25)`: starts dashboard and waits until fresh observations are available or timeout occurs.
 - `dashboard_demo_status()`: returns whether the dashboard process is running, PID, and exit code.

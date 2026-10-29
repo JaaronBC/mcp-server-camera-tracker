@@ -88,3 +88,18 @@ def dashboard_process_status() -> dict[str, Any]:
         "return_code": _dashboard_process.poll(),
         "script_path": str(DASHBOARD_SCRIPT_PATH),
     }
+
+
+def start_orchestration_process() -> tuple[bool, str]:
+    # Performs start orchestration process logic.
+    return start_dashboard_process()
+
+
+def stop_orchestration_process(force: bool = False) -> str:
+    # Performs stop orchestration process logic.
+    return stop_dashboard_process(force=force)
+
+
+def orchestration_process_status() -> dict[str, Any]:
+    # Performs orchestration process status logic.
+    return dashboard_process_status()

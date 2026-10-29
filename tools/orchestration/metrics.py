@@ -463,3 +463,27 @@ def dashboard_tracking_quality_report(
         "event_health": event_health,
         "errors": errors,
     }
+
+
+@mcp.tool()
+def orchestration_depth_coverage_metrics(sample_limit: int = 50) -> dict[str, Any]:
+    # Performs orchestration depth coverage metrics logic.
+    return dashboard_depth_coverage_metrics(sample_limit=sample_limit)
+
+
+@mcp.tool()
+def orchestration_latency_continuity_metrics() -> dict[str, Any]:
+    # Performs orchestration latency continuity metrics logic.
+    return dashboard_latency_continuity_metrics()
+
+
+@mcp.tool()
+def orchestration_tracking_quality_report(
+    event_window_size: int = 100,
+    depth_sample_limit: int = 50,
+) -> dict[str, Any]:
+    # Performs orchestration tracking quality report logic.
+    return dashboard_tracking_quality_report(
+        event_window_size=event_window_size,
+        depth_sample_limit=depth_sample_limit,
+    )

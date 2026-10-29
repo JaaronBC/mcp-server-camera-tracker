@@ -223,3 +223,99 @@ def dashboard_bootstrap(
         "orchestration": orchestration,
         "lifecycle": lifecycle,
     }
+
+
+@mcp.tool()
+def start_orchestration_demo() -> str:
+    # Performs start orchestration demo logic.
+    return start_dashboard_demo()
+
+
+@mcp.tool()
+def stop_orchestration_demo(force: bool = False) -> str:
+    # Performs stop orchestration demo logic.
+    return stop_dashboard_demo(force=force)
+
+
+@mcp.tool()
+def orchestration_demo_status() -> dict:
+    # Performs orchestration demo status logic.
+    return dashboard_demo_status()
+
+
+@mcp.tool()
+def start_orchestration_and_wait_ready(
+    timeout_seconds: float = 10.0,
+    max_observation_age_seconds: float = 3.0,
+    poll_interval_seconds: float = 0.25,
+) -> dict:
+    # Performs start orchestration and wait ready logic.
+    return start_dashboard_and_wait_ready(
+        timeout_seconds=timeout_seconds,
+        max_observation_age_seconds=max_observation_age_seconds,
+        poll_interval_seconds=poll_interval_seconds,
+    )
+
+
+@mcp.tool()
+def stop_orchestration_and_confirm(
+    force: bool = False,
+    timeout_seconds: float = 5.0,
+    poll_interval_seconds: float = 0.1,
+) -> dict:
+    # Performs stop orchestration and confirm logic.
+    return stop_dashboard_and_confirm(
+        force=force,
+        timeout_seconds=timeout_seconds,
+        poll_interval_seconds=poll_interval_seconds,
+    )
+
+
+@mcp.tool()
+def restart_orchestration_and_wait_ready(
+    force_stop: bool = False,
+    stop_timeout_seconds: float = 5.0,
+    start_timeout_seconds: float = 10.0,
+    max_observation_age_seconds: float = 3.0,
+    poll_interval_seconds: float = 0.25,
+) -> dict:
+    # Performs restart orchestration and wait ready logic.
+    return restart_dashboard_and_wait_ready(
+        force_stop=force_stop,
+        stop_timeout_seconds=stop_timeout_seconds,
+        start_timeout_seconds=start_timeout_seconds,
+        max_observation_age_seconds=max_observation_age_seconds,
+        poll_interval_seconds=poll_interval_seconds,
+    )
+
+
+@mcp.tool()
+def orchestration_lifecycle_status(
+    max_observation_age_seconds: float = 3.0,
+) -> dict:
+    # Performs orchestration lifecycle status logic.
+    return dashboard_lifecycle_status(
+        max_observation_age_seconds=max_observation_age_seconds,
+    )
+
+
+@mcp.tool()
+def orchestration_bootstrap(
+    calibration: dict[str, Any] | None = None,
+    restart_if_running: bool = False,
+    force_stop: bool = False,
+    stop_timeout_seconds: float = 5.0,
+    start_timeout_seconds: float = 10.0,
+    max_observation_age_seconds: float = 3.0,
+    poll_interval_seconds: float = 0.25,
+) -> dict:
+    # Performs orchestration bootstrap logic.
+    return dashboard_bootstrap(
+        calibration=calibration,
+        restart_if_running=restart_if_running,
+        force_stop=force_stop,
+        stop_timeout_seconds=stop_timeout_seconds,
+        start_timeout_seconds=start_timeout_seconds,
+        max_observation_age_seconds=max_observation_age_seconds,
+        poll_interval_seconds=poll_interval_seconds,
+    )
