@@ -1,4 +1,4 @@
-# Handles test dashboard reasoning live llm behavior.
+# Handles test orchestration reasoning live llm behavior.
 from __future__ import annotations
 
 import json
@@ -8,10 +8,10 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from tools.reasoning import tools_reasoning_assessment as dashboardReasoning
+from tools.reasoning import tools_reasoning_assessment as orchestrationReasoning
 
 
-class TestDashboardReasoningLiveLLM(unittest.TestCase):
+class TestOrchestrationReasoningLiveLLM(unittest.TestCase):
     """Optional live-endpoint tests for Observation/Reasoning LLM calls.
 
     These tests are skipped unless explicitly enabled:
@@ -30,7 +30,7 @@ class TestDashboardReasoningLiveLLM(unittest.TestCase):
 
     def tearDown(self) -> None:
         # Performs tearDown logic.
-        dashboardReasoning._reset_reasoning_state()
+        orchestrationReasoning._reset_reasoning_state()
 
     def _write_radar_payload(self, radar_path: Path) -> None:
         # Performs write radar payload logic.
@@ -60,7 +60,7 @@ class TestDashboardReasoningLiveLLM(unittest.TestCase):
             self._write_radar_payload(radar_path)
 
             with patch("tools.reasoning.tools_reasoning_assessment.RADAR_STATE_PATH", radar_path):
-                result = dashboardReasoning.simulate_observation_summary("track-live-1")
+                result = orchestrationReasoning.simulate_observation_summary("track-live-1")
 
         self.assertTrue(result["available"])
         self.assertIn("summary", result)
@@ -79,7 +79,7 @@ class TestDashboardReasoningLiveLLM(unittest.TestCase):
             self._write_radar_payload(radar_path)
 
             with patch("tools.reasoning.tools_reasoning_assessment.RADAR_STATE_PATH", radar_path):
-                result = dashboardReasoning.simulate_reasoning_assessment("track-live-1")
+                result = orchestrationReasoning.simulate_reasoning_assessment("track-live-1")
 
         self.assertTrue(result["available"])
         self.assertIn("summary", result)
@@ -110,7 +110,7 @@ class TestDashboardReasoningLiveLLM(unittest.TestCase):
             with patch("tools.reasoning.tools_reasoning_assessment.RADAR_STATE_PATH", radar_path):
                 responses = []
                 for index in range(4):
-                    response = dashboardReasoning.simulate_evidence_request(
+                    response = orchestrationReasoning.simulate_evidence_request(
                         "track-live-1",
                         f"live-budget-check-{index}",
                     )

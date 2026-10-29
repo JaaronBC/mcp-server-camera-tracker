@@ -1,4 +1,4 @@
-# Handles test dashboard agent ops behavior.
+# Handles test orchestration agent ops behavior.
 from __future__ import annotations
 
 import json
@@ -7,14 +7,14 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from tools.orchestration import agent_ops as dashboardAgentOps
-from tools.reasoning import tools_reasoning_assessment as dashboardReasoning
+from tools.orchestration import agent_ops as orchestrationAgentOps
+from tools.reasoning import tools_reasoning_assessment as orchestrationReasoning
 
 
-class TestDashboardAgentOps(unittest.TestCase):
+class TestOrchestrationAgentOps(unittest.TestCase):
     def tearDown(self) -> None:
         # Performs tearDown logic.
-        dashboardReasoning._reset_reasoning_state()
+        orchestrationReasoning._reset_reasoning_state()
 
     def test_run_reasoning_cycle_and_log_missing_radar_state(self) -> None:
         # Performs test run reasoning cycle and log missing radar state logic.
@@ -24,7 +24,7 @@ class TestDashboardAgentOps(unittest.TestCase):
 
             with patch("tools.reasoning.tools_reasoning_assessment.RADAR_STATE_PATH", missing_radar):
                 with patch("tools.orchestration.agent_ops.AGENT_EVENTS_PATH", events_path):
-                    result = dashboardAgentOps.run_reasoning_cycle_and_log()
+                    result = orchestrationAgentOps.run_reasoning_cycle_and_log()
 
         self.assertFalse(result["available"])
         self.assertEqual(result["error"], "radar_state_unavailable")
@@ -114,7 +114,7 @@ class TestDashboardAgentOps(unittest.TestCase):
                             "error": None,
                         },
                     ):
-                        result = dashboardAgentOps.run_reasoning_cycle_and_log(max_tracks=1)
+                        result = orchestrationAgentOps.run_reasoning_cycle_and_log(max_tracks=1)
 
                     self.assertTrue(events_path.is_file())
                     lines = events_path.read_text(encoding="utf-8").splitlines()
@@ -190,7 +190,7 @@ class TestDashboardAgentOps(unittest.TestCase):
                         "tools.orchestration.agent_ops._append_event",
                         side_effect=OSError("disk full"),
                     ):
-                        result = dashboardAgentOps.run_reasoning_cycle_and_log(max_tracks=1)
+                        result = orchestrationAgentOps.run_reasoning_cycle_and_log(max_tracks=1)
 
         self.assertTrue(result["available"])
         self.assertEqual(result["cycle"]["success_count"], 1)
@@ -215,7 +215,7 @@ class TestDashboardAgentOps(unittest.TestCase):
             )
 
             with patch("tools.orchestration.agent_ops.AGENT_EVENTS_PATH", events_path):
-                result = dashboardAgentOps.get_recent_agent_events(limit=10)
+                result = orchestrationAgentOps.get_recent_agent_events(limit=10)
 
         self.assertTrue(result["available"])
         self.assertEqual(result["returned_events"], 2)
@@ -226,16 +226,16 @@ class TestDashboardAgentOps(unittest.TestCase):
     def test_invalid_limits_raise(self) -> None:
         # Performs test invalid limits raise logic.
         with self.assertRaises(ValueError):
-            dashboardAgentOps.get_recent_agent_events(limit=0)
+            orchestrationAgentOps.get_recent_agent_events(limit=0)
         with self.assertRaises(ValueError):
-            dashboardAgentOps.run_reasoning_cycle_and_log(max_tracks=0)
+            orchestrationAgentOps.run_reasoning_cycle_and_log(max_tracks=0)
 
     def test_summarize_agent_event_health_missing_file(self) -> None:
         # Performs test summarize agent event health missing file logic.
         with TemporaryDirectory() as temp_dir:
             events_path = Path(temp_dir) / "agent_events.jsonl"
             with patch("tools.orchestration.agent_ops.AGENT_EVENTS_PATH", events_path):
-                result = dashboardAgentOps.summarize_agent_event_health(window_size=10)
+                result = orchestrationAgentOps.summarize_agent_event_health(window_size=10)
 
         self.assertFalse(result["available"])
         self.assertEqual(result["error"], "agent_events_missing")
@@ -290,7 +290,7 @@ class TestDashboardAgentOps(unittest.TestCase):
 
             with patch("tools.orchestration.agent_ops.AGENT_EVENTS_PATH", events_path):
                 with patch("tools.orchestration.agent_ops.time.time", return_value=120.0):
-                    result = dashboardAgentOps.summarize_agent_event_health(window_size=10)
+                    result = orchestrationAgentOps.summarize_agent_event_health(window_size=10)
 
         self.assertTrue(result["available"])
         self.assertEqual(result["returned_events"], 3)
@@ -366,7 +366,7 @@ class TestDashboardAgentOps(unittest.TestCase):
 
             with patch("tools.orchestration.agent_ops.AGENT_EVENTS_PATH", events_path):
                 with patch("tools.orchestration.agent_ops.time.time", return_value=200.0):
-                    result = dashboardAgentOps.summarize_agent_event_health(window_size=10)
+                    result = orchestrationAgentOps.summarize_agent_event_health(window_size=10)
 
         self.assertTrue(result["available"])
         self.assertFalse(result["freshness"]["is_fresh"])
@@ -375,20 +375,20 @@ class TestDashboardAgentOps(unittest.TestCase):
     def test_format_agent_error_digest_from_codes(self) -> None:
         # Performs test format agent error digest from codes logic.
         self.assertEqual(
-            dashboardAgentOps._format_agent_error_digest("timeout", "invalid_response_format"),
+            orchestrationAgentOps._format_agent_error_digest("timeout", "invalid_response_format"),
             "obs(timeout),rea(invalid_response_format)",
         )
         self.assertEqual(
-            dashboardAgentOps._format_agent_error_digest(None, ""),
+            orchestrationAgentOps._format_agent_error_digest(None, ""),
             "obs(none),rea(none)",
         )
 
     def test_derive_handoff_quality(self) -> None:
         # Performs test derive handoff quality logic.
-        self.assertEqual(dashboardAgentOps._derive_handoff_quality("ok", None), "healthy")
-        self.assertEqual(dashboardAgentOps._derive_handoff_quality("error", None), "degraded")
+        self.assertEqual(orchestrationAgentOps._derive_handoff_quality("ok", None), "healthy")
+        self.assertEqual(orchestrationAgentOps._derive_handoff_quality("error", None), "degraded")
         self.assertEqual(
-            dashboardAgentOps._derive_handoff_quality(None, "invalid_handoff_payload"),
+            orchestrationAgentOps._derive_handoff_quality(None, "invalid_handoff_payload"),
             "degraded",
         )
 
@@ -422,7 +422,7 @@ class TestDashboardAgentOps(unittest.TestCase):
             },
         }
 
-        trace = dashboardAgentOps._extract_evidence_trace(summary)
+        trace = orchestrationAgentOps._extract_evidence_trace(summary)
 
         self.assertEqual(trace["latest_track_snapshot"]["ground_position"], {"x": 1.0, "z": 2.0})
         self.assertEqual(len(trace["latest_track_snapshot"]["quality_flags"]), 5)
@@ -436,14 +436,14 @@ class TestDashboardAgentOps(unittest.TestCase):
     def test_summarize_agent_event_health_invalid_window_size(self) -> None:
         # Performs test summarize agent event health invalid window size logic.
         with self.assertRaises(ValueError):
-            dashboardAgentOps.summarize_agent_event_health(window_size=0)
+            orchestrationAgentOps.summarize_agent_event_health(window_size=0)
 
     def test_prune_agent_event_log_missing_file(self) -> None:
         # Performs test prune agent event log missing file logic.
         with TemporaryDirectory() as temp_dir:
             events_path = Path(temp_dir) / "agent_events.jsonl"
             with patch("tools.orchestration.agent_ops.AGENT_EVENTS_PATH", events_path):
-                result = dashboardAgentOps.prune_agent_event_log(max_events_keep=10)
+                result = orchestrationAgentOps.prune_agent_event_log(max_events_keep=10)
 
         self.assertFalse(result["available"])
         self.assertEqual(result["error"], "agent_events_missing")
@@ -458,7 +458,7 @@ class TestDashboardAgentOps(unittest.TestCase):
             )
 
             with patch("tools.orchestration.agent_ops.AGENT_EVENTS_PATH", events_path):
-                result = dashboardAgentOps.prune_agent_event_log(max_events_keep=5)
+                result = orchestrationAgentOps.prune_agent_event_log(max_events_keep=5)
 
         self.assertTrue(result["available"])
         self.assertFalse(result["pruned"])
@@ -482,7 +482,7 @@ class TestDashboardAgentOps(unittest.TestCase):
 
             with patch("tools.orchestration.agent_ops.AGENT_EVENTS_PATH", events_path):
                 with patch("tools.orchestration.agent_ops.time.strftime", return_value="20261026_120000"):
-                    result = dashboardAgentOps.prune_agent_event_log(max_events_keep=2)
+                    result = orchestrationAgentOps.prune_agent_event_log(max_events_keep=2)
 
             remaining_lines = events_path.read_text(encoding="utf-8").splitlines()
             archive_path = result["archive_path"]
@@ -503,7 +503,7 @@ class TestDashboardAgentOps(unittest.TestCase):
     def test_prune_agent_event_log_invalid_max_events_keep(self) -> None:
         # Performs test prune agent event log invalid max events keep logic.
         with self.assertRaises(ValueError):
-            dashboardAgentOps.prune_agent_event_log(max_events_keep=-1)
+            orchestrationAgentOps.prune_agent_event_log(max_events_keep=-1)
 
 
 if __name__ == "__main__":

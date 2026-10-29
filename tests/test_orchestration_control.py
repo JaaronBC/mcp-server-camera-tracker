@@ -1,13 +1,13 @@
-# Handles test dashboard control behavior.
+# Handles test orchestration control behavior.
 from __future__ import annotations
 
 import unittest
 from unittest.mock import patch
 
-from tools.orchestration import control as dashboardControl
+from tools.orchestration import control as orchestrationControl
 
 
-class TestDashboardControl(unittest.TestCase):
+class TestOrchestrationControl(unittest.TestCase):
     @patch("tools.orchestration.control.wait_for_dashboard_ready")
     @patch("tools.orchestration.control.start_dashboard_process")
     def test_start_dashboard_and_wait_ready_success(
@@ -23,7 +23,7 @@ class TestDashboardControl(unittest.TestCase):
             "status": {"available": True},
         }
 
-        result = dashboardControl.start_dashboard_and_wait_ready(
+        result = orchestrationControl.start_dashboard_and_wait_ready(
             timeout_seconds=5.0,
             max_observation_age_seconds=2.0,
             poll_interval_seconds=0.1,
@@ -55,7 +55,7 @@ class TestDashboardControl(unittest.TestCase):
             "status": {"available": False, "error": "radar_state_missing"},
         }
 
-        result = dashboardControl.start_dashboard_and_wait_ready(
+        result = orchestrationControl.start_dashboard_and_wait_ready(
             timeout_seconds=1.0,
             max_observation_age_seconds=0.5,
             poll_interval_seconds=0.1,
@@ -79,7 +79,7 @@ class TestDashboardControl(unittest.TestCase):
             {"running": False, "pid": 10, "return_code": 0},
         ]
 
-        result = dashboardControl.stop_dashboard_and_confirm(
+        result = orchestrationControl.stop_dashboard_and_confirm(
             force=False,
             timeout_seconds=1.0,
             poll_interval_seconds=0.01,
@@ -104,7 +104,7 @@ class TestDashboardControl(unittest.TestCase):
         mock_status.return_value = {"running": True, "pid": 10, "return_code": None}
         mock_time.side_effect = [0.0, 0.0, 0.05, 0.11]
 
-        result = dashboardControl.stop_dashboard_and_confirm(
+        result = orchestrationControl.stop_dashboard_and_confirm(
             force=True,
             timeout_seconds=0.1,
             poll_interval_seconds=0.05,
@@ -118,9 +118,9 @@ class TestDashboardControl(unittest.TestCase):
     def test_stop_dashboard_and_confirm_invalid_arguments(self) -> None:
         # Performs test stop dashboard and confirm invalid arguments logic.
         with self.assertRaises(ValueError):
-            dashboardControl.stop_dashboard_and_confirm(timeout_seconds=0)
+            orchestrationControl.stop_dashboard_and_confirm(timeout_seconds=0)
         with self.assertRaises(ValueError):
-            dashboardControl.stop_dashboard_and_confirm(poll_interval_seconds=0)
+            orchestrationControl.stop_dashboard_and_confirm(poll_interval_seconds=0)
 
     @patch("tools.orchestration.control.start_dashboard_and_wait_ready")
     @patch("tools.orchestration.control.stop_dashboard_and_confirm")
@@ -142,7 +142,7 @@ class TestDashboardControl(unittest.TestCase):
             "readiness": {"ready": True, "attempts": 2},
         }
 
-        result = dashboardControl.restart_dashboard_and_wait_ready(
+        result = orchestrationControl.restart_dashboard_and_wait_ready(
             force_stop=False,
             stop_timeout_seconds=4.0,
             start_timeout_seconds=8.0,
@@ -169,7 +169,7 @@ class TestDashboardControl(unittest.TestCase):
             "status": {"running": True},
         }
 
-        result = dashboardControl.restart_dashboard_and_wait_ready()
+        result = orchestrationControl.restart_dashboard_and_wait_ready()
 
         self.assertFalse(result["restarted"])
         self.assertIsNone(result["start"])
@@ -185,7 +185,7 @@ class TestDashboardControl(unittest.TestCase):
         mock_health_status,
         mock_calibration,
     ) -> None:
-        # Performs test dashboard lifecycle status ready logic.
+        # Performs test orchestration lifecycle status ready logic.
         mock_process_status.return_value = {
             "running": True,
             "pid": 123,
@@ -201,7 +201,7 @@ class TestDashboardControl(unittest.TestCase):
             "ground_coordinate_unit": "meters",
         }
 
-        result = dashboardControl.dashboard_lifecycle_status(max_observation_age_seconds=1.0)
+        result = orchestrationControl.dashboard_lifecycle_status(max_observation_age_seconds=1.0)
 
         self.assertTrue(result["ready"])
         self.assertTrue(result["running"])
@@ -217,7 +217,7 @@ class TestDashboardControl(unittest.TestCase):
         mock_health_status,
         mock_calibration,
     ) -> None:
-        # Performs test dashboard lifecycle status not ready when stale logic.
+        # Performs test orchestration lifecycle status not ready when stale logic.
         mock_process_status.return_value = {
             "running": True,
             "pid": 123,
@@ -232,7 +232,7 @@ class TestDashboardControl(unittest.TestCase):
             "error": "calibration_missing",
         }
 
-        result = dashboardControl.dashboard_lifecycle_status(max_observation_age_seconds=1.0)
+        result = orchestrationControl.dashboard_lifecycle_status(max_observation_age_seconds=1.0)
 
         self.assertFalse(result["ready"])
         self.assertTrue(result["running"])
@@ -240,9 +240,9 @@ class TestDashboardControl(unittest.TestCase):
         self.assertFalse(result["observations_fresh"])
 
     def test_dashboard_lifecycle_status_invalid_arguments(self) -> None:
-        # Performs test dashboard lifecycle status invalid arguments logic.
+        # Performs test orchestration lifecycle status invalid arguments logic.
         with self.assertRaises(ValueError):
-            dashboardControl.dashboard_lifecycle_status(max_observation_age_seconds=-0.1)
+            orchestrationControl.dashboard_lifecycle_status(max_observation_age_seconds=-0.1)
 
     @patch("tools.orchestration.control.dashboard_lifecycle_status")
     @patch("tools.orchestration.control.start_dashboard_and_wait_ready")
@@ -253,7 +253,7 @@ class TestDashboardControl(unittest.TestCase):
         mock_start_wait,
         mock_lifecycle,
     ) -> None:
-        # Performs test dashboard bootstrap start path with calibration logic.
+        # Performs test orchestration bootstrap start path with calibration logic.
         mock_set_calibration.return_value = {
             "saved": True,
             "ground_coordinate_unit": "meters",
@@ -269,7 +269,7 @@ class TestDashboardControl(unittest.TestCase):
             "running": True,
         }
 
-        result = dashboardControl.dashboard_bootstrap(
+        result = orchestrationControl.dashboard_bootstrap(
             calibration={
                 "image_points": [[0, 0], [100, 0], [100, 100], [0, 100]],
                 "ground_points": [[0, 0], [10, 0], [10, 20], [0, 20]],
@@ -295,7 +295,7 @@ class TestDashboardControl(unittest.TestCase):
         mock_restart_wait,
         mock_lifecycle,
     ) -> None:
-        # Performs test dashboard bootstrap restart path logic.
+        # Performs test orchestration bootstrap restart path logic.
         mock_restart_wait.return_value = {
             "restarted": True,
             "stop": {"stopped": True},
@@ -307,7 +307,7 @@ class TestDashboardControl(unittest.TestCase):
             "running": True,
         }
 
-        result = dashboardControl.dashboard_bootstrap(
+        result = orchestrationControl.dashboard_bootstrap(
             restart_if_running=True,
             force_stop=True,
             stop_timeout_seconds=2.0,

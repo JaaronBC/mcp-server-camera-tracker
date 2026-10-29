@@ -1,10 +1,10 @@
-# Handles test dashboard visual tracking behavior.
+# Handles test orchestration visual tracking behavior.
 from __future__ import annotations
 
 import unittest
 from unittest.mock import patch
 
-from tools.tracking import tools_visual_tracking as dashboardVisualTracking
+from tools.tracking import tools_visual_tracking as orchestrationVisualTracking
 from tools.contracts import VisualAssociationProposal
 from tools.tracking.agent_tracking import VisualTrackingAgentResult
 
@@ -36,7 +36,7 @@ class FakeAgent:
         )
 
 
-class TestDashboardVisualTracking(unittest.TestCase):
+class TestOrchestrationVisualTracking(unittest.TestCase):
     def test_simulate_visual_tracking_association_returns_validated_updates(self) -> None:
         # Performs test simulate visual tracking association returns validated updates logic.
         detections = [
@@ -58,7 +58,7 @@ class TestDashboardVisualTracking(unittest.TestCase):
         ]
 
         with patch("tools.tracking.tools_visual_tracking.LLMVisualTrackingAgent", FakeAgent):
-            result = dashboardVisualTracking.simulate_visual_tracking_association(
+            result = orchestrationVisualTracking.simulate_visual_tracking_association(
                 detections=detections,
                 frame_reference="data:image/jpeg;base64,abc",
                 event_reasons=["possible_id_switch"],
