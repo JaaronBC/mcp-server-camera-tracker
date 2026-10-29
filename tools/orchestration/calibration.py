@@ -1,4 +1,4 @@
-"""Compatibility alias for `tools.dashboard.calibration`."""
+"""Compatibility alias to `tools.dashboard.calibration` for incremental orchestration migration."""
 
 import sys as _sys
 

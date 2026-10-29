@@ -1,4 +1,4 @@
-"""Compatibility alias for `tools.dashboard.live_tracking_tool`."""
+"""Compatibility alias to `tools.dashboard.live_tracking_tool` for incremental orchestration migration."""
 
 import sys as _sys
 

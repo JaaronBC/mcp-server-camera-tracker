@@ -1,4 +1,4 @@
-"""Compatibility alias for `tools.dashboard.agent_ops`."""
+"""Compatibility alias to `tools.dashboard.agent_ops` for incremental orchestration migration."""
 
 import sys as _sys
 

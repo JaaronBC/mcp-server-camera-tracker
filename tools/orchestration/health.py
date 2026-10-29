@@ -1,4 +1,4 @@
-"""Compatibility alias for `tools.dashboard.health`."""
+"""Compatibility alias to `tools.dashboard.health` for incremental orchestration migration."""
 
 import sys as _sys
 

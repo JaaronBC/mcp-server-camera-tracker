@@ -1,4 +1,4 @@
-"""Compatibility alias for `tools.dashboard.control`."""
+"""Compatibility alias to `tools.dashboard.control` for incremental orchestration migration."""
 
 import sys as _sys
 

@@ -1,4 +1,4 @@
-"""Compatibility alias for `tools.dashboard.detect_objects_tool`."""
+"""Compatibility alias to `tools.dashboard.detect_objects_tool` for incremental orchestration migration."""
 
 import sys as _sys
 
