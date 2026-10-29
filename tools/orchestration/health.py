@@ -1,3 +1,7 @@
-"""Compatibility wrapper for `tools.dashboard.health`."""
+"""Compatibility alias for `tools.dashboard.health`."""
 
-from ..dashboard.health import *
+import sys as _sys
+
+from ..dashboard import health as _impl
+
+_sys.modules[__name__] = _impl

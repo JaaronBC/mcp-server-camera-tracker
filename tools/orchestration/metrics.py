@@ -1,3 +1,7 @@
-"""Compatibility wrapper for `tools.dashboard.metrics`."""
+"""Compatibility alias for `tools.dashboard.metrics`."""
 
-from ..dashboard.metrics import *
+import sys as _sys
+
+from ..dashboard import metrics as _impl
+
+_sys.modules[__name__] = _impl

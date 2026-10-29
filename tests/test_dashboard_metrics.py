@@ -7,7 +7,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from tools.dashboard import metrics as dashboardMetrics
+from tools.orchestration import metrics as dashboardMetrics
 
 
 class TestDashboardMetrics(unittest.TestCase):
@@ -16,10 +16,10 @@ class TestDashboardMetrics(unittest.TestCase):
         with TemporaryDirectory() as temp_dir:
             captures_dir = Path(temp_dir)
 
-            with patch("tools.dashboard.metrics.CAPTURES_DIR", captures_dir):
-                with patch("tools.dashboard.metrics.RADAR_STATE_PATH", captures_dir / "latest_radar_state.json"):
-                    with patch("tools.dashboard.metrics.TRACKING_FRAME_PATH", captures_dir / "latest_tracking_frame.json"):
-                        with patch("tools.dashboard.metrics.time.time", return_value=100.0):
+            with patch("tools.orchestration.metrics.CAPTURES_DIR", captures_dir):
+                with patch("tools.orchestration.metrics.RADAR_STATE_PATH", captures_dir / "latest_radar_state.json"):
+                    with patch("tools.orchestration.metrics.TRACKING_FRAME_PATH", captures_dir / "latest_tracking_frame.json"):
+                        with patch("tools.orchestration.metrics.time.time", return_value=100.0):
                             result = dashboardMetrics.dashboard_latency_continuity_metrics()
 
         self.assertFalse(result["available"])
@@ -54,10 +54,10 @@ class TestDashboardMetrics(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with patch("tools.dashboard.metrics.CAPTURES_DIR", captures_dir):
-                with patch("tools.dashboard.metrics.RADAR_STATE_PATH", radar_path):
-                    with patch("tools.dashboard.metrics.TRACKING_FRAME_PATH", tracking_path):
-                        with patch("tools.dashboard.metrics.time.time", return_value=100.0):
+            with patch("tools.orchestration.metrics.CAPTURES_DIR", captures_dir):
+                with patch("tools.orchestration.metrics.RADAR_STATE_PATH", radar_path):
+                    with patch("tools.orchestration.metrics.TRACKING_FRAME_PATH", tracking_path):
+                        with patch("tools.orchestration.metrics.time.time", return_value=100.0):
                             result = dashboardMetrics.dashboard_latency_continuity_metrics()
 
         self.assertTrue(result["available"])
@@ -95,10 +95,10 @@ class TestDashboardMetrics(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with patch("tools.dashboard.metrics.CAPTURES_DIR", captures_dir):
-                with patch("tools.dashboard.metrics.RADAR_STATE_PATH", captures_dir / "latest_radar_state.json"):
-                    with patch("tools.dashboard.metrics.TRACKING_FRAME_PATH", captures_dir / "latest_tracking_frame.json"):
-                        with patch("tools.dashboard.metrics.time.time", return_value=20.0):
+            with patch("tools.orchestration.metrics.CAPTURES_DIR", captures_dir):
+                with patch("tools.orchestration.metrics.RADAR_STATE_PATH", captures_dir / "latest_radar_state.json"):
+                    with patch("tools.orchestration.metrics.TRACKING_FRAME_PATH", captures_dir / "latest_tracking_frame.json"):
+                        with patch("tools.orchestration.metrics.time.time", return_value=20.0):
                             result = dashboardMetrics.dashboard_latency_continuity_metrics()
 
         continuity = result["continuity"]
@@ -113,13 +113,13 @@ class TestDashboardMetrics(unittest.TestCase):
         with TemporaryDirectory() as temp_dir:
             captures_dir = Path(temp_dir)
 
-            with patch("tools.dashboard.metrics.CAPTURES_DIR", captures_dir):
-                with patch("tools.dashboard.metrics.RADAR_STATE_PATH", captures_dir / "latest_radar_state.json"):
+            with patch("tools.orchestration.metrics.CAPTURES_DIR", captures_dir):
+                with patch("tools.orchestration.metrics.RADAR_STATE_PATH", captures_dir / "latest_radar_state.json"):
                     with patch(
-                        "tools.dashboard.metrics.DEPTH_COVERAGE_HISTORY_PATH",
+                        "tools.orchestration.metrics.DEPTH_COVERAGE_HISTORY_PATH",
                         captures_dir / "radar_depth_coverage_history.jsonl",
                     ):
-                        with patch("tools.dashboard.metrics.time.time", return_value=100.0):
+                        with patch("tools.orchestration.metrics.time.time", return_value=100.0):
                             result = dashboardMetrics.dashboard_depth_coverage_metrics()
 
         self.assertFalse(result["available"])
@@ -180,10 +180,10 @@ class TestDashboardMetrics(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with patch("tools.dashboard.metrics.CAPTURES_DIR", captures_dir):
-                with patch("tools.dashboard.metrics.RADAR_STATE_PATH", radar_path):
-                    with patch("tools.dashboard.metrics.DEPTH_COVERAGE_HISTORY_PATH", history_path):
-                        with patch("tools.dashboard.metrics.time.time", return_value=100.0):
+            with patch("tools.orchestration.metrics.CAPTURES_DIR", captures_dir):
+                with patch("tools.orchestration.metrics.RADAR_STATE_PATH", radar_path):
+                    with patch("tools.orchestration.metrics.DEPTH_COVERAGE_HISTORY_PATH", history_path):
+                        with patch("tools.orchestration.metrics.time.time", return_value=100.0):
                             result = dashboardMetrics.dashboard_depth_coverage_metrics(sample_limit=10)
 
         self.assertTrue(result["available"])
@@ -217,10 +217,10 @@ class TestDashboardMetrics(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with patch("tools.dashboard.metrics.CAPTURES_DIR", captures_dir):
-                with patch("tools.dashboard.metrics.RADAR_STATE_PATH", radar_path):
-                    with patch("tools.dashboard.metrics.DEPTH_COVERAGE_HISTORY_PATH", history_path):
-                        with patch("tools.dashboard.metrics.time.time", return_value=60.0):
+            with patch("tools.orchestration.metrics.CAPTURES_DIR", captures_dir):
+                with patch("tools.orchestration.metrics.RADAR_STATE_PATH", radar_path):
+                    with patch("tools.orchestration.metrics.DEPTH_COVERAGE_HISTORY_PATH", history_path):
+                        with patch("tools.orchestration.metrics.time.time", return_value=60.0):
                             result = dashboardMetrics.dashboard_depth_coverage_metrics(sample_limit=10)
 
         self.assertTrue(result["available"])
@@ -322,12 +322,12 @@ class TestDashboardMetrics(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with patch("tools.dashboard.metrics.CAPTURES_DIR", captures_dir):
-                with patch("tools.dashboard.metrics.RADAR_STATE_PATH", radar_path):
-                    with patch("tools.dashboard.metrics.TRACKING_FRAME_PATH", tracking_path):
-                        with patch("tools.dashboard.metrics.DEPTH_COVERAGE_HISTORY_PATH", depth_history_path):
-                            with patch("tools.dashboard.metrics.time.time", return_value=100.0):
-                                with patch("tools.dashboard.agent_ops.AGENT_EVENTS_PATH", event_log_path):
+            with patch("tools.orchestration.metrics.CAPTURES_DIR", captures_dir):
+                with patch("tools.orchestration.metrics.RADAR_STATE_PATH", radar_path):
+                    with patch("tools.orchestration.metrics.TRACKING_FRAME_PATH", tracking_path):
+                        with patch("tools.orchestration.metrics.DEPTH_COVERAGE_HISTORY_PATH", depth_history_path):
+                            with patch("tools.orchestration.metrics.time.time", return_value=100.0):
+                                with patch("tools.orchestration.agent_ops.AGENT_EVENTS_PATH", event_log_path):
                                     result = dashboardMetrics.dashboard_tracking_quality_report(
                                         event_window_size=10,
                                         depth_sample_limit=10,
@@ -381,12 +381,12 @@ class TestDashboardMetrics(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with patch("tools.dashboard.metrics.CAPTURES_DIR", captures_dir):
-                with patch("tools.dashboard.metrics.RADAR_STATE_PATH", radar_path):
-                    with patch("tools.dashboard.metrics.TRACKING_FRAME_PATH", tracking_path):
-                        with patch("tools.dashboard.metrics.DEPTH_COVERAGE_HISTORY_PATH", depth_history_path):
-                            with patch("tools.dashboard.metrics.time.time", return_value=100.0):
-                                with patch("tools.dashboard.agent_ops.AGENT_EVENTS_PATH", event_log_path):
+            with patch("tools.orchestration.metrics.CAPTURES_DIR", captures_dir):
+                with patch("tools.orchestration.metrics.RADAR_STATE_PATH", radar_path):
+                    with patch("tools.orchestration.metrics.TRACKING_FRAME_PATH", tracking_path):
+                        with patch("tools.orchestration.metrics.DEPTH_COVERAGE_HISTORY_PATH", depth_history_path):
+                            with patch("tools.orchestration.metrics.time.time", return_value=100.0):
+                                with patch("tools.orchestration.agent_ops.AGENT_EVENTS_PATH", event_log_path):
                                     result = dashboardMetrics.dashboard_tracking_quality_report(
                                         event_window_size=10,
                                         depth_sample_limit=10,

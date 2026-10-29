@@ -1,3 +1,7 @@
-"""Compatibility wrapper for `tools.dashboard.control`."""
+"""Compatibility alias for `tools.dashboard.control`."""
 
-from ..dashboard.control import *
+import sys as _sys
+
+from ..dashboard import control as _impl
+
+_sys.modules[__name__] = _impl

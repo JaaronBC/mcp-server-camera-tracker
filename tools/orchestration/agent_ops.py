@@ -1,3 +1,7 @@
-"""Compatibility wrapper for `tools.dashboard.agent_ops`."""
+"""Compatibility alias for `tools.dashboard.agent_ops`."""
 
-from ..dashboard.agent_ops import *
+import sys as _sys
+
+from ..dashboard import agent_ops as _impl
+
+_sys.modules[__name__] = _impl

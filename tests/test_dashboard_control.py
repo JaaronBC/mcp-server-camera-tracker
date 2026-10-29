@@ -4,12 +4,12 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from tools.dashboard import control as dashboardControl
+from tools.orchestration import control as dashboardControl
 
 
 class TestDashboardControl(unittest.TestCase):
-    @patch("tools.dashboard.control.wait_for_dashboard_ready")
-    @patch("tools.dashboard.control.start_dashboard_process")
+    @patch("tools.orchestration.control.wait_for_dashboard_ready")
+    @patch("tools.orchestration.control.start_dashboard_process")
     def test_start_dashboard_and_wait_ready_success(
         self,
         mock_start,
@@ -39,8 +39,8 @@ class TestDashboardControl(unittest.TestCase):
             poll_interval_seconds=0.1,
         )
 
-    @patch("tools.dashboard.control.wait_for_dashboard_ready")
-    @patch("tools.dashboard.control.start_dashboard_process")
+    @patch("tools.orchestration.control.wait_for_dashboard_ready")
+    @patch("tools.orchestration.control.start_dashboard_process")
     def test_start_dashboard_and_wait_ready_timeout(
         self,
         mock_start,
@@ -65,8 +65,8 @@ class TestDashboardControl(unittest.TestCase):
         self.assertEqual(result["start_message"], "already running")
         self.assertFalse(result["readiness"]["ready"])
 
-    @patch("tools.dashboard.control.dashboard_process_status")
-    @patch("tools.dashboard.control.stop_dashboard_process")
+    @patch("tools.orchestration.control.dashboard_process_status")
+    @patch("tools.orchestration.control.stop_dashboard_process")
     def test_stop_dashboard_and_confirm_success(
         self,
         mock_stop,
@@ -88,10 +88,10 @@ class TestDashboardControl(unittest.TestCase):
         self.assertTrue(result["stopped"])
         self.assertEqual(result["stop_message"], "stopped")
 
-    @patch("tools.dashboard.control.time.sleep")
-    @patch("tools.dashboard.control.time.time")
-    @patch("tools.dashboard.control.dashboard_process_status")
-    @patch("tools.dashboard.control.stop_dashboard_process")
+    @patch("tools.orchestration.control.time.sleep")
+    @patch("tools.orchestration.control.time.time")
+    @patch("tools.orchestration.control.dashboard_process_status")
+    @patch("tools.orchestration.control.stop_dashboard_process")
     def test_stop_dashboard_and_confirm_timeout(
         self,
         mock_stop,
@@ -122,8 +122,8 @@ class TestDashboardControl(unittest.TestCase):
         with self.assertRaises(ValueError):
             dashboardControl.stop_dashboard_and_confirm(poll_interval_seconds=0)
 
-    @patch("tools.dashboard.control.start_dashboard_and_wait_ready")
-    @patch("tools.dashboard.control.stop_dashboard_and_confirm")
+    @patch("tools.orchestration.control.start_dashboard_and_wait_ready")
+    @patch("tools.orchestration.control.stop_dashboard_and_confirm")
     def test_restart_dashboard_and_wait_ready_success(
         self,
         mock_stop_confirm,
@@ -154,8 +154,8 @@ class TestDashboardControl(unittest.TestCase):
         self.assertTrue(result["start"]["started"])
         self.assertTrue(result["readiness"]["ready"])
 
-    @patch("tools.dashboard.control.start_dashboard_and_wait_ready")
-    @patch("tools.dashboard.control.stop_dashboard_and_confirm")
+    @patch("tools.orchestration.control.start_dashboard_and_wait_ready")
+    @patch("tools.orchestration.control.stop_dashboard_and_confirm")
     def test_restart_dashboard_and_wait_ready_stop_failure(
         self,
         mock_stop_confirm,
@@ -176,9 +176,9 @@ class TestDashboardControl(unittest.TestCase):
         self.assertIsNone(result["readiness"])
         mock_start_wait.assert_not_called()
 
-    @patch("tools.dashboard.control.validate_ground_plane_calibration")
-    @patch("tools.dashboard.control.dashboard_health_status")
-    @patch("tools.dashboard.control.dashboard_process_status")
+    @patch("tools.orchestration.control.validate_ground_plane_calibration")
+    @patch("tools.orchestration.control.dashboard_health_status")
+    @patch("tools.orchestration.control.dashboard_process_status")
     def test_dashboard_lifecycle_status_ready(
         self,
         mock_process_status,
@@ -208,9 +208,9 @@ class TestDashboardControl(unittest.TestCase):
         self.assertTrue(result["health_available"])
         self.assertTrue(result["observations_fresh"])
 
-    @patch("tools.dashboard.control.validate_ground_plane_calibration")
-    @patch("tools.dashboard.control.dashboard_health_status")
-    @patch("tools.dashboard.control.dashboard_process_status")
+    @patch("tools.orchestration.control.validate_ground_plane_calibration")
+    @patch("tools.orchestration.control.dashboard_health_status")
+    @patch("tools.orchestration.control.dashboard_process_status")
     def test_dashboard_lifecycle_status_not_ready_when_stale(
         self,
         mock_process_status,
@@ -244,9 +244,9 @@ class TestDashboardControl(unittest.TestCase):
         with self.assertRaises(ValueError):
             dashboardControl.dashboard_lifecycle_status(max_observation_age_seconds=-0.1)
 
-    @patch("tools.dashboard.control.dashboard_lifecycle_status")
-    @patch("tools.dashboard.control.start_dashboard_and_wait_ready")
-    @patch("tools.dashboard.control.set_ground_plane_calibration")
+    @patch("tools.orchestration.control.dashboard_lifecycle_status")
+    @patch("tools.orchestration.control.start_dashboard_and_wait_ready")
+    @patch("tools.orchestration.control.set_ground_plane_calibration")
     def test_dashboard_bootstrap_start_path_with_calibration(
         self,
         mock_set_calibration,
@@ -286,9 +286,9 @@ class TestDashboardControl(unittest.TestCase):
         self.assertIsNotNone(result["calibration_result"])
         mock_start_wait.assert_called_once()
 
-    @patch("tools.dashboard.control.dashboard_lifecycle_status")
-    @patch("tools.dashboard.control.restart_dashboard_and_wait_ready")
-    @patch("tools.dashboard.control.start_dashboard_and_wait_ready")
+    @patch("tools.orchestration.control.dashboard_lifecycle_status")
+    @patch("tools.orchestration.control.restart_dashboard_and_wait_ready")
+    @patch("tools.orchestration.control.start_dashboard_and_wait_ready")
     def test_dashboard_bootstrap_restart_path(
         self,
         mock_start_wait,
