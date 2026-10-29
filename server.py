@@ -2,7 +2,7 @@
 from tools.registry import mcp
 
 # Import tools
-from tools.dashboard import tools_dashboard
+from tools.orchestration import tools_orchestration
 from tools.reasoning import tools_reasoning_assessment
 from tools.tracking import tools_visual_tracking
 
