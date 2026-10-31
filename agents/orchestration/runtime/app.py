@@ -82,15 +82,31 @@ class RuntimeServices:
 
     async def stop(self) -> None:
         # Stops runtime services and closes MCP session resources.
+        session_stop_error: Exception | None = None
+        stdio_stop_error: Exception | None = None
+
         if self._session_context is not None:
-            await self._session_context.__aexit__(None, None, None)
-            self._session_context = None
-            self.session = None
-            self.observation_source = None
+            try:
+                await self._session_context.__aexit__(None, None, None)
+            except Exception as error:  # pragma: no cover - exercised via lifecycle tests
+                session_stop_error = error
+            finally:
+                self._session_context = None
+                self.session = None
+                self.observation_source = None
 
         if self._stdio_context is not None:
-            await self._stdio_context.__aexit__(None, None, None)
-            self._stdio_context = None
+            try:
+                await self._stdio_context.__aexit__(None, None, None)
+            except Exception as error:  # pragma: no cover - exercised via lifecycle tests
+                stdio_stop_error = error
+            finally:
+                self._stdio_context = None
+
+        if session_stop_error is not None:
+            raise session_stop_error
+        if stdio_stop_error is not None:
+            raise stdio_stop_error
 
 
 async def initialize_services(
@@ -117,7 +133,7 @@ async def initialize_services(
     return services
 
 
-class AgentCoordinator:
+class RuntimeLoopCoordinator:
     def __init__(
         self,
         *,
@@ -145,8 +161,11 @@ class AgentCoordinator:
         return None
 
 
+AgentCoordinator = RuntimeLoopCoordinator
+
+
 class OrchestrationAgent:
-    def __init__(self, *, coordinator: AgentCoordinator, observation_source: Any) -> None:
+    def __init__(self, *, coordinator: RuntimeLoopCoordinator, observation_source: Any) -> None:
         # Performs init logic for orchestration runtime wrapper.
         self._coordinator = coordinator
         self.observation_source = observation_source

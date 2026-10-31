@@ -228,7 +228,7 @@ async def run_system_with_config(config: runtime_app.RuntimeConfig) -> None:
         startup_runner=initialize_runtime_services,
     )
 
-    coordinator = runtime_app.AgentCoordinator(
+    coordinator = runtime_app.RuntimeLoopCoordinator(
         tracking_agent=services.tracking_agent,
         observation_agent=services.observation_agent,
         reasoning_agent=services.reasoning_agent,
@@ -245,8 +245,23 @@ async def run_system_with_config(config: runtime_app.RuntimeConfig) -> None:
         await services.start()
         await operator.run()
     finally:
-        await operator.stop()
-        await services.stop()
+        operator_stop_error: Exception | None = None
+        services_stop_error: Exception | None = None
+
+        try:
+            await operator.stop()
+        except Exception as error:  # pragma: no cover - exercised via lifecycle tests
+            operator_stop_error = error
+
+        try:
+            await services.stop()
+        except Exception as error:  # pragma: no cover - exercised via lifecycle tests
+            services_stop_error = error
+
+        if operator_stop_error is not None:
+            raise operator_stop_error
+        if services_stop_error is not None:
+            raise services_stop_error
 
 
 async def main(args: list[str] | None = None) -> None:

@@ -52,7 +52,7 @@ Separately, one MCP tool (`live_tracking`) starts a **third process** for the da
      - `RuntimeServices.connect()`
      - `ClientSession.initialize()`
 3. Builds wrapper objects:
-   - `runtime_app.AgentCoordinator(...)`
+   - `runtime_app.RuntimeLoopCoordinator(...)`
    - `runtime_app.OrchestrationAgent(...)`
 4. Starts services:
    - `services.start()` -> `initialize_runtime_services(session, config)`
@@ -272,7 +272,7 @@ Used by:
 
 ### Orchestration agent (runtime wrapper)
 
-In `agents/orchestration/runtime/app.py`, `OrchestrationAgent` and `AgentCoordinator` are runtime wrappers that:
+In `agents/orchestration/runtime/app.py`, `OrchestrationAgent` and `RuntimeLoopCoordinator` are runtime wrappers that:
 
 - own the MCP session lifecycle,
 - run startup checks,
