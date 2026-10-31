@@ -37,6 +37,7 @@ Separately, one MCP tool (`live_tracking`) starts a **third process** for the da
 ### Entry path
 
 `main.py`
+
 1. `cli_main()`
 2. `asyncio.run(main(args))`
 3. `main(args)` -> `load_config(args)` -> `run_system_with_config(config)`
@@ -136,7 +137,7 @@ Each cycle:
 Launch detail for `live_tracking`:
 
 - `agents/orchestration/process.py::start_dashboard_process()` spawns:
-   - `python -m agents.dashboard.live_tracking_display`
+  - `python -m agents.dashboard.live_tracking_display`
 - Working directory is set to repo root so package imports resolve correctly.
 
 ### Reasoning tools (`agents/reasoning/tools/*`)

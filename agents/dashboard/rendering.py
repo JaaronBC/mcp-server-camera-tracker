@@ -258,41 +258,271 @@ def draw_radar_panel(
     return panel
 
 
+def _read_dashboard_state_snapshot(state: SharedDashboardState) -> dict:
+    with state.lock:
+        return {
+            "running": state.running,
+            "camera_status": state.camera_status,
+            "detector_status": state.detector_status,
+            "calibration_status": state.calibration_status,
+            "mapping_mode": state.mapping_mode,
+            "latest_frame": state.latest_annotated_frame,
+            "tracks": dict(state.active_tracks),
+            "trails": {
+                key: deque(value, maxlen=RADAR_TRAIL_LENGTH)
+                for key, value in state.track_trails.items()
+            },
+            "last_obs_time": state.last_observation_time,
+            "selected_track_id": state.selected_track_id,
+        }
+
+
+def _resolve_assessment_display(
+    now: float,
+    selected_track_id: str | None,
+    latest_event_mtime: float,
+    latest_agent_event_snapshot: dict | None,
+) -> tuple[float, dict | None, str, str, tuple[int, int, int]]:
+    next_event_mtime, next_event_snapshot = _load_latest_agent_event(
+        latest_event_mtime,
+        latest_agent_event_snapshot,
+    )
+    latest_agent_event = _select_assessment_event(
+        next_event_snapshot,
+        selected_track_id,
+    )
+    assessment_summary_line, assessment_limits_line, assessment_color = _format_assessment_summary(
+        now,
+        latest_agent_event,
+    )
+    return (
+        next_event_mtime,
+        next_event_snapshot,
+        assessment_summary_line,
+        assessment_limits_line,
+        assessment_color,
+    )
+
+
+def _build_webcam_panel(
+    panel_width: int,
+    panel_height: int,
+    latest_frame,
+    camera_status: str,
+):
+    if latest_frame is None:
+        return draw_placeholder_webcam_panel(
+            panel_width,
+            panel_height,
+            f"camera_status={camera_status}",
+        )
+
+    webcam_panel = cv2.resize(latest_frame, (panel_width, panel_height))
+    cv2.putText(
+        webcam_panel,
+        "Live Webcam (YOLO + ByteTrack)",
+        (18, 30),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.7,
+        (255, 255, 255),
+        2,
+        cv2.LINE_AA,
+    )
+    return webcam_panel
+
+
+def _build_header_panel(
+    dashboard_width: int,
+    header_height: int,
+    now: float,
+    camera_status: str,
+    detector_status: str,
+    mapping_mode: str,
+    calibration_status: str,
+    tracks: dict[str, RadarTrackSnapshot],
+    last_obs_time: float,
+    assessment_summary_line: str,
+    assessment_limits_line: str,
+    assessment_color: tuple[int, int, int],
+):
+    header = cv2.UMat(header_height, dashboard_width, cv2.CV_8UC3).get()
+    header[:] = (28, 30, 38)
+    cv2.putText(
+        header,
+        "Counter-UAS Visual Radar Dashboard Demo",
+        (20, 34),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.9,
+        (245, 245, 245),
+        2,
+        cv2.LINE_AA,
+    )
+
+    active_track_count = len(tracks)
+    relative_depth_coverage = compute_relative_depth_coverage(list(tracks.values()))
+    relative_depth_coverage_text = build_relative_depth_coverage_text(relative_depth_coverage)
+    last_obs_ago = "n/a" if last_obs_time == 0 else f"{now - last_obs_time:.2f}s ago"
+    status_text = (
+        f"camera={camera_status} | detector={detector_status} | "
+        f"tracks={active_track_count} | last_obs={last_obs_ago} | "
+        f"mode={mapping_mode} | calibration={calibration_status}"
+    )
+    cv2.putText(
+        header,
+        status_text,
+        (20, 70),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.55,
+        (210, 210, 210),
+        1,
+        cv2.LINE_AA,
+    )
+
+    cv2.putText(
+        header,
+        relative_depth_coverage_text,
+        (980, 70),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.4,
+        (170, 220, 255),
+        1,
+        cv2.LINE_AA,
+    )
+
+    cv2.putText(
+        header,
+        assessment_summary_line,
+        (20, 94),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.42,
+        assessment_color,
+        1,
+        cv2.LINE_AA,
+    )
+
+    cv2.putText(
+        header,
+        assessment_limits_line,
+        (20, 116),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.4,
+        (190, 190, 190),
+        1,
+        cv2.LINE_AA,
+    )
+
+    return header
+
+
+def _ensure_selected_track_id(
+    state: SharedDashboardState,
+    tracks: dict[str, RadarTrackSnapshot],
+    selected_track_id: str | None,
+) -> str | None:
+    if not tracks:
+        return selected_track_id
+
+    sorted_ids = sorted(tracks.keys())
+    if selected_track_id not in tracks:
+        selected_track_id = sorted_ids[0]
+    with state.lock:
+        state.selected_track_id = selected_track_id
+    return selected_track_id
+
+
+def _render_selected_track_details(
+    radar_panel,
+    panel_height: int,
+    selected: RadarTrackSnapshot,
+) -> None:
+    detail_lines = [
+        f"Selected: {selected.track_id}",
+        f"timestamp: {selected.timestamp:.3f}",
+        (
+            "pixel: n/a"
+            if selected.pixel_position is None
+            else f"pixel: ({selected.pixel_position.x:.1f}, {selected.pixel_position.y:.1f})"
+        ),
+        f"ground: ({selected.ground_position.x:.2f}, {selected.ground_position.z:.2f})",
+        (
+            "relative_depth: n/a"
+            if selected.relative_depth is None
+            else f"relative_depth: {selected.relative_depth:.3f}"
+        ),
+        f"position_kind: {selected.position_kind}",
+        f"quality_flags: {', '.join(selected.quality_flags) if selected.quality_flags else 'none'}",
+    ]
+    y_cursor = 20
+    for line in detail_lines:
+        cv2.putText(
+            radar_panel,
+            line,
+            (18, panel_height - 130 + y_cursor),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.45,
+            (220, 220, 220),
+            1,
+            cv2.LINE_AA,
+        )
+        y_cursor += 18
+
+
+def _handle_dashboard_keypress(
+    state: SharedDashboardState,
+    key: int,
+    tracks: dict[str, RadarTrackSnapshot],
+) -> bool:
+    if key == ord("q"):
+        with state.lock:
+            state.running = False
+        return False
+
+    if key in {ord("n"), ord("p")} and tracks:
+        sorted_ids = sorted(tracks.keys())
+        current_id = state.selected_track_id if state.selected_track_id in sorted_ids else sorted_ids[0]
+        current_index = sorted_ids.index(current_id)
+        if key == ord("n"):
+            next_id = sorted_ids[(current_index + 1) % len(sorted_ids)]
+        else:
+            next_id = sorted_ids[(current_index - 1) % len(sorted_ids)]
+        with state.lock:
+            state.selected_track_id = next_id
+
+    return True
+
+
 def render_dashboard(state: SharedDashboardState) -> None:
     cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
     latest_event_mtime = 0.0
     latest_agent_event_snapshot: dict | None = None
 
     while True:
-        with state.lock:
-            if not state.running:
-                break
+        snapshot = _read_dashboard_state_snapshot(state)
+        if not snapshot["running"]:
+            break
 
-            camera_status = state.camera_status
-            detector_status = state.detector_status
-            calibration_status = state.calibration_status
-            mapping_mode = state.mapping_mode
-            latest_frame = state.latest_annotated_frame
-            tracks = dict(state.active_tracks)
-            trails = {
-                key: deque(value, maxlen=RADAR_TRAIL_LENGTH)
-                for key, value in state.track_trails.items()
-            }
-            last_obs_time = state.last_observation_time
-            selected_track_id = state.selected_track_id
+        camera_status = snapshot["camera_status"]
+        detector_status = snapshot["detector_status"]
+        calibration_status = snapshot["calibration_status"]
+        mapping_mode = snapshot["mapping_mode"]
+        latest_frame = snapshot["latest_frame"]
+        tracks = snapshot["tracks"]
+        trails = snapshot["trails"]
+        last_obs_time = snapshot["last_obs_time"]
+        selected_track_id = snapshot["selected_track_id"]
 
         now = time.time()
-        latest_event_mtime, latest_agent_event_snapshot = _load_latest_agent_event(
+        (
             latest_event_mtime,
             latest_agent_event_snapshot,
-        )
-        latest_agent_event = _select_assessment_event(
-            latest_agent_event_snapshot,
-            selected_track_id,
-        )
-        assessment_summary_line, assessment_limits_line, assessment_color = _format_assessment_summary(
+            assessment_summary_line,
+            assessment_limits_line,
+            assessment_color,
+        ) = _resolve_assessment_display(
             now,
-            latest_agent_event,
+            selected_track_id,
+            latest_event_mtime,
+            latest_agent_event_snapshot,
         )
 
         dashboard_width = 1380
@@ -301,24 +531,12 @@ def render_dashboard(state: SharedDashboardState) -> None:
         panel_height = dashboard_height - header_height
         panel_width = dashboard_width // 2
 
-        if latest_frame is None:
-            webcam_panel = draw_placeholder_webcam_panel(
-                panel_width,
-                panel_height,
-                f"camera_status={camera_status}",
-            )
-        else:
-            webcam_panel = cv2.resize(latest_frame, (panel_width, panel_height))
-            cv2.putText(
-                webcam_panel,
-                "Live Webcam (YOLO + ByteTrack)",
-                (18, 30),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
-                (255, 255, 255),
-                2,
-                cv2.LINE_AA,
-            )
+        webcam_panel = _build_webcam_panel(
+            panel_width,
+            panel_height,
+            latest_frame,
+            camera_status,
+        )
 
         radar_panel = draw_radar_panel(panel_width, panel_height, tracks, trails, now)
         cv2.putText(
@@ -332,130 +550,39 @@ def render_dashboard(state: SharedDashboardState) -> None:
             cv2.LINE_AA,
         )
 
-        header = cv2.UMat(header_height, dashboard_width, cv2.CV_8UC3).get()
-        header[:] = (28, 30, 38)
-        cv2.putText(
-            header,
-            "Counter-UAS Visual Radar Dashboard Demo",
-            (20, 34),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.9,
-            (245, 245, 245),
-            2,
-            cv2.LINE_AA,
-        )
-
-        active_track_count = len(tracks)
-        relative_depth_coverage = compute_relative_depth_coverage(list(tracks.values()))
-        relative_depth_coverage_text = build_relative_depth_coverage_text(relative_depth_coverage)
-        last_obs_ago = "n/a" if last_obs_time == 0 else f"{now - last_obs_time:.2f}s ago"
-        status_text = (
-            f"camera={camera_status} | detector={detector_status} | "
-            f"tracks={active_track_count} | last_obs={last_obs_ago} | "
-            f"mode={mapping_mode} | calibration={calibration_status}"
-        )
-        cv2.putText(
-            header,
-            status_text,
-            (20, 70),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.55,
-            (210, 210, 210),
-            1,
-            cv2.LINE_AA,
-        )
-
-        cv2.putText(
-            header,
-            relative_depth_coverage_text,
-            (980, 70),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.4,
-            (170, 220, 255),
-            1,
-            cv2.LINE_AA,
-        )
-
-        cv2.putText(
-            header,
+        header = _build_header_panel(
+            dashboard_width,
+            header_height,
+            now,
+            camera_status,
+            detector_status,
+            mapping_mode,
+            calibration_status,
+            tracks,
+            last_obs_time,
             assessment_summary_line,
-            (20, 94),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.42,
-            assessment_color,
-            1,
-            cv2.LINE_AA,
-        )
-
-        cv2.putText(
-            header,
             assessment_limits_line,
-            (20, 116),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.4,
-            (190, 190, 190),
-            1,
-            cv2.LINE_AA,
+            assessment_color,
         )
 
         if tracks:
-            sorted_ids = sorted(tracks.keys())
-            if selected_track_id not in tracks:
-                selected_track_id = sorted_ids[0]
-            with state.lock:
-                state.selected_track_id = selected_track_id
+            selected_track_id = _ensure_selected_track_id(
+                state,
+                tracks,
+                selected_track_id,
+            )
+            if selected_track_id is None:
+                selected_track_id = sorted(tracks.keys())[0]
 
             selected = tracks[selected_track_id]
-            detail_lines = [
-                f"Selected: {selected.track_id}",
-                f"timestamp: {selected.timestamp:.3f}",
-                (
-                    "pixel: n/a"
-                    if selected.pixel_position is None
-                    else f"pixel: ({selected.pixel_position.x:.1f}, {selected.pixel_position.y:.1f})"
-                ),
-                f"ground: ({selected.ground_position.x:.2f}, {selected.ground_position.z:.2f})",
-                (
-                    "relative_depth: n/a"
-                    if selected.relative_depth is None
-                    else f"relative_depth: {selected.relative_depth:.3f}"
-                ),
-                f"position_kind: {selected.position_kind}",
-                f"quality_flags: {', '.join(selected.quality_flags) if selected.quality_flags else 'none'}",
-            ]
-            y_cursor = 20
-            for line in detail_lines:
-                cv2.putText(
-                    radar_panel,
-                    line,
-                    (18, panel_height - 130 + y_cursor),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.45,
-                    (220, 220, 220),
-                    1,
-                    cv2.LINE_AA,
-                )
-                y_cursor += 18
+            _render_selected_track_details(radar_panel, panel_height, selected)
 
         body = cv2.hconcat([webcam_panel, radar_panel])
         dashboard = cv2.vconcat([header, body])
         cv2.imshow(WINDOW_NAME, dashboard)
 
         key = cv2.waitKey(int(1000 / RENDER_HZ)) & 0xFF
-        if key == ord("q"):
-            with state.lock:
-                state.running = False
+        if not _handle_dashboard_keypress(state, key, tracks):
             break
-
-        if key in {ord("n"), ord("p")} and tracks:
-            sorted_ids = sorted(tracks.keys())
-            current_id = state.selected_track_id if state.selected_track_id in sorted_ids else sorted_ids[0]
-            current_index = sorted_ids.index(current_id)
-            if key == ord("n"):
-                next_id = sorted_ids[(current_index + 1) % len(sorted_ids)]
-            else:
-                next_id = sorted_ids[(current_index - 1) % len(sorted_ids)]
-            with state.lock:
-                state.selected_track_id = next_id
 
     cv2.destroyAllWindows()

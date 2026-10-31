@@ -309,13 +309,7 @@ def _extract_evidence_trace(summary: Any) -> dict[str, Any]:
     }
 
 
-@mcp.tool()
-def run_reasoning_cycle_and_log(
-    request_evidence_on_uncertainty: bool = True,
-    max_tracks: int = 10,
-) -> dict[str, Any]:
-    # Runs reasoning cycle and log workflow steps and returns status outcomes.
-    """Run a bounded reasoning cycle for current tracks and append structured events."""
+def _initialize_reasoning_cycle(max_tracks: int) -> dict[str, Any]:
     if max_tracks <= 0:
         raise ValueError("max_tracks must be greater than zero")
 
@@ -323,214 +317,281 @@ def run_reasoning_cycle_and_log(
     if radar_state is None:
         return {
             "available": False,
-            "error": "radar_state_unavailable",
-            "event_log_path": str(AGENT_EVENTS_PATH),
+            "response": {
+                "available": False,
+                "error": "radar_state_unavailable",
+                "event_log_path": str(AGENT_EVENTS_PATH),
+            },
         }
 
     cycle_started_at = time.time()
     cycle_id = f"cycle-{uuid.uuid4().hex}"
     track_ids = _extract_track_ids(radar_state)[:max_tracks]
 
-    events: list[dict[str, Any]] = []
-    success_count = 0
-    error_count = 0
-    event_log_error_count = 0
-    event_log_last_error: str | None = None
+    return {
+        "available": True,
+        "cycle_started_at": cycle_started_at,
+        "cycle_id": cycle_id,
+        "track_ids": track_ids,
+    }
 
-    for index, track_id in enumerate(track_ids, start=1):
-        started = time.perf_counter()
-        result = dashboard_reasoning.simulate_reasoning_assessment(
-            track_id,
-            request_evidence_on_uncertainty=request_evidence_on_uncertainty,
-        )
-        latency_ms = (time.perf_counter() - started) * 1000.0
 
-        available = bool(result.get("available"))
-        status = "ok" if available else "error"
-        if available:
-            success_count += 1
-        else:
-            error_count += 1
+def _evaluate_track_for_cycle(
+    track_id: str,
+    *,
+    request_evidence_on_uncertainty: bool,
+) -> dict[str, Any]:
+    started = time.perf_counter()
+    result = dashboard_reasoning.simulate_reasoning_assessment(
+        track_id,
+        request_evidence_on_uncertainty=request_evidence_on_uncertainty,
+    )
+    latency_ms = (time.perf_counter() - started) * 1000.0
 
-        assessment = result.get("assessment")
-        assessment_label = None
-        assessment_uncertainties: list[str] = []
-        if isinstance(assessment, dict):
-            label = assessment.get("assessment_label")
-            if isinstance(label, str):
-                assessment_label = label
-            assessment_uncertainties = _coerce_str_list(assessment.get("uncertainties"))
+    available = bool(result.get("available"))
+    status = "ok" if available else "error"
 
-        summary_payload = result.get("summary")
-        summary_uncertainties = (
-            _coerce_str_list(summary_payload.get("uncertainties"))
-            if isinstance(summary_payload, dict)
-            else []
-        )
+    assessment = result.get("assessment")
+    assessment_label = None
+    assessment_uncertainties: list[str] = []
+    if isinstance(assessment, dict):
+        label = assessment.get("assessment_label")
+        if isinstance(label, str):
+            assessment_label = label
+        assessment_uncertainties = _coerce_str_list(assessment.get("uncertainties"))
 
-        agents_payload = result.get("agents")
-        observation_agent = agents_payload.get("observation") if isinstance(agents_payload, dict) else None
-        reasoning_agent = agents_payload.get("reasoning") if isinstance(agents_payload, dict) else None
-        observation_error_code = (
-            observation_agent.get("error_code")
+    summary_payload = result.get("summary")
+    summary_uncertainties = (
+        _coerce_str_list(summary_payload.get("uncertainties"))
+        if isinstance(summary_payload, dict)
+        else []
+    )
+
+    agents_payload = result.get("agents")
+    observation_agent = agents_payload.get("observation") if isinstance(agents_payload, dict) else None
+    reasoning_agent = agents_payload.get("reasoning") if isinstance(agents_payload, dict) else None
+    observation_error_code = (
+        observation_agent.get("error_code")
+        if isinstance(observation_agent, dict)
+        else None
+    )
+    reasoning_error_code = (
+        reasoning_agent.get("error_code")
+        if isinstance(reasoning_agent, dict)
+        else None
+    )
+    handoff_validation = result.get("handoff_validation")
+    handoff_validation_status = (
+        handoff_validation.get("status")
+        if isinstance(handoff_validation, dict)
+        else None
+    )
+    handoff_validation_error_code = (
+        handoff_validation.get("error_code")
+        if isinstance(handoff_validation, dict)
+        else None
+    )
+    handoff_validation_error = (
+        handoff_validation.get("error")
+        if isinstance(handoff_validation, dict)
+        else None
+    )
+    handoff_quality = _derive_handoff_quality(
+        handoff_validation_status,
+        handoff_validation_error_code,
+    )
+    cycle_error_code = None
+    raw_cycle_error = result.get("error")
+    if isinstance(raw_cycle_error, str) and raw_cycle_error.strip():
+        cycle_error_code = raw_cycle_error.strip()
+
+    bounded_out = bool(
+        result.get("evidence_request") is None
+        and bool(result.get("summary", {}).get("needs_more_observations", False))
+        and request_evidence_on_uncertainty
+    )
+
+    conflicts = _derive_conflicts(
+        observation_status=observation_agent.get("status") if isinstance(observation_agent, dict) else None,
+        reasoning_status=reasoning_agent.get("status") if isinstance(reasoning_agent, dict) else None,
+        observation_error_code=observation_error_code,
+        reasoning_error_code=reasoning_error_code,
+        handoff_validation_status=handoff_validation_status,
+        handoff_validation_error_code=handoff_validation_error_code,
+    )
+
+    limitations = _derive_limitations(
+        cycle_error_code=cycle_error_code,
+        bounded_out=bounded_out,
+        summary_uncertainties=summary_uncertainties,
+        assessment_uncertainties=assessment_uncertainties,
+        handoff_validation_error_code=handoff_validation_error_code,
+    )
+
+    return {
+        "result": result,
+        "latency_ms": latency_ms,
+        "available": available,
+        "status": status,
+        "assessment_label": assessment_label,
+        "observation_agent": observation_agent,
+        "reasoning_agent": reasoning_agent,
+        "observation_error_code": observation_error_code,
+        "reasoning_error_code": reasoning_error_code,
+        "handoff_validation_status": handoff_validation_status,
+        "handoff_validation_error_code": handoff_validation_error_code,
+        "handoff_validation_error": handoff_validation_error,
+        "handoff_quality": handoff_quality,
+        "bounded_out": bounded_out,
+        "conflicts": conflicts,
+        "limitations": limitations,
+        "cycle_error_code": cycle_error_code,
+    }
+
+
+def _build_reasoning_cycle_event(
+    *,
+    cycle_id: str,
+    cycle_started_at: float,
+    index: int,
+    track_id: str,
+    status: str,
+    latency_ms: float,
+    assessment_label: Any,
+    result: dict[str, Any],
+    bounded_out: bool,
+    conflicts: list[str],
+    limitations: list[str],
+    observation_agent: Any,
+    observation_error_code: Any,
+    reasoning_agent: Any,
+    reasoning_error_code: Any,
+    handoff_validation_status: Any,
+    handoff_validation_error_code: Any,
+    handoff_validation_error: Any,
+    handoff_quality: str,
+    cycle_error_code: Any,
+) -> dict[str, Any]:
+    return {
+        "event_type": "reasoning_cycle",
+        "cycle_id": cycle_id,
+        "task_id": f"{cycle_id}:track-{index}",
+        "parent_task_id": None,
+        "timestamp": cycle_started_at,
+        "track_id": track_id,
+        "status": status,
+        "latency_ms": round(latency_ms, 3),
+        "assessment_label": assessment_label,
+        "evidence_requested": result.get("evidence_request") is not None,
+        "bounded_out": bounded_out,
+        "conflicts": conflicts,
+        "limitations": limitations,
+        "observation_agent_model": (
+            observation_agent.get("model")
             if isinstance(observation_agent, dict)
             else None
-        )
-        reasoning_error_code = (
-            reasoning_agent.get("error_code")
+        ),
+        "observation_agent_status": (
+            observation_agent.get("status")
+            if isinstance(observation_agent, dict)
+            else None
+        ),
+        "observation_agent_latency_ms": (
+            observation_agent.get("latency_ms")
+            if isinstance(observation_agent, dict)
+            else None
+        ),
+        "observation_agent_error_code": (
+            observation_error_code
+        ),
+        "observation_agent_attempts": (
+            observation_agent.get("attempts")
+            if isinstance(observation_agent, dict)
+            else None
+        ),
+        "observation_agent_retry_count": (
+            observation_agent.get("retry_count")
+            if isinstance(observation_agent, dict)
+            else None
+        ),
+        "reasoning_agent_model": (
+            reasoning_agent.get("model")
             if isinstance(reasoning_agent, dict)
             else None
-        )
-        handoff_validation = result.get("handoff_validation")
-        handoff_validation_status = (
-            handoff_validation.get("status")
-            if isinstance(handoff_validation, dict)
+        ),
+        "reasoning_agent_status": (
+            reasoning_agent.get("status")
+            if isinstance(reasoning_agent, dict)
             else None
-        )
-        handoff_validation_error_code = (
-            handoff_validation.get("error_code")
-            if isinstance(handoff_validation, dict)
+        ),
+        "reasoning_agent_latency_ms": (
+            reasoning_agent.get("latency_ms")
+            if isinstance(reasoning_agent, dict)
             else None
-        )
-        handoff_validation_error = (
-            handoff_validation.get("error")
-            if isinstance(handoff_validation, dict)
+        ),
+        "reasoning_agent_error_code": (
+            reasoning_error_code
+        ),
+        "reasoning_agent_attempts": (
+            reasoning_agent.get("attempts")
+            if isinstance(reasoning_agent, dict)
             else None
-        )
-        handoff_quality = _derive_handoff_quality(
-            handoff_validation_status,
-            handoff_validation_error_code,
-        )
-        cycle_error_code = None
-        raw_cycle_error = result.get("error")
-        if isinstance(raw_cycle_error, str) and raw_cycle_error.strip():
-            cycle_error_code = raw_cycle_error.strip()
+        ),
+        "reasoning_agent_retry_count": (
+            reasoning_agent.get("retry_count")
+            if isinstance(reasoning_agent, dict)
+            else None
+        ),
+        "handoff_validation_status": handoff_validation_status,
+        "handoff_validation_error_code": handoff_validation_error_code,
+        "handoff_validation_error": handoff_validation_error,
+        "handoff_quality": handoff_quality,
+        "agent_error_digest": _format_agent_error_digest(
+            observation_error_code,
+            reasoning_error_code,
+        ),
+        "cycle_error_code": cycle_error_code,
+        "evidence_trace": _extract_evidence_trace(result.get("summary")),
+        "error": result.get("error"),
+    }
 
-        bounded_out = bool(
-            result.get("evidence_request") is None
-            and bool(result.get("summary", {}).get("needs_more_observations", False))
-            and request_evidence_on_uncertainty
-        )
 
-        conflicts = _derive_conflicts(
-            observation_status=observation_agent.get("status") if isinstance(observation_agent, dict) else None,
-            reasoning_status=reasoning_agent.get("status") if isinstance(reasoning_agent, dict) else None,
-            observation_error_code=observation_error_code,
-            reasoning_error_code=reasoning_error_code,
-            handoff_validation_status=handoff_validation_status,
-            handoff_validation_error_code=handoff_validation_error_code,
-        )
+def _attach_evidence_followup_links(
+    event: dict[str, Any],
+    evidence_request_payload: Any,
+) -> None:
+    if isinstance(evidence_request_payload, dict):
+        request_index = evidence_request_payload.get("request_index")
+        if isinstance(request_index, int) and request_index > 0:
+            followup_task_id = f"{event['task_id']}:evidence-{request_index}"
+            event["evidence_followup_task_id"] = followup_task_id
+            event["evidence_followup_parent_task_id"] = event["task_id"]
+            if request_index > 1:
+                event["evidence_followup_previous_task_id"] = (
+                    f"{event['task_id']}:evidence-{request_index - 1}"
+                )
 
-        limitations = _derive_limitations(
-            cycle_error_code=cycle_error_code,
-            bounded_out=bounded_out,
-            summary_uncertainties=summary_uncertainties,
-            assessment_uncertainties=assessment_uncertainties,
-            handoff_validation_error_code=handoff_validation_error_code,
-        )
 
-        event = {
-            "event_type": "reasoning_cycle",
-            "cycle_id": cycle_id,
-            "task_id": f"{cycle_id}:track-{index}",
-            "parent_task_id": None,
-            "timestamp": cycle_started_at,
-            "track_id": track_id,
-            "status": status,
-            "latency_ms": round(latency_ms, 3),
-            "assessment_label": assessment_label,
-            "evidence_requested": result.get("evidence_request") is not None,
-            "bounded_out": bounded_out,
-            "conflicts": conflicts,
-            "limitations": limitations,
-            "observation_agent_model": (
-                observation_agent.get("model")
-                if isinstance(observation_agent, dict)
-                else None
-            ),
-            "observation_agent_status": (
-                observation_agent.get("status")
-                if isinstance(observation_agent, dict)
-                else None
-            ),
-            "observation_agent_latency_ms": (
-                observation_agent.get("latency_ms")
-                if isinstance(observation_agent, dict)
-                else None
-            ),
-            "observation_agent_error_code": (
-                observation_error_code
-            ),
-            "observation_agent_attempts": (
-                observation_agent.get("attempts")
-                if isinstance(observation_agent, dict)
-                else None
-            ),
-            "observation_agent_retry_count": (
-                observation_agent.get("retry_count")
-                if isinstance(observation_agent, dict)
-                else None
-            ),
-            "reasoning_agent_model": (
-                reasoning_agent.get("model")
-                if isinstance(reasoning_agent, dict)
-                else None
-            ),
-            "reasoning_agent_status": (
-                reasoning_agent.get("status")
-                if isinstance(reasoning_agent, dict)
-                else None
-            ),
-            "reasoning_agent_latency_ms": (
-                reasoning_agent.get("latency_ms")
-                if isinstance(reasoning_agent, dict)
-                else None
-            ),
-            "reasoning_agent_error_code": (
-                reasoning_error_code
-            ),
-            "reasoning_agent_attempts": (
-                reasoning_agent.get("attempts")
-                if isinstance(reasoning_agent, dict)
-                else None
-            ),
-            "reasoning_agent_retry_count": (
-                reasoning_agent.get("retry_count")
-                if isinstance(reasoning_agent, dict)
-                else None
-            ),
-            "handoff_validation_status": handoff_validation_status,
-            "handoff_validation_error_code": handoff_validation_error_code,
-            "handoff_validation_error": handoff_validation_error,
-            "handoff_quality": handoff_quality,
-            "agent_error_digest": _format_agent_error_digest(
-                observation_error_code,
-                reasoning_error_code,
-            ),
-            "cycle_error_code": cycle_error_code,
-            "evidence_trace": _extract_evidence_trace(result.get("summary")),
-            "error": result.get("error"),
-        }
+def _persist_event_for_cycle(event: dict[str, Any]) -> str | None:
+    try:
+        _append_event(event)
+    except OSError as error:
+        return f"{type(error).__name__}:{error}"
+    return None
 
-        evidence_request_payload = result.get("evidence_request")
-        if isinstance(evidence_request_payload, dict):
-            request_index = evidence_request_payload.get("request_index")
-            if isinstance(request_index, int) and request_index > 0:
-                followup_task_id = f"{event['task_id']}:evidence-{request_index}"
-                event["evidence_followup_task_id"] = followup_task_id
-                event["evidence_followup_parent_task_id"] = event["task_id"]
-                if request_index > 1:
-                    event["evidence_followup_previous_task_id"] = (
-                        f"{event['task_id']}:evidence-{request_index - 1}"
-                    )
 
-        try:
-            _append_event(event)
-        except OSError as error:
-            event_log_error_count += 1
-            event_log_last_error = f"{type(error).__name__}:{error}"
-        events.append(event)
-
+def _build_reasoning_cycle_response(
+    *,
+    cycle_id: str,
+    cycle_started_at: float,
+    track_ids: list[str],
+    success_count: int,
+    error_count: int,
+    request_evidence_on_uncertainty: bool,
+    event_log_error_count: int,
+    event_log_last_error: str | None,
+    events: list[dict[str, Any]],
+) -> dict[str, Any]:
     return {
         "available": True,
         "event_log_path": str(AGENT_EVENTS_PATH),
@@ -547,6 +608,100 @@ def run_reasoning_cycle_and_log(
         },
         "events": events,
     }
+
+
+@mcp.tool()
+def run_reasoning_cycle_and_log(
+    request_evidence_on_uncertainty: bool = True,
+    max_tracks: int = 10,
+) -> dict[str, Any]:
+    # Runs reasoning cycle and log workflow steps and returns status outcomes.
+    """Run a bounded reasoning cycle for current tracks and append structured events."""
+    cycle_context = _initialize_reasoning_cycle(max_tracks)
+    if not bool(cycle_context.get("available")):
+        return cycle_context["response"]
+
+    cycle_started_at = cycle_context["cycle_started_at"]
+    cycle_id = cycle_context["cycle_id"]
+    track_ids = cycle_context["track_ids"]
+
+    events: list[dict[str, Any]] = []
+    success_count = 0
+    error_count = 0
+    event_log_error_count = 0
+    event_log_last_error: str | None = None
+
+    for index, track_id in enumerate(track_ids, start=1):
+        track_evaluation = _evaluate_track_for_cycle(
+            track_id,
+            request_evidence_on_uncertainty=request_evidence_on_uncertainty,
+        )
+        result = track_evaluation["result"]
+        latency_ms = track_evaluation["latency_ms"]
+
+        available = track_evaluation["available"]
+        status = track_evaluation["status"]
+        if available:
+            success_count += 1
+        else:
+            error_count += 1
+
+        assessment_label = track_evaluation["assessment_label"]
+        observation_agent = track_evaluation["observation_agent"]
+        reasoning_agent = track_evaluation["reasoning_agent"]
+        observation_error_code = track_evaluation["observation_error_code"]
+        reasoning_error_code = track_evaluation["reasoning_error_code"]
+        handoff_validation_status = track_evaluation["handoff_validation_status"]
+        handoff_validation_error_code = track_evaluation["handoff_validation_error_code"]
+        handoff_validation_error = track_evaluation["handoff_validation_error"]
+        handoff_quality = track_evaluation["handoff_quality"]
+        bounded_out = track_evaluation["bounded_out"]
+        conflicts = track_evaluation["conflicts"]
+        limitations = track_evaluation["limitations"]
+        cycle_error_code = track_evaluation["cycle_error_code"]
+
+        event = _build_reasoning_cycle_event(
+            cycle_id=cycle_id,
+            cycle_started_at=cycle_started_at,
+            index=index,
+            track_id=track_id,
+            status=status,
+            latency_ms=latency_ms,
+            assessment_label=assessment_label,
+            result=result,
+            bounded_out=bounded_out,
+            conflicts=conflicts,
+            limitations=limitations,
+            observation_agent=observation_agent,
+            observation_error_code=observation_error_code,
+            reasoning_agent=reasoning_agent,
+            reasoning_error_code=reasoning_error_code,
+            handoff_validation_status=handoff_validation_status,
+            handoff_validation_error_code=handoff_validation_error_code,
+            handoff_validation_error=handoff_validation_error,
+            handoff_quality=handoff_quality,
+            cycle_error_code=cycle_error_code,
+        )
+
+        _attach_evidence_followup_links(event, result.get("evidence_request"))
+
+        persistence_error = _persist_event_for_cycle(event)
+        if persistence_error is not None:
+            event_log_error_count += 1
+            event_log_last_error = persistence_error
+        events.append(event)
+
+    return _build_reasoning_cycle_response(
+        cycle_id=cycle_id,
+        cycle_started_at=cycle_started_at,
+        track_ids=track_ids,
+        success_count=success_count,
+        error_count=error_count,
+        request_evidence_on_uncertainty=request_evidence_on_uncertainty,
+        event_log_error_count=event_log_error_count,
+        event_log_last_error=event_log_last_error,
+        events=events,
+    )
 
 
 @mcp.tool()

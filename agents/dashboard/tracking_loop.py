@@ -56,7 +56,114 @@ def build_tracking_message(timestamp: float, detections: list[dict]) -> dict:
     return build_tracking_frame_message(timestamp, detections)
 
 
-def run_live_tracking_loop(state: SharedDashboardState) -> None:
+def _capture_frame_or_mark_error(state: SharedDashboardState, camera) -> tuple[bool, object | None]:
+    ok, frame = camera.read()
+    if not ok:
+        with state.lock:
+            state.camera_status = "frame_error"
+        time.sleep(0.1)
+        return False, None
+
+    with state.lock:
+        state.camera_status = "connected"
+    return True, frame
+
+
+def _run_detection_or_mark_error(state: SharedDashboardState, model: YOLO, frame):
+    try:
+        result = model.track(
+            source=frame,
+            tracker="bytetrack.yaml",
+            classes=[0],
+            persist=True,
+            verbose=False,
+            conf=0.65,
+        )[0]
+    except Exception:
+        with state.lock:
+            state.detector_status = "error"
+        time.sleep(0.15)
+        return None
+
+    with state.lock:
+        state.detector_status = "running"
+    return result
+
+
+def _apply_tracking_agent_runtime_cycle(
+    *,
+    state: SharedDashboardState,
+    tracking_runtime: AsyncVisualTrackingRuntime,
+    now: float,
+    frame,
+    tracks,
+    tracking_candidates,
+    selected_event_reasons,
+) -> object | None:
+    did_submit = submit_tracking_runtime_candidates(
+        runtime=tracking_runtime,
+        now=now,
+        frame=frame,
+        detections=tracking_candidates,
+        event_reasons=selected_event_reasons,
+        encode_frame=encode_frame_as_data_url,
+        request_timeout_seconds=1.0,
+    )
+    if did_submit:
+        with state.lock:
+            state.tracking_agent_submissions += 1
+
+    with state.lock:
+        track_trails_snapshot = dict(state.track_trails)
+    tracking_agent_observation, metric_update = collect_tracking_runtime_observation_update(
+        runtime=tracking_runtime,
+        tracks=tracks,
+        track_trails=track_trails_snapshot,
+        trail_length=RADAR_TRAIL_LENGTH,
+    )
+    if tracking_agent_observation is not None and metric_update is not None:
+        apply_tracking_agent_metric_update_to_state(
+            state=state,
+            metric_update=metric_update,
+        )
+
+    return tracking_agent_observation
+
+
+def _publish_tracking_outputs(
+    *,
+    state: SharedDashboardState,
+    result,
+    now: float,
+    tracks,
+    tracking_agent_observation,
+    trail_length: int,
+    detections_for_file: list[dict],
+    udp_socket,
+) -> None:
+    annotated = result.plot()
+    commit_live_tracking_frame_state(
+        state=state,
+        now=now,
+        annotated_frame=annotated,
+        tracks=tracks,
+        tracking_agent_observation=tracking_agent_observation,
+        trail_length=trail_length,
+    )
+
+    publish_tracking_frame_message(
+        tracking_frame_path=LATEST_TRACKING_FRAME_PATH,
+        timestamp=now,
+        detections=detections_for_file,
+        udp_socket=udp_socket,
+        udp_host=UDP_TRACKING_HOST,
+        udp_port=UDP_TRACKING_PORT,
+    )
+
+
+def _initialize_tracking_runtime(
+    state: SharedDashboardState,
+) -> tuple[YOLO, object, GroundPlaneCalibration | None, socket.socket, AsyncVisualTrackingRuntime] | None:
     model_path = resolve_model_path()
 
     try:
@@ -65,7 +172,7 @@ def run_live_tracking_loop(state: SharedDashboardState) -> None:
         with state.lock:
             state.detector_status = "error"
             state.camera_status = "error"
-        return
+        return None
 
     camera = cv2.VideoCapture(0)
     if not camera.isOpened():
@@ -73,7 +180,7 @@ def run_live_tracking_loop(state: SharedDashboardState) -> None:
         with state.lock:
             state.camera_status = "unavailable"
             state.detector_status = "idle"
-        return
+        return None
 
     with state.lock:
         state.camera_status = "connected"
@@ -90,16 +197,36 @@ def run_live_tracking_loop(state: SharedDashboardState) -> None:
     with state.lock:
         state.calibration_status = calibration_status
 
-    udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    tracking_coordinator = AgentCoordinator()
-    tracking_agent = LLMVisualTrackingAgent()
-    tracking_runtime = AsyncVisualTrackingRuntime(
-        coordinator=tracking_coordinator,
-        agent=tracking_agent,
-        min_invoke_interval_seconds=0.75,
-    )
-    with state.lock:
-        state.tracking_agent_model = tracking_agent.model
+    udp_socket: socket.socket | None = None
+    tracking_runtime: AsyncVisualTrackingRuntime | None = None
+    try:
+        udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        tracking_coordinator = AgentCoordinator()
+        tracking_agent = LLMVisualTrackingAgent()
+        tracking_runtime = AsyncVisualTrackingRuntime(
+            coordinator=tracking_coordinator,
+            agent=tracking_agent,
+            min_invoke_interval_seconds=0.75,
+        )
+        with state.lock:
+            state.tracking_agent_model = tracking_agent.model
+    except Exception:
+        if tracking_runtime is not None:
+            tracking_runtime.shutdown()
+        if udp_socket is not None:
+            udp_socket.close()
+        camera.release()
+        raise
+
+    return model, camera, calibration, udp_socket, tracking_runtime
+
+
+def run_live_tracking_loop(state: SharedDashboardState) -> None:
+    initialized = _initialize_tracking_runtime(state)
+    if initialized is None:
+        return
+
+    model, camera, calibration, udp_socket, tracking_runtime = initialized
 
     try:
         while True:
@@ -107,31 +234,14 @@ def run_live_tracking_loop(state: SharedDashboardState) -> None:
                 if not state.running:
                     break
 
-            ok, frame = camera.read()
+            ok, frame = _capture_frame_or_mark_error(state, camera)
             if not ok:
-                with state.lock:
-                    state.camera_status = "frame_error"
-                time.sleep(0.1)
                 continue
-            with state.lock:
-                state.camera_status = "connected"
+            assert frame is not None
 
-            try:
-                result = model.track(
-                    source=frame,
-                    tracker="bytetrack.yaml",
-                    classes=[0],
-                    persist=True,
-                    verbose=False,
-                    conf=0.65,
-                )[0]
-            except Exception:
-                with state.lock:
-                    state.detector_status = "error"
-                time.sleep(0.15)
+            result = _run_detection_or_mark_error(state, model, frame)
+            if result is None:
                 continue
-            with state.lock:
-                state.detector_status = "running"
 
             now = time.time()
             tracks, detections_for_file, tracking_candidates, selected_event_reasons = build_tracking_frame_outputs(
@@ -145,50 +255,25 @@ def run_live_tracking_loop(state: SharedDashboardState) -> None:
                 max_ground_z=MAX_GROUND_Z,
             )
 
-            did_submit = submit_tracking_runtime_candidates(
-                runtime=tracking_runtime,
+            tracking_agent_observation = _apply_tracking_agent_runtime_cycle(
+                state=state,
+                tracking_runtime=tracking_runtime,
                 now=now,
                 frame=frame,
-                detections=tracking_candidates,
-                event_reasons=selected_event_reasons,
-                encode_frame=encode_frame_as_data_url,
-                request_timeout_seconds=1.0,
-            )
-            if did_submit:
-                with state.lock:
-                    state.tracking_agent_submissions += 1
-
-            with state.lock:
-                track_trails_snapshot = dict(state.track_trails)
-            tracking_agent_observation, metric_update = collect_tracking_runtime_observation_update(
-                runtime=tracking_runtime,
                 tracks=tracks,
-                track_trails=track_trails_snapshot,
-                trail_length=RADAR_TRAIL_LENGTH,
+                tracking_candidates=tracking_candidates,
+                selected_event_reasons=selected_event_reasons,
             )
-            if tracking_agent_observation is not None and metric_update is not None:
-                apply_tracking_agent_metric_update_to_state(
-                    state=state,
-                    metric_update=metric_update,
-                )
 
-            annotated = result.plot()
-            commit_live_tracking_frame_state(
+            _publish_tracking_outputs(
                 state=state,
+                result=result,
                 now=now,
-                annotated_frame=annotated,
                 tracks=tracks,
                 tracking_agent_observation=tracking_agent_observation,
                 trail_length=RADAR_TRAIL_LENGTH,
-            )
-
-            publish_tracking_frame_message(
-                tracking_frame_path=LATEST_TRACKING_FRAME_PATH,
-                timestamp=now,
-                detections=detections_for_file,
+                detections_for_file=detections_for_file,
                 udp_socket=udp_socket,
-                udp_host=UDP_TRACKING_HOST,
-                udp_port=UDP_TRACKING_PORT,
             )
     finally:
         with state.lock:
