@@ -9,6 +9,7 @@ from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DASHBOARD_SCRIPT_PATH = PROJECT_ROOT / "agents" / "dashboard" / "live_tracking_display.py"
+DASHBOARD_MODULE = "agents.dashboard.live_tracking_display"
 
 _dashboard_process: subprocess.Popen[Any] | None = None
 
@@ -33,8 +34,8 @@ def start_dashboard_process() -> tuple[bool, str]:
         raise FileNotFoundError(f"Dashboard script not found: {DASHBOARD_SCRIPT_PATH}")
 
     _dashboard_process = subprocess.Popen(
-        [sys.executable, str(DASHBOARD_SCRIPT_PATH)],
-        cwd=str(DASHBOARD_SCRIPT_PATH.parent),
+        [sys.executable, "-m", DASHBOARD_MODULE],
+        cwd=str(PROJECT_ROOT),
         stdin=subprocess.DEVNULL,
         stdout=sys.stderr,
     )
