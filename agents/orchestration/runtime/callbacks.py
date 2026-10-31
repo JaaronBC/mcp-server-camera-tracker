@@ -220,47 +220,6 @@ def make_print_pipeline_contract_startup_snapshot(
     return _print_pipeline_contract_startup_snapshot
 
 
-def make_run_agent_ops_pipeline(
-    *,
-    run_pipeline_fn: Callable[..., Awaitable[dict[str, Any]]],
-    run_cycle_fn: Callable[..., Awaitable[bool]],
-    run_health_summary_fn: Callable[..., Awaitable[bool]],
-    run_depth_summary_fn: Callable[..., Awaitable[bool]],
-) -> Callable[..., Awaitable[dict[str, Any]]]:
-    async def _run_agent_ops_pipeline(
-        session: ClientSession,
-        *,
-        cycle_number: int,
-        max_tracks: int,
-        agent_ops_summary_enabled: bool,
-        agent_ops_summary_every_cycles: int,
-        agent_ops_summary_window_size: int,
-        handoff_degraded_warn_rate: float,
-        handoff_degraded_critical_rate: float,
-        depth_summary_enabled: bool,
-        depth_coverage_summary_every_cycles: int,
-        depth_coverage_sample_limit: int,
-    ) -> dict[str, Any]:
-        return await run_pipeline_fn(
-            session,
-            cycle_number=cycle_number,
-            max_tracks=max_tracks,
-            agent_ops_summary_enabled=agent_ops_summary_enabled,
-            agent_ops_summary_every_cycles=agent_ops_summary_every_cycles,
-            agent_ops_summary_window_size=agent_ops_summary_window_size,
-            handoff_degraded_warn_rate=handoff_degraded_warn_rate,
-            handoff_degraded_critical_rate=handoff_degraded_critical_rate,
-            depth_summary_enabled=depth_summary_enabled,
-            depth_coverage_summary_every_cycles=depth_coverage_summary_every_cycles,
-            depth_coverage_sample_limit=depth_coverage_sample_limit,
-            run_cycle_fn=run_cycle_fn,
-            run_health_summary_fn=run_health_summary_fn,
-            run_depth_summary_fn=run_depth_summary_fn,
-        )
-
-    return _run_agent_ops_pipeline
-
-
 def make_monitor_movement(
     *,
     monitor_movement_fn: Callable[..., Awaitable[None]],
