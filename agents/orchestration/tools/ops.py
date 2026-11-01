@@ -10,7 +10,7 @@ from typing import Any
 from ...reasoning.tools import _shared as dashboard_reasoning
 from ...registry import mcp
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
 AGENT_EVENTS_PATH = PROJECT_ROOT / "captures" / "agent_events.jsonl"
 AGENT_EVENT_HEALTH_FRESHNESS_SECONDS = 30.0
 MAX_EVIDENCE_STR_LIST_ITEMS = 5

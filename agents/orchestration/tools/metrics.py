@@ -9,7 +9,7 @@ from typing import Any
 from . import ops
 from ...registry import mcp
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
 CAPTURES_DIR = PROJECT_ROOT / "captures"
 RADAR_STATE_PATH = CAPTURES_DIR / "latest_radar_state.json"
 TRACKING_FRAME_PATH = CAPTURES_DIR / "latest_tracking_frame.json"

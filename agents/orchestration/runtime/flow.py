@@ -108,6 +108,7 @@ async def monitor_movement(
     emit: Callable[[str], None],
     verification_manager: VerificationQueueManager | None = None,
     verification_request_source_fn: Callable[[], list[Any]] | None = None,
+    verification_feedback_publish_fn: Callable[[list[dict[str, Any]]], dict[str, int]] | None = None,
 ) -> None:
     address = [tracking_address[0], tracking_address[1]]
 
@@ -209,6 +210,16 @@ async def monitor_movement(
                         )
                     )
                     last_agent_ops_cycle_at = loop.time()
+
+            if verification_manager is not None and verification_feedback_publish_fn is not None:
+                try:
+                    recent_results = verification_manager.get_recent_results(200)
+                    verification_feedback_publish_fn(recent_results)
+                except Exception as error:
+                    emit(
+                        "Verification feedback publication failed "
+                        f"({type(error).__name__}): {error}"
+                    )
 
             elapsed = loop.time() - iteration_started_at
             await asyncio.sleep(max(0, analysis_interval_seconds - elapsed))

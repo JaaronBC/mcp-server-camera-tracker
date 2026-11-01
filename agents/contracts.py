@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
 
 from .tracking.tracking_types import PixelPosition
 
@@ -247,6 +247,22 @@ TrackingAssociationStatus = Literal["accepted", "rejected", "fallback", "unknown
 VisibilityStatus = Literal["visible", "partially_occluded", "occluded", "not_visible", "unknown"]
 VerificationStatus = Literal["supported", "contradicted", "inconclusive"]
 IdentityConsistencyStatus = Literal["consistent", "inconsistent", "unknown"]
+TrackingEstimateGroundCoordinateMode = Literal[
+    "calibrated_metric",
+    "relative_uncalibrated",
+    "none",
+]
+TrackingEstimateCoordinateSystem = Literal[
+    "calibrated_ground_plane",
+    "relative_image_plane",
+    "simulation_fallback",
+]
+TrackingEstimatePlausibilityStatus = Literal[
+    "plausible",
+    "implausible",
+    "not_verifiable",
+]
+TrackingFeedbackApplicability = Literal["current", "historical"]
 
 
 @dataclass(slots=True)
@@ -579,4 +595,287 @@ class VisualVerificationEnvelope:
                 if isinstance(payload.get("visual_content_inspected"), bool)
                 else None
             ),
+        )
+
+
+@dataclass(slots=True)
+class TrackingEstimateProposalEnvelope:
+    schema_version: str
+    estimate_id: str
+    track_id: str
+    source_tracking_message_ids: list[str]
+    source_verification_observation_id: str
+    source_verification_message_id: str
+    coordinate_system: TrackingEstimateCoordinateSystem
+    ground_coordinate_mode: TrackingEstimateGroundCoordinateMode
+    estimated_at: float
+    prediction_horizon_seconds: float
+    predicted_for_timestamp: float
+    expires_at: float
+    uncertainty: list[str]
+    provenance: dict[str, str]
+    estimated_pixel_center: PixelPosition | None = None
+    estimated_ground_position: GroundPoint | None = None
+    estimation_method: str | None = None
+
+    def to_dict(self) -> dict:
+        return {
+            "schema_version": self.schema_version,
+            "estimate_id": self.estimate_id,
+            "track_id": self.track_id,
+            "source_tracking_message_ids": self.source_tracking_message_ids,
+            "source_verification_observation_id": self.source_verification_observation_id,
+            "source_verification_message_id": self.source_verification_message_id,
+            "coordinate_system": self.coordinate_system,
+            "ground_coordinate_mode": self.ground_coordinate_mode,
+            "estimated_at": self.estimated_at,
+            "prediction_horizon_seconds": self.prediction_horizon_seconds,
+            "predicted_for_timestamp": self.predicted_for_timestamp,
+            "expires_at": self.expires_at,
+            "uncertainty": self.uncertainty,
+            "provenance": self.provenance,
+            "estimated_pixel_center": (
+                None
+                if self.estimated_pixel_center is None
+                else {
+                    "x": self.estimated_pixel_center.x,
+                    "y": self.estimated_pixel_center.y,
+                }
+            ),
+            "estimated_ground_position": (
+                None
+                if self.estimated_ground_position is None
+                else {
+                    "x": self.estimated_ground_position.x,
+                    "z": self.estimated_ground_position.z,
+                    "unit": self.estimated_ground_position.unit,
+                }
+            ),
+            "estimation_method": self.estimation_method,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict) -> "TrackingEstimateProposalEnvelope":
+        pixel_center_payload = payload.get("estimated_pixel_center")
+        estimated_pixel_center = None
+        if isinstance(pixel_center_payload, dict):
+            x_value = pixel_center_payload.get("x")
+            y_value = pixel_center_payload.get("y")
+            if isinstance(x_value, (int, float)) and isinstance(y_value, (int, float)):
+                estimated_pixel_center = PixelPosition(x=float(x_value), y=float(y_value))
+
+        ground_payload = payload.get("estimated_ground_position")
+        estimated_ground_position = None
+        if isinstance(ground_payload, dict):
+            x_value = ground_payload.get("x")
+            z_value = ground_payload.get("z")
+            unit_value = ground_payload.get("unit")
+            if isinstance(x_value, (int, float)) and isinstance(z_value, (int, float)) and isinstance(unit_value, str):
+                estimated_ground_position = GroundPoint(
+                    x=float(x_value),
+                    z=float(z_value),
+                    unit=unit_value,
+                )
+
+        return cls(
+            schema_version=str(payload.get("schema_version", "")),
+            estimate_id=str(payload.get("estimate_id", "")),
+            track_id=str(payload.get("track_id", "")),
+            source_tracking_message_ids=[
+                str(item)
+                for item in payload.get("source_tracking_message_ids", [])
+                if isinstance(item, str)
+            ],
+            source_verification_observation_id=str(payload.get("source_verification_observation_id", "")),
+            source_verification_message_id=str(payload.get("source_verification_message_id", "")),
+            coordinate_system=str(payload.get("coordinate_system", "")),
+            ground_coordinate_mode=payload.get("ground_coordinate_mode", "none"),
+            estimated_at=float(payload.get("estimated_at", 0.0)),
+            prediction_horizon_seconds=float(payload.get("prediction_horizon_seconds", 0.0)),
+            predicted_for_timestamp=float(payload.get("predicted_for_timestamp", 0.0)),
+            expires_at=float(payload.get("expires_at", 0.0)),
+            uncertainty=[
+                str(item)
+                for item in payload.get("uncertainty", [])
+                if isinstance(item, str)
+            ],
+            provenance={
+                str(key): str(value)
+                for key, value in payload.get("provenance", {}).items()
+                if isinstance(key, str) and isinstance(value, str)
+            } if isinstance(payload.get("provenance"), dict) else {},
+            estimated_pixel_center=estimated_pixel_center,
+            estimated_ground_position=estimated_ground_position,
+            estimation_method=(
+                payload.get("estimation_method")
+                if isinstance(payload.get("estimation_method"), str)
+                else None
+            ),
+        )
+
+
+@dataclass(slots=True)
+class TrackingEstimateValidationResult:
+    schema_version: str
+    estimate_id: str
+    track_id: str
+    valid: bool
+    errors: list[str]
+    warnings: list[str]
+    plausibility_status: TrackingEstimatePlausibilityStatus
+    freshness_status: str
+    linked_tracking_message_ids: list[str]
+    linked_verification_observation_id: str | None
+    linked_verification_message_id: str | None
+    details: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        return {
+            "schema_version": self.schema_version,
+            "estimate_id": self.estimate_id,
+            "track_id": self.track_id,
+            "valid": self.valid,
+            "errors": self.errors,
+            "warnings": self.warnings,
+            "plausibility_status": self.plausibility_status,
+            "freshness_status": self.freshness_status,
+            "linked_tracking_message_ids": self.linked_tracking_message_ids,
+            "linked_verification_observation_id": self.linked_verification_observation_id,
+            "linked_verification_message_id": self.linked_verification_message_id,
+            "details": self.details,
+        }
+
+
+@dataclass(slots=True)
+class TrackingObservationFeedbackRecord:
+    schema_version: str
+    feedback_id: str
+    verification_request_id: str
+    track_id: str
+    evidence_message_id: str
+    verification_observation_id: str
+    verification_message_id: str
+    verification_timestamp: float
+    source: str
+    current_applicability: TrackingFeedbackApplicability
+    historical_observation: bool
+    stale_for_current_decisions: bool
+    coordinator_valid: bool
+    validation_outcome: str
+    submitted_at: float | None
+    started_at: float | None
+    finished_at: float | None
+    published_at: float
+    expires_at: float
+    provenance: dict[str, str] = field(default_factory=dict)
+    details: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "feedback_id": self.feedback_id,
+            "verification_request_id": self.verification_request_id,
+            "track_id": self.track_id,
+            "evidence_message_id": self.evidence_message_id,
+            "verification_observation_id": self.verification_observation_id,
+            "verification_message_id": self.verification_message_id,
+            "verification_timestamp": self.verification_timestamp,
+            "source": self.source,
+            "current_applicability": self.current_applicability,
+            "historical_observation": self.historical_observation,
+            "stale_for_current_decisions": self.stale_for_current_decisions,
+            "coordinator_valid": self.coordinator_valid,
+            "validation_outcome": self.validation_outcome,
+            "submitted_at": self.submitted_at,
+            "started_at": self.started_at,
+            "finished_at": self.finished_at,
+            "published_at": self.published_at,
+            "expires_at": self.expires_at,
+            "provenance": self.provenance,
+            "details": self.details,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "TrackingObservationFeedbackRecord":
+        provenance_payload = payload.get("provenance")
+        details_payload = payload.get("details")
+        return cls(
+            schema_version=str(payload.get("schema_version", "")),
+            feedback_id=str(payload.get("feedback_id", "")),
+            verification_request_id=str(payload.get("verification_request_id", "")),
+            track_id=str(payload.get("track_id", "")),
+            evidence_message_id=str(payload.get("evidence_message_id", "")),
+            verification_observation_id=str(payload.get("verification_observation_id", "")),
+            verification_message_id=str(payload.get("verification_message_id", "")),
+            verification_timestamp=float(payload.get("verification_timestamp", 0.0)),
+            source=str(payload.get("source", "")),
+            current_applicability=str(payload.get("current_applicability", "historical")),
+            historical_observation=bool(payload.get("historical_observation", False)),
+            stale_for_current_decisions=bool(payload.get("stale_for_current_decisions", False)),
+            coordinator_valid=bool(payload.get("coordinator_valid", False)),
+            validation_outcome=str(payload.get("validation_outcome", "")),
+            submitted_at=(
+                float(payload.get("submitted_at"))
+                if isinstance(payload.get("submitted_at"), (int, float))
+                else None
+            ),
+            started_at=(
+                float(payload.get("started_at"))
+                if isinstance(payload.get("started_at"), (int, float))
+                else None
+            ),
+            finished_at=(
+                float(payload.get("finished_at"))
+                if isinstance(payload.get("finished_at"), (int, float))
+                else None
+            ),
+            published_at=float(payload.get("published_at", 0.0)),
+            expires_at=float(payload.get("expires_at", 0.0)),
+            provenance={
+                str(key): str(value)
+                for key, value in provenance_payload.items()
+                if isinstance(key, str) and isinstance(value, str)
+            }
+            if isinstance(provenance_payload, dict)
+            else {},
+            details={
+                str(key): value
+                for key, value in details_payload.items()
+                if isinstance(key, str)
+            }
+            if isinstance(details_payload, dict)
+            else {},
+        )
+
+
+@dataclass(slots=True)
+class TrackingObservationFeedbackArtifact:
+    schema_version: str
+    generated_at: float
+    records: list[TrackingObservationFeedbackRecord]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "generated_at": self.generated_at,
+            "records": [item.to_dict() for item in self.records],
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "TrackingObservationFeedbackArtifact":
+        records_payload = payload.get("records")
+        records: list[TrackingObservationFeedbackRecord] = []
+        if isinstance(records_payload, list):
+            for item in records_payload:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    records.append(TrackingObservationFeedbackRecord.from_dict(item))
+                except Exception:
+                    continue
+
+        return cls(
+            schema_version=str(payload.get("schema_version", "")),
+            generated_at=float(payload.get("generated_at", 0.0)),
+            records=records,
         )

@@ -467,9 +467,20 @@ class VerificationQueueManager:
             error_code=None,
             error=None,
             details={
+                "verification_observation_id": envelope.observation_id,
+                "verification_referenced_message_id": envelope.referenced_message_id,
+                "verification_timestamp": envelope.timestamp,
                 "verification_status": envelope.verification_status,
                 "identity_consistency": envelope.identity_consistency,
                 "visibility_status": envelope.visibility_status,
+                "possible_id_switch": envelope.possible_id_switch,
+                "confidence": envelope.confidence,
+                "visual_content_inspected": envelope.visual_content_inspected,
+                "source_evidence_refs": list(envelope.source_evidence_refs),
+                "supporting_evidence_refs": list(envelope.supporting_evidence_refs),
+                "contradicting_evidence_refs": list(envelope.contradicting_evidence_refs),
+                "uncertainty": list(envelope.uncertainty),
+                "limitations": list(envelope.limitations),
             },
         )
 

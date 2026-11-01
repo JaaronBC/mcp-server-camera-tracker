@@ -13,6 +13,7 @@ from agents.orchestration.runtime import app as runtime_app
 from agents.orchestration.runtime import config as runtime_config
 from agents.orchestration.runtime import core as runtime_agent
 from agents.orchestration.runtime import flow as runtime_flow
+from agents.orchestration.runtime.verification_feedback import VerificationFeedbackPublisher
 from agents.orchestration.runtime.verification_queue import VerificationQueueManager
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -173,6 +174,7 @@ async def monitor_movement(
         analysis_interval_seconds=ANALYSIS_INTERVAL_SECONDS,
     )
     verification_manager: VerificationQueueManager | None = None
+    verification_feedback_publisher: VerificationFeedbackPublisher | None = None
     if enable_visual_verification_queue:
         verification_manager = VerificationQueueManager(
             evidence_root_dir=PROJECT_ROOT / "captures" / "tracking_evidence",
@@ -180,6 +182,11 @@ async def monitor_movement(
             max_concurrency=VERIFICATION_MAX_CONCURRENCY,
             request_timeout_seconds=VERIFICATION_REQUEST_TIMEOUT_SECONDS,
             result_registry_capacity=VERIFICATION_RESULTS_CAPACITY,
+        )
+        verification_feedback_publisher = VerificationFeedbackPublisher(
+            artifact_path=PROJECT_ROOT / "captures" / "operator_tracking_feedback.json",
+            max_records=256,
+            record_ttl_seconds=45.0,
         )
         await verification_manager.start(session=session)
 
@@ -198,6 +205,11 @@ async def monitor_movement(
             depth_coverage_sample_limit=depth_coverage_sample_limit,
             verification_manager=verification_manager,
             verification_request_source_fn=verification_request_source_fn,
+            verification_feedback_publish_fn=(
+                None
+                if verification_feedback_publisher is None
+                else verification_feedback_publisher.publish_from_results
+            ),
         )
     finally:
         if verification_manager is not None:

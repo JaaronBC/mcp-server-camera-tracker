@@ -7,6 +7,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CAPTURES_DIR = PROJECT_ROOT / "captures"
 LATEST_TRACKING_FRAME_PATH = CAPTURES_DIR / "latest_tracking_frame.json"
 LATEST_RADAR_STATE_PATH = CAPTURES_DIR / "latest_radar_state.json"
+LATEST_TRACKING_ESTIMATE_DIAGNOSTICS_PATH = CAPTURES_DIR / "latest_tracking_estimate_diagnostics.json"
 RADAR_DEPTH_COVERAGE_HISTORY_PATH = CAPTURES_DIR / "radar_depth_coverage_history.jsonl"
 GROUND_CALIBRATION_PATH = CAPTURES_DIR / "ground_plane_calibration.json"
 
@@ -36,5 +37,13 @@ def _env_positive_float(name: str, default: float) -> float:
 
 
 MAX_GROUND_Z = _env_positive_float("DASHBOARD_MAX_GROUND_Z", 20.0)
+TRACKING_MISSING_TRACK_GRACE_SECONDS = _env_positive_float(
+    "TRACKING_MISSING_TRACK_GRACE_SECONDS",
+    1.5,
+)
+TRACKING_MAX_EFFECTIVE_HORIZON_SECONDS = _env_positive_float(
+    "TRACKING_MAX_EFFECTIVE_HORIZON_SECONDS",
+    0.5,
+)
 UDP_TRACKING_HOST = "127.0.0.1"
 UDP_TRACKING_PORT = 5005

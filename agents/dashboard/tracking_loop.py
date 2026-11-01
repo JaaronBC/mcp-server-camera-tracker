@@ -3,6 +3,7 @@ from __future__ import annotations
 import socket
 import time
 from pathlib import Path
+from typing import Any
 
 import cv2
 from ultralytics import YOLO
@@ -16,8 +17,10 @@ from agents.tracking.agent_tracking import (
     encode_frame_as_data_url,
 )
 from agents.tracking.evidence_packaging import TrackingEvidencePackager
+from agents.tracking.estimate_proposals import TrackingEstimateProposalEngine
 from agents.tracking.evidence_store import TrackingEvidenceStore
 from agents.tracking.frame_transformer import build_tracking_frame_outputs
+from agents.tracking.observation_feedback import TrackingObservationFeedbackConsumer
 from agents.tracking.runtime_support import (
     apply_tracking_agent_metric_update_to_state,
     commit_live_tracking_frame_state,
@@ -27,14 +30,18 @@ from agents.tracking.runtime_support import (
 from agents.tracking.state_publisher import (
     build_tracking_frame_message,
     publish_tracking_frame_message,
+    write_json_payload,
 )
 
 from .config import (
     GROUND_CALIBRATION_PATH,
+    LATEST_TRACKING_ESTIMATE_DIAGNOSTICS_PATH,
     LATEST_TRACKING_FRAME_PATH,
     MAX_GROUND_X,
     MAX_GROUND_Z,
+    TRACKING_MAX_EFFECTIVE_HORIZON_SECONDS,
     RADAR_TRAIL_LENGTH,
+    TRACKING_MISSING_TRACK_GRACE_SECONDS,
     UDP_TRACKING_HOST,
     UDP_TRACKING_PORT,
 )
@@ -198,12 +205,226 @@ def _package_tracking_evidence_if_enabled(
 
     for candidate in tracking_candidates:
         update_payload = updates_by_detection.get(candidate.detection_id)
-        evidence_packager.package_detection(
+        packaged = evidence_packager.package_detection(
             detection=candidate,
             timestamp=now,
             frame_evidence=frame_evidence,
             update_payload=update_payload,
         )
+        if bool(packaged.validation.get("valid", False)):
+            with state.lock:
+                state.latest_tracking_evidence_message_by_track[packaged.envelope.track_id] = packaged.envelope.message_id
+
+
+def _consume_tracking_observation_feedback(
+    *,
+    state: SharedDashboardState,
+    now: float,
+    tracks: dict,
+) -> None:
+    with state.lock:
+        consumer = state.tracking_feedback_consumer
+        current_track_ids = set(tracks.keys())
+        bounded_grace_seconds = min(
+            10.0,
+            max(0.1, float(getattr(state, "tracking_missing_track_grace_seconds", 1.5))),
+        )
+        state.tracking_missing_track_grace_seconds = bounded_grace_seconds
+
+        lost_message_by_track = state.latest_tracking_lost_evidence_message_by_track
+        lost_expires_by_track = state.latest_tracking_lost_track_expires_at_by_track
+
+        for track_id in list(lost_expires_by_track.keys()):
+            expires_at = lost_expires_by_track.get(track_id)
+            if track_id in current_track_ids or not isinstance(expires_at, (int, float)) or float(expires_at) <= float(now):
+                lost_expires_by_track.pop(track_id, None)
+                lost_message_by_track.pop(track_id, None)
+
+        active_message_by_track = state.latest_tracking_evidence_message_by_track
+        for track_id in list(active_message_by_track.keys()):
+            if track_id in current_track_ids:
+                lost_expires_by_track.pop(track_id, None)
+                lost_message_by_track.pop(track_id, None)
+                continue
+            message_id = active_message_by_track.pop(track_id, None)
+            if not isinstance(message_id, str) or not message_id:
+                continue
+            lost_message_by_track[track_id] = message_id
+            lost_expires_by_track[track_id] = float(now) + bounded_grace_seconds
+
+        temporarily_lost_track_ids = {
+            track_id
+            for track_id, expires_at in lost_expires_by_track.items()
+            if isinstance(expires_at, (int, float)) and float(expires_at) > float(now)
+        }
+
+        latest_message_id_by_track = dict(active_message_by_track)
+        for track_id in temporarily_lost_track_ids:
+            message_id = lost_message_by_track.get(track_id)
+            if isinstance(message_id, str) and message_id:
+                latest_message_id_by_track[track_id] = message_id
+
+    if consumer is None:
+        return
+
+    try:
+        feedback_summary = consumer.poll(
+            current_track_ids=current_track_ids,
+            temporarily_lost_track_ids=temporarily_lost_track_ids,
+            latest_message_id_by_track=latest_message_id_by_track,
+            now_timestamp=now,
+        )
+    except Exception:
+        feedback_summary = {
+            "accepted": [],
+            "accepted_count": 0,
+            "rejected_count": 0,
+            "error": "feedback_poll_failed",
+        }
+
+    with state.lock:
+        state.latest_tracking_observation_feedback = feedback_summary
+
+
+def _generate_tracking_estimate_proposals(
+    *,
+    state: SharedDashboardState,
+    now: float,
+    tracks: dict,
+) -> None:
+    with state.lock:
+        estimate_engine = state.tracking_estimate_engine
+        feedback_summary = state.latest_tracking_observation_feedback
+        tracks_snapshot = dict(tracks)
+
+    if estimate_engine is None:
+        return
+
+    accepted_feedback = []
+    if isinstance(feedback_summary, dict):
+        accepted_payload = feedback_summary.get("accepted")
+        if isinstance(accepted_payload, list):
+            accepted_feedback = accepted_payload
+
+    try:
+        proposal_summary = estimate_engine.generate(
+            accepted_feedback_records=accepted_feedback,
+            current_tracks=tracks_snapshot,
+            now_timestamp=now,
+        )
+    except Exception:
+        proposal_summary = {
+            "accepted": [],
+            "accepted_count": 0,
+            "rejected": [],
+            "rejected_count": 0,
+            "generated_at": now,
+            "error": "estimate_generation_failed",
+        }
+
+    with state.lock:
+        state.latest_tracking_estimate_proposals = proposal_summary
+
+
+def _build_tracking_estimate_diagnostic_payload(
+    *,
+    proposal_summary: dict[str, Any] | None,
+    now: float,
+    max_current_valid_estimates: int = 32,
+) -> dict[str, Any]:
+    current_valid_estimates: list[dict[str, Any]] = []
+    rejected_or_invalid_count = 0
+    expired_count = 0
+
+    accepted_payload = None
+    if isinstance(proposal_summary, dict):
+        accepted_payload = proposal_summary.get("accepted")
+
+    accepted_items = accepted_payload if isinstance(accepted_payload, list) else []
+    for item in accepted_items:
+        if not isinstance(item, dict):
+            rejected_or_invalid_count += 1
+            continue
+
+        proposal = item.get("proposal")
+        validation = item.get("validation")
+        if not isinstance(proposal, dict) or not isinstance(validation, dict):
+            rejected_or_invalid_count += 1
+            continue
+
+        if not bool(validation.get("valid", False)):
+            rejected_or_invalid_count += 1
+            continue
+
+        expires_at = proposal.get("expires_at")
+        if not isinstance(expires_at, (int, float)) or float(expires_at) <= float(now):
+            expired_count += 1
+            continue
+
+        estimated_pixel_position = proposal.get("estimated_pixel_center")
+        if not isinstance(estimated_pixel_position, dict):
+            estimated_pixel_position = None
+
+        estimated_ground_position = proposal.get("estimated_ground_position")
+        if (
+            proposal.get("coordinate_system") != "calibrated_ground_plane"
+            or not isinstance(estimated_ground_position, dict)
+        ):
+            estimated_ground_position = None
+
+        source_tracking_message_ids = proposal.get("source_tracking_message_ids")
+        if not isinstance(source_tracking_message_ids, list):
+            source_tracking_message_ids = []
+
+        current_valid_estimates.append(
+            {
+                "track_id": proposal.get("track_id"),
+                "estimate_id": proposal.get("estimate_id"),
+                "estimated_pixel_position": estimated_pixel_position,
+                "estimated_ground_position": estimated_ground_position,
+                "estimated_at": proposal.get("estimated_at"),
+                "predicted_for_timestamp": proposal.get("predicted_for_timestamp"),
+                "expires_at": proposal.get("expires_at"),
+                "source_tracking_evidence_ids": source_tracking_message_ids,
+                "source_verification_observation_id": proposal.get("source_verification_observation_id"),
+                "source_verification_message_id": proposal.get("source_verification_message_id"),
+                "coordinator_validation": {
+                    "valid": True,
+                    "freshness_status": validation.get("freshness_status"),
+                    "plausibility_status": validation.get("plausibility_status"),
+                    "errors": validation.get("errors", []),
+                    "warnings": validation.get("warnings", []),
+                },
+                "classification": "predicted_estimate",
+            }
+        )
+
+    bounded_estimates = current_valid_estimates[-max(1, int(max_current_valid_estimates)) :]
+    return {
+        "schema_version": "1.0",
+        "generated_at": float(now),
+        "classification": "predicted_estimate_diagnostics",
+        "current_valid_estimates": bounded_estimates,
+        "current_valid_count": len(bounded_estimates),
+        "expired_count": expired_count,
+        "rejected_or_invalid_count": rejected_or_invalid_count,
+    }
+
+
+def _publish_tracking_estimate_diagnostics(
+    *,
+    state: SharedDashboardState,
+    now: float,
+    diagnostics_path: Path = LATEST_TRACKING_ESTIMATE_DIAGNOSTICS_PATH,
+) -> None:
+    with state.lock:
+        proposal_summary = state.latest_tracking_estimate_proposals
+
+    payload = _build_tracking_estimate_diagnostic_payload(
+        proposal_summary=proposal_summary,
+        now=now,
+    )
+    write_json_payload(diagnostics_path, payload)
 
 
 def _initialize_tracking_runtime(
@@ -266,10 +487,35 @@ def _initialize_tracking_runtime(
             evidence_store=evidence_store,
             max_history_per_track=20,
         )
+        feedback_consumer = TrackingObservationFeedbackConsumer(
+            artifact_path=CAPTURES_DIR / "operator_tracking_feedback.json",
+            max_seen_feedback_ids=1024,
+            max_artifact_bytes=512_000,
+        )
+        estimate_engine = TrackingEstimateProposalEngine(
+            coordinator=tracking_coordinator,
+            evidence_root_dir=CAPTURES_DIR / "tracking_evidence",
+            prediction_horizon_seconds=0.5,
+            proposal_ttl_seconds=1.0,
+            max_feedback_items=32,
+            max_history_points=12,
+            max_verification_age_seconds=5.0,
+            max_evidence_age_seconds=5.0,
+            max_effective_horizon_seconds=min(
+                10.0,
+                max(0.1, TRACKING_MAX_EFFECTIVE_HORIZON_SECONDS),
+            ),
+        )
         with state.lock:
             state.tracking_agent_model = tracking_agent.model
             state.tracking_evidence_store = evidence_store
             state.tracking_evidence_packager = evidence_packager
+            state.tracking_feedback_consumer = feedback_consumer
+            state.tracking_estimate_engine = estimate_engine
+            state.tracking_missing_track_grace_seconds = min(
+                10.0,
+                max(0.1, TRACKING_MISSING_TRACK_GRACE_SECONDS),
+            )
     except Exception:
         if evidence_store is not None:
             evidence_store.shutdown()
@@ -337,6 +583,23 @@ def run_live_tracking_loop(state: SharedDashboardState) -> None:
                 tracking_agent_observation=tracking_agent_observation,
             )
 
+            _consume_tracking_observation_feedback(
+                state=state,
+                now=now,
+                tracks=tracks,
+            )
+
+            _generate_tracking_estimate_proposals(
+                state=state,
+                now=now,
+                tracks=tracks,
+            )
+
+            _publish_tracking_estimate_diagnostics(
+                state=state,
+                now=now,
+            )
+
             _publish_tracking_outputs(
                 state=state,
                 result=result,
@@ -354,8 +617,24 @@ def run_live_tracking_loop(state: SharedDashboardState) -> None:
             evidence_store = state.tracking_evidence_store
             state.tracking_evidence_store = None
             state.tracking_evidence_packager = None
+            state.tracking_feedback_consumer = None
+            state.tracking_estimate_engine = None
+            state.latest_tracking_evidence_message_by_track = {}
+            state.latest_tracking_lost_evidence_message_by_track = {}
+            state.latest_tracking_lost_track_expires_at_by_track = {}
+            state.latest_tracking_estimate_proposals = None
         if evidence_store is not None:
             evidence_store.shutdown()
+        try:
+            write_json_payload(
+                LATEST_TRACKING_ESTIMATE_DIAGNOSTICS_PATH,
+                _build_tracking_estimate_diagnostic_payload(
+                    proposal_summary=None,
+                    now=time.time(),
+                ),
+            )
+        except OSError:
+            pass
         udp_socket.close()
         tracking_runtime.shutdown()
         camera.release()

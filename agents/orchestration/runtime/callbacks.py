@@ -255,6 +255,7 @@ def make_monitor_movement(
         depth_coverage_sample_limit: int = default_depth_coverage_sample_limit,
         verification_manager: Any | None = None,
         verification_request_source_fn: Callable[[], list[Any]] | None = None,
+        verification_feedback_publish_fn: Callable[[list[dict[str, Any]]], dict[str, int]] | None = None,
     ) -> None:
         async def _run_tracking_cycle(session_handle: ClientSession, address: list[Any]) -> None:
             await run_tracking_cycle_fn(
@@ -284,6 +285,7 @@ def make_monitor_movement(
             emit=emit,
             verification_manager=verification_manager,
             verification_request_source_fn=verification_request_source_fn,
+            verification_feedback_publish_fn=verification_feedback_publish_fn,
         )
 
     return _monitor_movement

@@ -13,6 +13,8 @@ from .contracts import (
     ReasoningAssessment,
     TrackingAssociationStatus,
     TrackingEvidenceEnvelope,
+    TrackingEstimateProposalEnvelope,
+    TrackingEstimateValidationResult,
     TrackingClaims,
     TrackingObservationRecord,
     TrackingAgentObservation,
@@ -47,6 +49,21 @@ IDENTITY_CONSISTENCY_VALUES: set[IdentityConsistencyStatus] = {
     "consistent",
     "inconsistent",
     "unknown",
+}
+TRACKING_ESTIMATE_GROUND_MODES = {
+    "calibrated_metric",
+    "relative_uncalibrated",
+    "none",
+}
+TRACKING_ESTIMATE_COORDINATE_SYSTEMS = {
+    "calibrated_ground_plane",
+    "relative_image_plane",
+    "simulation_fallback",
+}
+TRACKING_ESTIMATE_PLAUSIBILITY_VALUES = {
+    "plausible",
+    "implausible",
+    "not_verifiable",
 }
 
 
@@ -538,3 +555,293 @@ class AgentCoordinator:
                 "note": "Coordinator validates references and linkage only; it does not verify image-content inspection.",
             },
         }
+
+    def validate_tracking_estimate_proposal(
+        self,
+        proposal: TrackingEstimateProposalEnvelope,
+        *,
+        evidence_by_message_id: dict[str, TrackingEvidenceEnvelope],
+        verification_by_observation_id: dict[str, VisualVerificationEnvelope],
+        supported_schema_versions: set[str] | None = None,
+        now_timestamp: float | None = None,
+        max_prediction_horizon_seconds: float = 3.0,
+        max_verification_age_seconds: float = 5.0,
+        max_estimate_age_seconds: float | None = None,
+        max_plausible_speed_units_per_second: float = 25.0,
+        temporal_tolerance_seconds: float = 1e-3,
+    ) -> TrackingEstimateValidationResult:
+        allowed_versions = (
+            SUPPORTED_ENVELOPE_SCHEMA_VERSIONS
+            if supported_schema_versions is None
+            else supported_schema_versions
+        )
+
+        errors: list[str] = []
+        warnings: list[str] = []
+        details: dict[str, Any] = {}
+
+        linked_tracking_message_ids: list[str] = []
+        linked_verification_observation_id: str | None = None
+        linked_verification_message_id: str | None = None
+        freshness_status = "unknown"
+        plausibility_status = "not_verifiable"
+
+        if proposal.schema_version not in allowed_versions:
+            errors.append("unsupported_schema_version")
+
+        if not self._is_nonempty_str(proposal.estimate_id):
+            errors.append("invalid_estimate_id")
+        if not self._is_nonempty_str(proposal.track_id):
+            errors.append("invalid_track_id")
+
+        if not proposal.uncertainty:
+            errors.append("missing_uncertainty")
+
+        if proposal.ground_coordinate_mode not in TRACKING_ESTIMATE_GROUND_MODES:
+            errors.append("invalid_ground_coordinate_mode")
+
+        if proposal.coordinate_system not in TRACKING_ESTIMATE_COORDINATE_SYSTEMS:
+            errors.append("unsupported_coordinate_system")
+
+        has_pixel_estimate = proposal.estimated_pixel_center is not None
+        has_ground_estimate = proposal.estimated_ground_position is not None
+        if not has_pixel_estimate and not has_ground_estimate:
+            errors.append("missing_estimated_position")
+
+        if proposal.ground_coordinate_mode == "none" and has_ground_estimate:
+            errors.append("ground_estimate_present_when_mode_none")
+        if proposal.ground_coordinate_mode != "none" and not has_ground_estimate:
+            errors.append("missing_ground_estimate_for_mode")
+
+        if has_ground_estimate:
+            assert proposal.estimated_ground_position is not None
+            if proposal.ground_coordinate_mode == "calibrated_metric":
+                if proposal.coordinate_system != "calibrated_ground_plane":
+                    errors.append("metric_position_without_calibrated_coordinate_system")
+                if proposal.estimated_ground_position.unit == "relative_units":
+                    errors.append("metric_position_uses_relative_units")
+            if proposal.ground_coordinate_mode == "relative_uncalibrated":
+                if proposal.estimated_ground_position.unit != "relative_units":
+                    errors.append("relative_uncalibrated_position_requires_relative_units")
+
+        temporal_fields_valid = True
+        if not self._is_number(proposal.estimated_at):
+            errors.append("invalid_estimated_at")
+            temporal_fields_valid = False
+        if not self._is_number(proposal.prediction_horizon_seconds):
+            errors.append("invalid_prediction_horizon_seconds")
+            temporal_fields_valid = False
+        if not self._is_number(proposal.predicted_for_timestamp):
+            errors.append("invalid_predicted_for_timestamp")
+            temporal_fields_valid = False
+        if not self._is_number(proposal.expires_at):
+            errors.append("invalid_expires_at")
+            temporal_fields_valid = False
+
+        if temporal_fields_valid:
+            expected_predicted_for = float(proposal.estimated_at) + float(proposal.prediction_horizon_seconds)
+            if float(proposal.prediction_horizon_seconds) <= 0:
+                errors.append("non_positive_prediction_horizon")
+            if float(proposal.prediction_horizon_seconds) > max_prediction_horizon_seconds:
+                errors.append("prediction_horizon_exceeds_limit")
+
+            if abs(float(proposal.predicted_for_timestamp) - expected_predicted_for) > temporal_tolerance_seconds:
+                errors.append("predicted_for_timestamp_mismatch")
+
+            if float(proposal.predicted_for_timestamp) < float(proposal.estimated_at):
+                errors.append("predicted_time_before_estimated_at")
+
+            if float(proposal.expires_at) < float(proposal.predicted_for_timestamp):
+                errors.append("expires_before_prediction_target")
+
+        if now_timestamp is not None:
+            if not self._is_number(now_timestamp):
+                errors.append("invalid_now_timestamp")
+                freshness_status = "unknown"
+            else:
+                if temporal_fields_valid and max_estimate_age_seconds is not None:
+                    if max_estimate_age_seconds < 0:
+                        errors.append("invalid_max_estimate_age_seconds")
+                    else:
+                        estimate_age_seconds = float(now_timestamp) - float(proposal.estimated_at)
+                        details["estimate_age_seconds"] = estimate_age_seconds
+                        if estimate_age_seconds > max_estimate_age_seconds:
+                            errors.append("stale_estimate_proposal")
+                            freshness_status = "stale"
+                        else:
+                            freshness_status = "fresh"
+
+                if temporal_fields_valid and float(now_timestamp) > float(proposal.expires_at):
+                    errors.append("estimate_expired")
+                    freshness_status = "stale"
+
+                if freshness_status == "unknown" and temporal_fields_valid:
+                    freshness_status = "fresh" if float(now_timestamp) <= float(proposal.expires_at) else "stale"
+
+        linked_evidence: list[TrackingEvidenceEnvelope] = []
+        source_ids = list(proposal.source_tracking_message_ids)
+        if not source_ids:
+            errors.append("missing_source_tracking_message_ids")
+        else:
+            for message_id in source_ids:
+                if not self._is_nonempty_str(message_id):
+                    errors.append("invalid_source_tracking_message_id")
+                    continue
+
+                evidence = evidence_by_message_id.get(message_id)
+                if evidence is None:
+                    errors.append("missing_referenced_tracking_evidence")
+                    continue
+
+                linked_tracking_message_ids.append(message_id)
+                linked_evidence.append(evidence)
+
+                if evidence.track_id != proposal.track_id:
+                    errors.append("tracking_evidence_track_mismatch")
+
+                if temporal_fields_valid and self._is_number(evidence.timestamp):
+                    if float(evidence.timestamp) > float(proposal.estimated_at):
+                        errors.append("evidence_timestamp_after_estimated_at")
+                    if float(evidence.timestamp) > float(proposal.predicted_for_timestamp):
+                        errors.append("evidence_timestamp_after_prediction_target")
+
+        if not self._is_nonempty_str(proposal.source_verification_observation_id):
+            errors.append("invalid_source_verification_observation_id")
+        if not self._is_nonempty_str(proposal.source_verification_message_id):
+            errors.append("invalid_source_verification_message_id")
+
+        verification = verification_by_observation_id.get(proposal.source_verification_observation_id)
+        if verification is None:
+            errors.append("missing_referenced_visual_verification")
+        else:
+            linked_verification_observation_id = verification.observation_id
+            linked_verification_message_id = verification.referenced_message_id
+
+            if verification.referenced_track_id != proposal.track_id:
+                errors.append("verification_track_mismatch")
+
+            if verification.referenced_message_id != proposal.source_verification_message_id:
+                errors.append("verification_message_mismatch")
+
+            if source_ids and verification.referenced_message_id not in source_ids:
+                errors.append("verification_not_linked_to_tracking_evidence")
+
+            if temporal_fields_valid and self._is_number(verification.timestamp):
+                if float(verification.timestamp) > float(proposal.estimated_at):
+                    errors.append("verification_timestamp_after_estimated_at")
+                if float(verification.timestamp) > float(proposal.predicted_for_timestamp):
+                    errors.append("verification_timestamp_after_prediction_target")
+
+            if now_timestamp is not None and self._is_number(now_timestamp) and self._is_number(verification.timestamp):
+                verification_age_seconds = float(now_timestamp) - float(verification.timestamp)
+                details["verification_age_seconds"] = verification_age_seconds
+                if max_verification_age_seconds < 0:
+                    errors.append("invalid_max_verification_age_seconds")
+                elif verification_age_seconds > max_verification_age_seconds:
+                    errors.append("stale_verification")
+                    freshness_status = "stale"
+
+            verification_trust_result = self.validate_visual_verification_envelope(
+                verification,
+                evidence_by_message_id=evidence_by_message_id,
+                now_timestamp=now_timestamp,
+                max_verification_age_seconds=max_verification_age_seconds,
+                newer_message_policy="reject",
+            )
+            if not bool(verification_trust_result.get("valid", False)):
+                errors.append("untrusted_verification_record")
+                trust_errors = verification_trust_result.get("errors")
+                if isinstance(trust_errors, list):
+                    details["verification_trust_errors"] = [
+                        str(item)
+                        for item in trust_errors
+                        if isinstance(item, str)
+                    ]
+
+        plausibility_details: dict[str, Any] = {}
+        if has_ground_estimate and proposal.ground_coordinate_mode == "calibrated_metric":
+            assert proposal.estimated_ground_position is not None
+            prior_points: list[tuple[float, float, float, str]] = []
+            for evidence in linked_evidence:
+                if evidence.ground_position is not None and self._is_number(evidence.timestamp):
+                    prior_points.append(
+                        (
+                            float(evidence.timestamp),
+                            float(evidence.ground_position.x),
+                            float(evidence.ground_position.z),
+                            evidence.ground_position.unit,
+                        )
+                    )
+                for history_item in evidence.track_history:
+                    if history_item.ground_point is None:
+                        continue
+                    if not self._is_number(history_item.timestamp):
+                        continue
+                    prior_points.append(
+                        (
+                            float(history_item.timestamp),
+                            float(history_item.ground_point.x),
+                            float(history_item.ground_point.z),
+                            history_item.ground_point.unit,
+                        )
+                    )
+
+            aligned_points = [
+                item
+                for item in prior_points
+                if item[3] == proposal.estimated_ground_position.unit
+                and (not temporal_fields_valid or item[0] <= float(proposal.predicted_for_timestamp))
+            ]
+
+            if not aligned_points:
+                plausibility_status = "not_verifiable"
+                warnings.append("plausibility_not_verifiable_insufficient_measurements")
+            else:
+                aligned_points.sort(key=lambda item: item[0])
+                latest = aligned_points[-1]
+                reference_timestamp = latest[0]
+                if temporal_fields_valid:
+                    delta_t = float(proposal.predicted_for_timestamp) - reference_timestamp
+                else:
+                    delta_t = float(proposal.prediction_horizon_seconds)
+
+                plausibility_details["reference_timestamp"] = reference_timestamp
+                plausibility_details["delta_t_seconds"] = delta_t
+
+                if delta_t <= 0:
+                    plausibility_status = "not_verifiable"
+                    warnings.append("plausibility_not_verifiable_non_positive_time_delta")
+                else:
+                    delta_x = float(proposal.estimated_ground_position.x) - latest[1]
+                    delta_z = float(proposal.estimated_ground_position.z) - latest[2]
+                    distance = math.hypot(delta_x, delta_z)
+                    required_speed = distance / delta_t
+                    plausibility_details["required_speed_units_per_second"] = required_speed
+                    if required_speed > max_plausible_speed_units_per_second:
+                        plausibility_status = "implausible"
+                        errors.append("implausible_motion_estimate")
+                    else:
+                        plausibility_status = "plausible"
+        else:
+            plausibility_status = "not_verifiable"
+            warnings.append("plausibility_not_verifiable_coordinate_basis")
+
+        details["plausibility"] = plausibility_details
+
+        if plausibility_status not in TRACKING_ESTIMATE_PLAUSIBILITY_VALUES:
+            plausibility_status = "not_verifiable"
+
+        return TrackingEstimateValidationResult(
+            schema_version=proposal.schema_version,
+            estimate_id=proposal.estimate_id,
+            track_id=proposal.track_id,
+            valid=len(errors) == 0,
+            errors=errors,
+            warnings=warnings,
+            plausibility_status=plausibility_status,
+            freshness_status=freshness_status,
+            linked_tracking_message_ids=linked_tracking_message_ids,
+            linked_verification_observation_id=linked_verification_observation_id,
+            linked_verification_message_id=linked_verification_message_id,
+            details=details,
+        )

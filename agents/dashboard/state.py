@@ -6,6 +6,8 @@ from collections import deque
 from agents.tracking.tracking_types import RadarTrackSnapshot
 from agents.tracking.evidence_packaging import TrackingEvidencePackager
 from agents.tracking.evidence_store import TrackingEvidenceStore
+from agents.tracking.estimate_proposals import TrackingEstimateProposalEngine
+from agents.tracking.observation_feedback import TrackingObservationFeedbackConsumer
 
 
 class SharedDashboardState:
@@ -39,6 +41,14 @@ class SharedDashboardState:
         self.tracking_agent_last_error: str | None = None
         self.tracking_evidence_store: TrackingEvidenceStore | None = None
         self.tracking_evidence_packager: TrackingEvidencePackager | None = None
+        self.tracking_feedback_consumer: TrackingObservationFeedbackConsumer | None = None
+        self.tracking_estimate_engine: TrackingEstimateProposalEngine | None = None
+        self.latest_tracking_evidence_message_by_track: dict[str, str] = {}
+        self.latest_tracking_lost_evidence_message_by_track: dict[str, str] = {}
+        self.latest_tracking_lost_track_expires_at_by_track: dict[str, float] = {}
+        self.tracking_missing_track_grace_seconds: float = 1.5
+        self.latest_tracking_observation_feedback: dict | None = None
+        self.latest_tracking_estimate_proposals: dict | None = None
 
         self.selected_track_id: str | None = None
         self.show_tracking_debug_details = False

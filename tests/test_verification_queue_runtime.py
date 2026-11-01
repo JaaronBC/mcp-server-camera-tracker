@@ -124,6 +124,16 @@ class TestVerificationQueueRuntime(unittest.IsolatedAsyncioTestCase):
                 results = manager.get_recent_results(1)
                 self.assertEqual(results[0]["status"], "completed")
                 self.assertEqual(results[0]["validation_outcome"], "accepted")
+                self.assertIn("uncertainty", results[0]["details"])
+                self.assertIn("limitations", results[0]["details"])
+                self.assertEqual(results[0]["details"]["uncertainty"], [])
+                self.assertEqual(results[0]["details"]["limitations"], [])
+                self.assertIn("possible_id_switch", results[0]["details"])
+                self.assertIn("confidence", results[0]["details"])
+                self.assertIn("visual_content_inspected", results[0]["details"])
+                self.assertFalse(results[0]["details"]["possible_id_switch"])
+                self.assertEqual(results[0]["details"]["confidence"], 0.8)
+                self.assertTrue(results[0]["details"]["visual_content_inspected"])
             finally:
                 await manager.stop()
 
