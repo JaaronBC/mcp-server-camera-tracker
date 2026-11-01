@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 import unittest
 from unittest.mock import patch
 
@@ -55,6 +56,43 @@ class _FakeAgent:
         self.model = model
 
 
+class _TrackingLock:
+    def __init__(self) -> None:
+        self.held = False
+
+    def __enter__(self):
+        self.held = True
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        self.held = False
+        return False
+
+
+class _GuardedTrailsDict(dict):
+    def __init__(self, lock: _TrackingLock, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._lock = lock
+
+    def __iter__(self):
+        if not self._lock.held:
+            raise RuntimeError("track_trails_iterated_without_lock")
+        return super().__iter__()
+
+
+class _FakeFrame:
+    shape = (720, 1280, 3)
+
+
+class _FakeResult:
+    boxes = object()
+    names = {0: "person"}
+
+
+class _FakeModel:
+    names = {0: "person"}
+
+
 class TestDashboardTrackingLoopInitialization(unittest.TestCase):
     def test_initialize_runtime_closes_socket_and_releases_camera_when_agent_init_fails(self) -> None:
         state = SharedDashboardState()
@@ -104,7 +142,7 @@ class TestDashboardTrackingLoopInitialization(unittest.TestCase):
         fake_camera = _FakeCamera(opened=True)
         fake_socket = _FakeSocket()
         fake_runtime = _FakeTrackingRuntime()
-        initialized = (object(), fake_camera, None, fake_socket, fake_runtime)
+        initialized = (_FakeModel(), fake_camera, None, fake_socket, fake_runtime)
 
         with patch("agents.dashboard.tracking_loop._initialize_tracking_runtime", return_value=initialized):
             tracking_loop.run_live_tracking_loop(state)
@@ -114,6 +152,81 @@ class TestDashboardTrackingLoopInitialization(unittest.TestCase):
         self.assertTrue(fake_camera.release_called)
         self.assertEqual(state.camera_status, "stopped")
         self.assertEqual(state.detector_status, "stopped")
+
+
+class TestDashboardTrackingLoopTrailSnapshot(unittest.TestCase):
+    def test_snapshot_for_transformer_is_taken_while_holding_state_lock(self) -> None:
+        state = SharedDashboardState()
+        state.running = True
+
+        tracking_lock = _TrackingLock()
+        state.lock = tracking_lock
+        state.track_trails = _GuardedTrailsDict(
+            tracking_lock,
+            {
+                "7": deque([(1.0, 2.0)], maxlen=20),
+            },
+        )
+
+        fake_camera = _FakeCamera(opened=True)
+        fake_socket = _FakeSocket()
+        fake_runtime = _FakeTrackingRuntime()
+        initialized = (_FakeModel(), fake_camera, None, fake_socket, fake_runtime)
+
+        def _publish_side_effect(**kwargs):
+            with state.lock:
+                state.running = False
+
+        with (
+            patch("agents.dashboard.tracking_loop._initialize_tracking_runtime", return_value=initialized),
+            patch("agents.dashboard.tracking_loop._capture_frame_or_mark_error", return_value=(True, _FakeFrame())),
+            patch("agents.dashboard.tracking_loop._run_detection_or_mark_error", return_value=_FakeResult()),
+            patch(
+                "agents.dashboard.tracking_loop.build_tracking_frame_outputs",
+                return_value=({}, [], [], []),
+            ),
+            patch("agents.dashboard.tracking_loop._apply_tracking_agent_runtime_cycle", return_value=None),
+            patch("agents.dashboard.tracking_loop._publish_tracking_outputs", side_effect=_publish_side_effect),
+        ):
+            tracking_loop.run_live_tracking_loop(state)
+
+    def test_transformer_receives_snapshot_dict_not_shared_track_trails_dict(self) -> None:
+        state = SharedDashboardState()
+        state.running = True
+        state.track_trails = {
+            "7": deque([(1.0, 2.0)], maxlen=20),
+        }
+
+        fake_camera = _FakeCamera(opened=True)
+        fake_socket = _FakeSocket()
+        fake_runtime = _FakeTrackingRuntime()
+        initialized = (_FakeModel(), fake_camera, None, fake_socket, fake_runtime)
+
+        captured_track_trails = {}
+
+        def _build_outputs_side_effect(**kwargs):
+            captured_track_trails["value"] = kwargs["track_trails"]
+            return {}, [], [], []
+
+        def _publish_side_effect(**kwargs):
+            with state.lock:
+                state.running = False
+
+        with (
+            patch("agents.dashboard.tracking_loop._initialize_tracking_runtime", return_value=initialized),
+            patch("agents.dashboard.tracking_loop._capture_frame_or_mark_error", return_value=(True, _FakeFrame())),
+            patch("agents.dashboard.tracking_loop._run_detection_or_mark_error", return_value=_FakeResult()),
+            patch("agents.dashboard.tracking_loop.build_tracking_frame_outputs", side_effect=_build_outputs_side_effect),
+            patch("agents.dashboard.tracking_loop._apply_tracking_agent_runtime_cycle", return_value=None),
+            patch("agents.dashboard.tracking_loop._publish_tracking_outputs", side_effect=_publish_side_effect),
+        ):
+            tracking_loop.run_live_tracking_loop(state)
+
+        self.assertIn("value", captured_track_trails)
+        snapshot = captured_track_trails["value"]
+        self.assertIsNot(snapshot, state.track_trails)
+        self.assertEqual(snapshot.keys(), state.track_trails.keys())
+        self.assertIs(snapshot["7"], state.track_trails["7"])
 
 
 if __name__ == "__main__":

@@ -244,13 +244,15 @@ def run_live_tracking_loop(state: SharedDashboardState) -> None:
                 continue
 
             now = time.time()
+            with state.lock:
+                track_trails_snapshot = dict(state.track_trails)
             tracks, detections_for_file, tracking_candidates, selected_event_reasons = build_tracking_frame_outputs(
                 boxes=result.boxes,
                 model_names=model.names,
                 now=now,
                 frame_shape=frame.shape,
                 calibration=calibration,
-                track_trails=state.track_trails,
+                track_trails=track_trails_snapshot,
                 max_ground_x=MAX_GROUND_X,
                 max_ground_z=MAX_GROUND_Z,
             )
