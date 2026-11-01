@@ -4,6 +4,8 @@ import threading
 from collections import deque
 
 from agents.tracking.tracking_types import RadarTrackSnapshot
+from agents.tracking.evidence_packaging import TrackingEvidencePackager
+from agents.tracking.evidence_store import TrackingEvidenceStore
 
 
 class SharedDashboardState:
@@ -35,6 +37,8 @@ class SharedDashboardState:
         self.tracking_agent_total_updates_unmatched = 0
         self.tracking_agent_last_latency_ms: float | None = None
         self.tracking_agent_last_error: str | None = None
+        self.tracking_evidence_store: TrackingEvidenceStore | None = None
+        self.tracking_evidence_packager: TrackingEvidencePackager | None = None
 
         self.selected_track_id: str | None = None
         self.show_tracking_debug_details = False

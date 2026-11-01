@@ -1,13 +1,23 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import time
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from openai import AsyncOpenAI
 
+from ..contracts import TrackingEvidenceEnvelope, VisualVerificationEnvelope
+from ..coordinator import AgentCoordinator
 from .. import llm_call
+from .evidence_consumption import (
+    ObservationEvidenceConsumptionError,
+    ObservationEvidenceRequest,
+    consume_tracking_evidence_by_message_id,
+)
 
 DEFAULT_OPENAI_BASE_URL = "https://128.171.10.83:9443/v1"
 DEFAULT_OBSERVATION_AGENT_MODEL = "gpt-oss-120b"
@@ -20,10 +30,62 @@ DEFAULT_OBSERVATION_SYSTEM_PROMPT = (
     "Return strict JSON with keys: summary, measured_facts, interpretations, hypotheses, "
     "supporting_observation_ids, conflicting_evidence, uncertainties, needs_more_observations."
 )
+DEFAULT_OBSERVATION_VISUAL_MODEL = "qwen-3.8-27b"
+DEFAULT_OBSERVATION_VISUAL_SYSTEM_PROMPT = (
+    "You are the Observation Visual Verification Agent. Verify whether the provided image evidence supports, "
+    "contradicts, or is inconclusive for the referenced tracking identity claim. "
+    "Never invent evidence and return strict JSON only with keys: "
+    "verification_status, visibility_status, identity_consistency, possible_id_switch, confidence, "
+    "uncertainty, limitations, supporting_evidence_refs, contradicting_evidence_refs, recommended_follow_up, "
+    "visual_content_inspected."
+)
+
+_KNOWN_TEXT_ONLY_MODEL_PREFIXES: tuple[str, ...] = (
+    "gpt-oss",
+    "o1",
+    "o3",
+)
+
+_KNOWN_MULTIMODAL_MODEL_PREFIXES: tuple[str, ...] = (
+    "qwen",
+    "gpt-4o",
+    "gpt-4.1",
+    "gemini",
+    "claude-3",
+)
+
+
+@dataclass(slots=True)
+class ObservationVisualVerificationRequest:
+    message_id: str
+    now_timestamp: float | None = None
+    max_history_records: int = 20
+    observation_id: str | None = None
+
+
+@dataclass(slots=True)
+class ObservationVisualVerificationResult:
+    envelope: VisualVerificationEnvelope
+    validation: dict[str, Any]
+    llm_meta: dict[str, Any]
+    preflight: dict[str, Any]
+    referenced_tracking_evidence: TrackingEvidenceEnvelope
+    measurement_provenance: dict[str, dict[str, Any]]
+
+
+class ObservationVisualVerificationError(RuntimeError):
+    def __init__(self, code: str, message: str, *, details: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+        self.details = {} if details is None else details
 
 
 def _resolve_model(env_name: str = "OBSERVATION_AGENT_MODEL", default_model: str = DEFAULT_OBSERVATION_AGENT_MODEL) -> str:
     return llm_call.resolve_model(env_name, default_model)
+
+
+def _resolve_visual_model() -> str:
+    return llm_call.resolve_model("OBSERVATION_VISUAL_AGENT_MODEL", DEFAULT_OBSERVATION_VISUAL_MODEL)
 
 
 def _resolve_timeout_seconds() -> float:
@@ -63,6 +125,124 @@ def _coerce_bool(value: Any, default: bool = False) -> bool:
 
 def _coerce_str(value: Any, default: str) -> str:
     return llm_call.coerce_str(value, default)
+
+
+def _supports_vision_inputs(model: str) -> bool:
+    normalized = model.strip().lower()
+    if not normalized:
+        return False
+    if any(normalized.startswith(prefix) for prefix in _KNOWN_TEXT_ONLY_MODEL_PREFIXES):
+        return False
+    if any(normalized.startswith(prefix) for prefix in _KNOWN_MULTIMODAL_MODEL_PREFIXES):
+        return True
+    return False
+
+
+def _encode_image_bytes_as_data_url(image_bytes: bytes) -> str:
+    if not isinstance(image_bytes, bytes) or len(image_bytes) == 0:
+        raise ObservationVisualVerificationError(
+            "image_bytes_missing",
+            "Image bytes are required for visual verification",
+        )
+    payload = base64.b64encode(image_bytes).decode("ascii")
+    return f"data:image/jpeg;base64,{payload}"
+
+
+def _coerce_optional_float(value: Any) -> float | None:
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
+def _coerce_status(value: Any, *, allowed: set[str], default: str) -> str:
+    if isinstance(value, str) and value in allowed:
+        return value
+    return default
+
+
+def _require_visual_payload_shape(payload: dict[str, Any]) -> None:
+    required_keys = {
+        "verification_status",
+        "visibility_status",
+        "identity_consistency",
+        "possible_id_switch",
+        "uncertainty",
+        "limitations",
+        "supporting_evidence_refs",
+        "contradicting_evidence_refs",
+        "visual_content_inspected",
+    }
+    missing = sorted(key for key in required_keys if key not in payload)
+    if missing:
+        raise ObservationVisualVerificationError(
+            "malformed_verification_response",
+            "Visual verification response is missing required keys",
+            details={"missing_keys": missing},
+        )
+
+
+def _build_visual_verification_envelope(
+    *,
+    request: ObservationVisualVerificationRequest,
+    llm_payload: dict[str, Any],
+    referenced_evidence: TrackingEvidenceEnvelope,
+    source_evidence_refs: list[str],
+) -> VisualVerificationEnvelope:
+    _require_visual_payload_shape(llm_payload)
+
+    observation_id = request.observation_id
+    if not isinstance(observation_id, str) or not observation_id.strip():
+        observation_id = (
+            f"verify-{referenced_evidence.message_id}-"
+            f"{int(float(referenced_evidence.timestamp) * 1_000_000)}"
+        )
+
+    verification_status = _coerce_status(
+        llm_payload.get("verification_status"),
+        allowed={"supported", "contradicted", "inconclusive"},
+        default="inconclusive",
+    )
+    visibility_status = _coerce_status(
+        llm_payload.get("visibility_status"),
+        allowed={"visible", "partially_occluded", "occluded", "not_visible", "unknown"},
+        default="unknown",
+    )
+    identity_consistency = _coerce_status(
+        llm_payload.get("identity_consistency"),
+        allowed={"consistent", "inconsistent", "unknown"},
+        default="unknown",
+    )
+
+    supporting_refs = _coerce_str_list(llm_payload.get("supporting_evidence_refs"))
+    contradicting_refs = _coerce_str_list(llm_payload.get("contradicting_evidence_refs"))
+
+    return VisualVerificationEnvelope(
+        schema_version=referenced_evidence.schema_version,
+        observation_id=observation_id.strip(),
+        referenced_track_id=referenced_evidence.track_id,
+        referenced_message_id=referenced_evidence.message_id,
+        timestamp=(
+            float(request.now_timestamp)
+            if isinstance(request.now_timestamp, (int, float))
+            else float(referenced_evidence.timestamp)
+        ),
+        source_evidence_refs=list(source_evidence_refs),
+        verification_status=verification_status,
+        visibility_status=visibility_status,
+        identity_consistency=identity_consistency,
+        possible_id_switch=_coerce_bool(llm_payload.get("possible_id_switch"), default=False),
+        uncertainty=_coerce_str_list(llm_payload.get("uncertainty")),
+        limitations=_coerce_str_list(llm_payload.get("limitations")),
+        supporting_evidence_refs=supporting_refs,
+        contradicting_evidence_refs=contradicting_refs,
+        confidence=_coerce_optional_float(llm_payload.get("confidence")),
+        recommended_follow_up=(
+            llm_payload.get("recommended_follow_up")
+            if isinstance(llm_payload.get("recommended_follow_up"), str)
+            else None
+        ),
+        visual_content_inspected=_coerce_bool(llm_payload.get("visual_content_inspected"), default=True),
+    )
 
 
 def normalize_track_coordinate_metadata(snapshot: dict[str, Any]) -> dict[str, Any]:
@@ -371,3 +551,196 @@ def call_observation_agent_with_retry(
         "attempts": attempts,
         "retry_count": max(0, attempts - 1),
     }
+
+
+async def invoke_visual_verification_llm_response(
+    *,
+    model: str,
+    system_prompt: str,
+    user_payload: dict[str, Any],
+    image_data_url: str,
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    client = _create_openai_client()
+    try:
+        response = await asyncio.wait_for(
+            client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": json.dumps(user_payload)},
+                            {"type": "image_url", "image_url": {"url": image_data_url}},
+                        ],
+                    },
+                ],
+            ),
+            timeout=timeout_seconds,
+        )
+        if not response.choices:
+            raise RuntimeError("llm_empty_response")
+        content = response.choices[0].message.content or ""
+        parsed = _extract_json_object(content)
+        if parsed is None:
+            raise RuntimeError("llm_invalid_json_response")
+        return parsed
+    finally:
+        close_method = getattr(client, "close", None)
+        if callable(close_method):
+            close_result = close_method()
+            if asyncio.iscoroutine(close_result):
+                await close_result
+
+
+def verify_tracking_evidence_for_observation(
+    request: ObservationVisualVerificationRequest,
+    *,
+    evidence_root_dir: Path,
+    coordinator: AgentCoordinator | None = None,
+    consume_fn: Callable[..., Any] | None = None,
+    invoke_fn: Callable[..., Awaitable[dict[str, Any]]] | None = None,
+    model: str | None = None,
+    timeout_seconds: float | None = None,
+    retry_limit: int | None = None,
+    retry_backoff_seconds: float | None = None,
+    classify_error_fn: Callable[[Exception], str] | None = None,
+    system_prompt: str | None = None,
+) -> ObservationVisualVerificationResult:
+    selected_coordinator = coordinator or AgentCoordinator()
+    selected_model = model or _resolve_visual_model()
+    if not _supports_vision_inputs(selected_model):
+        raise ObservationVisualVerificationError(
+            "unsupported_vision_model",
+            "Selected observation visual model does not support image inputs",
+            details={"model": selected_model},
+        )
+
+    consume_tracking_evidence = consume_fn or consume_tracking_evidence_by_message_id
+
+    try:
+        evidence_package = consume_tracking_evidence(
+            ObservationEvidenceRequest(
+                message_id=request.message_id,
+                now_timestamp=request.now_timestamp,
+                require_visual_evidence=True,
+                max_history_records=request.max_history_records,
+            ),
+            evidence_root_dir=evidence_root_dir,
+            coordinator=selected_coordinator,
+        )
+    except ObservationEvidenceConsumptionError as error:
+        raise ObservationVisualVerificationError(
+            "evidence_unavailable",
+            "Unable to consume tracking evidence for visual verification",
+            details={"upstream_code": error.code, "upstream_details": error.details},
+        ) from error
+
+    if evidence_package.image_evidence is None:
+        raise ObservationVisualVerificationError(
+            "image_evidence_missing",
+            "Visual verification requires retrievable image evidence",
+            details={"message_id": request.message_id},
+        )
+
+    image_data_url = _encode_image_bytes_as_data_url(evidence_package.image_evidence.image_bytes)
+
+    visual_input = {
+        "message_id": evidence_package.message_id,
+        "track_id": evidence_package.envelope.track_id,
+        "tracking_claims": evidence_package.envelope.tracking_claims.to_dict(),
+        "measurement_provenance": evidence_package.measurement_provenance,
+        "bounded_history": [record.to_dict() for record in evidence_package.bounded_history],
+        "source_evidence_refs": list(evidence_package.source_references),
+    }
+
+    invoke = invoke_fn or invoke_visual_verification_llm_response
+    selected_timeout = _resolve_timeout_seconds() if timeout_seconds is None else float(timeout_seconds)
+    selected_retry_limit = _resolve_retry_limit() if retry_limit is None else int(retry_limit)
+    selected_backoff = _resolve_retry_backoff_seconds() if retry_backoff_seconds is None else float(retry_backoff_seconds)
+    classify_error = classify_error_fn or _classify_llm_error
+    selected_prompt = system_prompt or DEFAULT_OBSERVATION_VISUAL_SYSTEM_PROMPT
+
+    attempts = selected_retry_limit + 1
+    last_error: str | None = None
+    last_error_code: str | None = None
+    llm_payload: dict[str, Any] | None = None
+    started = time.perf_counter()
+    for attempt_index in range(attempts):
+        try:
+            llm_payload = asyncio.run(
+                invoke(
+                    model=selected_model,
+                    system_prompt=selected_prompt,
+                    user_payload=visual_input,
+                    image_data_url=image_data_url,
+                    timeout_seconds=selected_timeout,
+                )
+            )
+            llm_meta = {
+                "status": "ok",
+                "model": selected_model,
+                "latency_ms": round((time.perf_counter() - started) * 1000.0, 3),
+                "error": None,
+                "error_code": None,
+                "attempts": attempt_index + 1,
+                "retry_count": attempt_index,
+            }
+            break
+        except Exception as error:
+            last_error_code = classify_error(error)
+            last_error = f"{type(error).__name__}:{error}"
+            if attempt_index < attempts - 1 and selected_backoff > 0:
+                time.sleep(selected_backoff * (2**attempt_index))
+    else:
+        raise ObservationVisualVerificationError(
+            "provider_failure",
+            "Visual verification provider invocation failed",
+            details={
+                "error": last_error or "unknown_error",
+                "error_code": last_error_code or "runtime_error",
+                "model": selected_model,
+                "attempts": attempts,
+            },
+        )
+
+    if not isinstance(llm_payload, dict):
+        raise ObservationVisualVerificationError(
+            "malformed_verification_response",
+            "Visual verification response was not a JSON object",
+            details={"model": selected_model},
+        )
+
+    envelope = _build_visual_verification_envelope(
+        request=request,
+        llm_payload=llm_payload,
+        referenced_evidence=evidence_package.envelope,
+        source_evidence_refs=list(evidence_package.source_references),
+    )
+
+    validation = selected_coordinator.validate_visual_verification_envelope(
+        envelope,
+        evidence_by_message_id={
+            evidence_package.envelope.message_id: evidence_package.envelope,
+        },
+    )
+    if not bool(validation.get("valid", False)):
+        raise ObservationVisualVerificationError(
+            "coordinator_validation_rejected",
+            "Visual verification envelope rejected by coordinator validation",
+            details={
+                "validation": validation,
+                "observation_id": envelope.observation_id,
+                "referenced_message_id": envelope.referenced_message_id,
+            },
+        )
+
+    return ObservationVisualVerificationResult(
+        envelope=envelope,
+        validation=validation,
+        llm_meta=llm_meta,
+        preflight=evidence_package.preflight,
+        referenced_tracking_evidence=evidence_package.envelope,
+        measurement_provenance=evidence_package.measurement_provenance,
+    )

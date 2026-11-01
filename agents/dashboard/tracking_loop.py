@@ -7,6 +7,7 @@ from pathlib import Path
 import cv2
 from ultralytics import YOLO
 
+from agents.dashboard.config import CAPTURES_DIR
 from agents.tracking.calibration import GroundPlaneCalibration, load_ground_plane_calibration
 from agents.coordinator import AgentCoordinator
 from agents.tracking.agent_tracking import (
@@ -14,6 +15,8 @@ from agents.tracking.agent_tracking import (
     LLMVisualTrackingAgent,
     encode_frame_as_data_url,
 )
+from agents.tracking.evidence_packaging import TrackingEvidencePackager
+from agents.tracking.evidence_store import TrackingEvidenceStore
 from agents.tracking.frame_transformer import build_tracking_frame_outputs
 from agents.tracking.runtime_support import (
     apply_tracking_agent_metric_update_to_state,
@@ -161,6 +164,48 @@ def _publish_tracking_outputs(
     )
 
 
+def _package_tracking_evidence_if_enabled(
+    *,
+    state: SharedDashboardState,
+    frame,
+    now: float,
+    tracking_candidates,
+    tracking_agent_observation,
+) -> None:
+    evidence_store = state.tracking_evidence_store
+    evidence_packager = state.tracking_evidence_packager
+    if evidence_store is None or evidence_packager is None:
+        return
+
+    frame_height, frame_width = frame.shape[:2]
+    frame_evidence = evidence_store.register_frame(
+        frame=frame,
+        timestamp=now,
+        width=frame_width,
+        height=frame_height,
+    )
+
+    updates_by_detection: dict[str, dict] = {}
+    if tracking_agent_observation is not None:
+        updates = tracking_agent_observation.to_dict().get("updates")
+        if isinstance(updates, list):
+            for item in updates:
+                if not isinstance(item, dict):
+                    continue
+                detection_id = item.get("detection_id")
+                if isinstance(detection_id, str):
+                    updates_by_detection[detection_id] = item
+
+    for candidate in tracking_candidates:
+        update_payload = updates_by_detection.get(candidate.detection_id)
+        evidence_packager.package_detection(
+            detection=candidate,
+            timestamp=now,
+            frame_evidence=frame_evidence,
+            update_payload=update_payload,
+        )
+
+
 def _initialize_tracking_runtime(
     state: SharedDashboardState,
 ) -> tuple[YOLO, object, GroundPlaneCalibration | None, socket.socket, AsyncVisualTrackingRuntime] | None:
@@ -199,6 +244,7 @@ def _initialize_tracking_runtime(
 
     udp_socket: socket.socket | None = None
     tracking_runtime: AsyncVisualTrackingRuntime | None = None
+    evidence_store: TrackingEvidenceStore | None = None
     try:
         udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         tracking_coordinator = AgentCoordinator()
@@ -208,9 +254,25 @@ def _initialize_tracking_runtime(
             agent=tracking_agent,
             min_invoke_interval_seconds=0.75,
         )
+        evidence_store = TrackingEvidenceStore(
+            root_dir=CAPTURES_DIR / "tracking_evidence",
+            max_age_seconds=60.0,
+            max_frame_records=240,
+            max_detection_records=6000,
+            max_envelope_records=12000,
+        )
+        evidence_packager = TrackingEvidencePackager(
+            coordinator=tracking_coordinator,
+            evidence_store=evidence_store,
+            max_history_per_track=20,
+        )
         with state.lock:
             state.tracking_agent_model = tracking_agent.model
+            state.tracking_evidence_store = evidence_store
+            state.tracking_evidence_packager = evidence_packager
     except Exception:
+        if evidence_store is not None:
+            evidence_store.shutdown()
         if tracking_runtime is not None:
             tracking_runtime.shutdown()
         if udp_socket is not None:
@@ -267,6 +329,14 @@ def run_live_tracking_loop(state: SharedDashboardState) -> None:
                 selected_event_reasons=selected_event_reasons,
             )
 
+            _package_tracking_evidence_if_enabled(
+                state=state,
+                frame=frame,
+                now=now,
+                tracking_candidates=tracking_candidates,
+                tracking_agent_observation=tracking_agent_observation,
+            )
+
             _publish_tracking_outputs(
                 state=state,
                 result=result,
@@ -281,6 +351,11 @@ def run_live_tracking_loop(state: SharedDashboardState) -> None:
         with state.lock:
             state.camera_status = "stopped"
             state.detector_status = "stopped"
+            evidence_store = state.tracking_evidence_store
+            state.tracking_evidence_store = None
+            state.tracking_evidence_packager = None
+        if evidence_store is not None:
+            evidence_store.shutdown()
         udp_socket.close()
         tracking_runtime.shutdown()
         camera.release()
