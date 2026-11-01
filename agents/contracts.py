@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Literal
+
+from .tracking.tracking_types import PixelPosition
 
 
 @dataclass(slots=True)
@@ -238,3 +241,342 @@ class TrackingAgentObservation:
             "updates": [update.to_dict() for update in self.updates],
             "uncertainties": self.uncertainties,
         }
+
+
+TrackingAssociationStatus = Literal["accepted", "rejected", "fallback", "unknown"]
+VisibilityStatus = Literal["visible", "partially_occluded", "occluded", "not_visible", "unknown"]
+VerificationStatus = Literal["supported", "contradicted", "inconclusive"]
+IdentityConsistencyStatus = Literal["consistent", "inconsistent", "unknown"]
+
+
+@dataclass(slots=True)
+class TrackingClaims:
+    claimed_resolved_track_id: str | None
+    association_status: TrackingAssociationStatus
+    possible_id_switch: bool
+    visibility_status: VisibilityStatus
+    claim_reasons: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            "claimed_resolved_track_id": self.claimed_resolved_track_id,
+            "association_status": self.association_status,
+            "possible_id_switch": self.possible_id_switch,
+            "visibility_status": self.visibility_status,
+            "claim_reasons": self.claim_reasons,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict) -> "TrackingClaims":
+        return cls(
+            claimed_resolved_track_id=(
+                payload.get("claimed_resolved_track_id")
+                if isinstance(payload.get("claimed_resolved_track_id"), str)
+                else None
+            ),
+            association_status=payload.get("association_status", "unknown"),
+            possible_id_switch=bool(payload.get("possible_id_switch", False)),
+            visibility_status=payload.get("visibility_status", "unknown"),
+            claim_reasons=[
+                str(item)
+                for item in payload.get("claim_reasons", [])
+                if isinstance(item, str)
+            ],
+        )
+
+
+@dataclass(slots=True)
+class TrackingEvidenceEnvelope:
+    schema_version: str
+    message_id: str
+    track_id: str
+    timestamp: float
+    tracking_claims: TrackingClaims
+    uncertainty: list[str] = field(default_factory=list)
+    frame_id: str | None = None
+    detection_id: str | None = None
+    pixel_bbox: BoundingBox | None = None
+    pixel_center: PixelPosition | None = None
+    relative_depth: float | None = None
+    ground_position: GroundPoint | None = None
+    tracking_confidence: float | None = None
+    quality_flags: list[str] = field(default_factory=list)
+    track_history: list[TrackingObservationRecord] = field(default_factory=list)
+    frame_reference: str | None = None
+    source_evidence_refs: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            "schema_version": self.schema_version,
+            "message_id": self.message_id,
+            "track_id": self.track_id,
+            "timestamp": self.timestamp,
+            "frame_id": self.frame_id,
+            "detection_id": self.detection_id,
+            "pixel_bbox": None if self.pixel_bbox is None else self.pixel_bbox.to_dict(),
+            "pixel_center": (
+                None
+                if self.pixel_center is None
+                else {
+                    "x": self.pixel_center.x,
+                    "y": self.pixel_center.y,
+                }
+            ),
+            "relative_depth": self.relative_depth,
+            "ground_position": (
+                None
+                if self.ground_position is None
+                else {
+                    "x": self.ground_position.x,
+                    "z": self.ground_position.z,
+                    "unit": self.ground_position.unit,
+                }
+            ),
+            "tracking_confidence": self.tracking_confidence,
+            "quality_flags": self.quality_flags,
+            "track_history": [record.to_dict() for record in self.track_history],
+            "tracking_claims": self.tracking_claims.to_dict(),
+            "frame_reference": self.frame_reference,
+            "source_evidence_refs": self.source_evidence_refs,
+            "uncertainty": self.uncertainty,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict) -> "TrackingEvidenceEnvelope":
+        pixel_bbox_payload = payload.get("pixel_bbox")
+        pixel_bbox = None
+        if isinstance(pixel_bbox_payload, dict):
+            x1 = pixel_bbox_payload.get("x1")
+            y1 = pixel_bbox_payload.get("y1")
+            x2 = pixel_bbox_payload.get("x2")
+            y2 = pixel_bbox_payload.get("y2")
+            if all(isinstance(item, (int, float)) for item in [x1, y1, x2, y2]):
+                pixel_bbox = BoundingBox(x1=float(x1), y1=float(y1), x2=float(x2), y2=float(y2))
+
+        pixel_center_payload = payload.get("pixel_center")
+        pixel_center = None
+        if isinstance(pixel_center_payload, dict):
+            x_value = pixel_center_payload.get("x")
+            y_value = pixel_center_payload.get("y")
+            if isinstance(x_value, (int, float)) and isinstance(y_value, (int, float)):
+                pixel_center = PixelPosition(x=float(x_value), y=float(y_value))
+
+        ground_payload = payload.get("ground_position")
+        ground_position = None
+        if isinstance(ground_payload, dict):
+            x_value = ground_payload.get("x")
+            z_value = ground_payload.get("z")
+            unit_value = ground_payload.get("unit")
+            if isinstance(x_value, (int, float)) and isinstance(z_value, (int, float)) and isinstance(unit_value, str):
+                ground_position = GroundPoint(x=float(x_value), z=float(z_value), unit=unit_value)
+
+        parsed_history: list[TrackingObservationRecord] = []
+        history_payload = payload.get("track_history")
+        if isinstance(history_payload, list):
+            for item in history_payload:
+                if not isinstance(item, dict):
+                    continue
+
+                observation_id = item.get("observation_id")
+                track_id = item.get("track_id")
+                timestamp = item.get("timestamp")
+                source = item.get("source")
+                if not isinstance(observation_id, str):
+                    continue
+                if not isinstance(track_id, str):
+                    continue
+                if not isinstance(timestamp, (int, float)):
+                    continue
+                if not isinstance(source, str):
+                    continue
+
+                ground_point_payload = item.get("ground_point")
+                ground_point = None
+                if isinstance(ground_point_payload, dict):
+                    gp_x = ground_point_payload.get("x")
+                    gp_z = ground_point_payload.get("z")
+                    gp_unit = ground_point_payload.get("unit")
+                    if isinstance(gp_x, (int, float)) and isinstance(gp_z, (int, float)) and isinstance(gp_unit, str):
+                        ground_point = GroundPoint(x=float(gp_x), z=float(gp_z), unit=gp_unit)
+
+                quality_flags = item.get("quality_flags")
+                if not isinstance(quality_flags, list):
+                    quality_flags = []
+
+                parsed_history.append(
+                    TrackingObservationRecord(
+                        observation_id=observation_id,
+                        track_id=track_id,
+                        timestamp=float(timestamp),
+                        source=source,
+                        pixel_x=(
+                            float(item.get("pixel_x"))
+                            if isinstance(item.get("pixel_x"), (int, float))
+                            else None
+                        ),
+                        pixel_y=(
+                            float(item.get("pixel_y"))
+                            if isinstance(item.get("pixel_y"), (int, float))
+                            else None
+                        ),
+                        ground_point=ground_point,
+                        confidence=(
+                            float(item.get("confidence"))
+                            if isinstance(item.get("confidence"), (int, float))
+                            else None
+                        ),
+                        quality_flags=[str(flag) for flag in quality_flags if isinstance(flag, str)],
+                    )
+                )
+
+        tracking_claims_payload = payload.get("tracking_claims")
+        if isinstance(tracking_claims_payload, dict):
+            tracking_claims = TrackingClaims.from_dict(tracking_claims_payload)
+        else:
+            tracking_claims = TrackingClaims(
+                claimed_resolved_track_id=None,
+                association_status="unknown",
+                possible_id_switch=False,
+                visibility_status="unknown",
+                claim_reasons=[],
+            )
+
+        return cls(
+            schema_version=str(payload.get("schema_version", "")),
+            message_id=str(payload.get("message_id", "")),
+            track_id=str(payload.get("track_id", "")),
+            timestamp=float(payload.get("timestamp", 0.0)),
+            tracking_claims=tracking_claims,
+            uncertainty=[
+                str(item)
+                for item in payload.get("uncertainty", [])
+                if isinstance(item, str)
+            ],
+            frame_id=(payload.get("frame_id") if isinstance(payload.get("frame_id"), str) else None),
+            detection_id=(payload.get("detection_id") if isinstance(payload.get("detection_id"), str) else None),
+            pixel_bbox=pixel_bbox,
+            pixel_center=pixel_center,
+            relative_depth=(
+                float(payload.get("relative_depth"))
+                if isinstance(payload.get("relative_depth"), (int, float))
+                else None
+            ),
+            ground_position=ground_position,
+            tracking_confidence=(
+                float(payload.get("tracking_confidence"))
+                if isinstance(payload.get("tracking_confidence"), (int, float))
+                else None
+            ),
+            quality_flags=[
+                str(item)
+                for item in payload.get("quality_flags", [])
+                if isinstance(item, str)
+            ],
+            track_history=parsed_history,
+            frame_reference=(
+                payload.get("frame_reference")
+                if isinstance(payload.get("frame_reference"), str)
+                else None
+            ),
+            source_evidence_refs=[
+                str(item)
+                for item in payload.get("source_evidence_refs", [])
+                if isinstance(item, str)
+            ],
+        )
+
+
+@dataclass(slots=True)
+class VisualVerificationEnvelope:
+    schema_version: str
+    observation_id: str
+    referenced_track_id: str
+    referenced_message_id: str
+    timestamp: float
+    source_evidence_refs: list[str]
+    verification_status: VerificationStatus
+    visibility_status: VisibilityStatus
+    identity_consistency: IdentityConsistencyStatus
+    possible_id_switch: bool
+    uncertainty: list[str] = field(default_factory=list)
+    limitations: list[str] = field(default_factory=list)
+    supporting_evidence_refs: list[str] = field(default_factory=list)
+    contradicting_evidence_refs: list[str] = field(default_factory=list)
+    confidence: float | None = None
+    recommended_follow_up: str | None = None
+    visual_content_inspected: bool | None = None
+
+    def to_dict(self) -> dict:
+        return {
+            "schema_version": self.schema_version,
+            "observation_id": self.observation_id,
+            "referenced_track_id": self.referenced_track_id,
+            "referenced_message_id": self.referenced_message_id,
+            "timestamp": self.timestamp,
+            "source_evidence_refs": self.source_evidence_refs,
+            "verification_status": self.verification_status,
+            "visibility_status": self.visibility_status,
+            "identity_consistency": self.identity_consistency,
+            "possible_id_switch": self.possible_id_switch,
+            "supporting_evidence_refs": self.supporting_evidence_refs,
+            "contradicting_evidence_refs": self.contradicting_evidence_refs,
+            "confidence": self.confidence,
+            "uncertainty": self.uncertainty,
+            "limitations": self.limitations,
+            "recommended_follow_up": self.recommended_follow_up,
+            "visual_content_inspected": self.visual_content_inspected,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict) -> "VisualVerificationEnvelope":
+        return cls(
+            schema_version=str(payload.get("schema_version", "")),
+            observation_id=str(payload.get("observation_id", "")),
+            referenced_track_id=str(payload.get("referenced_track_id", "")),
+            referenced_message_id=str(payload.get("referenced_message_id", "")),
+            timestamp=float(payload.get("timestamp", 0.0)),
+            source_evidence_refs=[
+                str(item)
+                for item in payload.get("source_evidence_refs", [])
+                if isinstance(item, str)
+            ],
+            verification_status=payload.get("verification_status", "inconclusive"),
+            visibility_status=payload.get("visibility_status", "unknown"),
+            identity_consistency=payload.get("identity_consistency", "unknown"),
+            possible_id_switch=bool(payload.get("possible_id_switch", False)),
+            uncertainty=[
+                str(item)
+                for item in payload.get("uncertainty", [])
+                if isinstance(item, str)
+            ],
+            limitations=[
+                str(item)
+                for item in payload.get("limitations", [])
+                if isinstance(item, str)
+            ],
+            supporting_evidence_refs=[
+                str(item)
+                for item in payload.get("supporting_evidence_refs", [])
+                if isinstance(item, str)
+            ],
+            contradicting_evidence_refs=[
+                str(item)
+                for item in payload.get("contradicting_evidence_refs", [])
+                if isinstance(item, str)
+            ],
+            confidence=(
+                float(payload.get("confidence"))
+                if isinstance(payload.get("confidence"), (int, float))
+                else None
+            ),
+            recommended_follow_up=(
+                payload.get("recommended_follow_up")
+                if isinstance(payload.get("recommended_follow_up"), str)
+                else None
+            ),
+            visual_content_inspected=(
+                payload.get("visual_content_inspected")
+                if isinstance(payload.get("visual_content_inspected"), bool)
+                else None
+            ),
+        )
