@@ -64,7 +64,8 @@ async def run_agent_ops_cycle(
     format_cycle_fn: Callable[[dict[str, Any]], str] | None = None,
     format_evidence_fn: Callable[[dict[str, Any]], list[str]] | None = None,
     emit: Callable[[str], None] | None = None,
-) -> bool:
+    include_payload: bool = False,
+) -> bool | dict[str, Any]:
     # Runs one observation/reasoning cycle and reports availability status.
     try:
         result = await session.call_tool(
@@ -82,8 +83,8 @@ async def run_agent_ops_cycle(
         )
         if "not registered" in message or "unknown tool" in message or "not found" in message:
             _emit_message("Disabling agent ops heartbeat: tool unavailable.", emit)
-            return False
-        return True
+            return {"enabled": False, "payload": None} if include_payload else False
+        return {"enabled": True, "payload": None} if include_payload else True
 
     message = result_text_fn(result)
     if getattr(result, "is_error", False):
@@ -91,8 +92,8 @@ async def run_agent_ops_cycle(
         lowered = (message or "").lower()
         if "not registered" in lowered or "unknown tool" in lowered or "not found" in lowered:
             _emit_message("Disabling agent ops heartbeat: tool unavailable.", emit)
-            return False
-        return True
+            return {"enabled": False, "payload": None} if include_payload else False
+        return {"enabled": True, "payload": None} if include_payload else True
 
     payload = result_json_fn(result)
     if payload is None:
@@ -100,7 +101,7 @@ async def run_agent_ops_cycle(
             _emit_message(f"Agent ops cycle: {message}", emit)
         else:
             _emit_message("Agent ops cycle completed with no structured payload.", emit)
-        return True
+        return {"enabled": True, "payload": None} if include_payload else True
 
     if format_cycle_fn is None:
         _emit_message("Agent ops cycle completed with structured payload.", emit)
@@ -110,6 +111,8 @@ async def run_agent_ops_cycle(
     if format_evidence_fn is not None:
         for evidence_line in format_evidence_fn(payload):
             _emit_message(evidence_line, emit)
+    if include_payload:
+        return {"enabled": True, "payload": payload}
     return True
 
 
@@ -249,11 +252,22 @@ async def run_agent_ops_pipeline(
         "completed_cycle_increment": 0,
     }
 
-    agent_ops_enabled = await run_cycle_fn(
+    cycle_result = await run_cycle_fn(
         session,
         max_tracks=max_tracks,
+        include_payload=True,
     )
+    cycle_payload: dict[str, Any] | None = None
+    if isinstance(cycle_result, dict):
+        agent_ops_enabled = bool(cycle_result.get("enabled", True))
+        payload_candidate = cycle_result.get("payload")
+        if isinstance(payload_candidate, dict):
+            cycle_payload = payload_candidate
+    else:
+        agent_ops_enabled = bool(cycle_result)
+
     result["agent_ops_enabled"] = agent_ops_enabled
+    result["cycle_payload"] = cycle_payload
     if not agent_ops_enabled:
         return result
 

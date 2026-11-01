@@ -6,6 +6,8 @@ from typing import Any, Awaitable, Callable
 
 from mcp import ClientSession
 
+from .verification_queue import VerificationQueueManager, extract_track_requests_from_cycle_payload
+
 from . import app as runtime_app
 
 
@@ -104,6 +106,8 @@ async def monitor_movement(
     run_tracking_cycle_fn: Callable[[ClientSession, list[Any]], Awaitable[None]],
     run_agent_ops_pipeline_fn: Callable[..., Awaitable[dict[str, Any]]],
     emit: Callable[[str], None],
+    verification_manager: VerificationQueueManager | None = None,
+    verification_request_source_fn: Callable[[], list[Any]] | None = None,
 ) -> None:
     address = [tracking_address[0], tracking_address[1]]
 
@@ -148,6 +152,11 @@ async def monitor_movement(
                     completed_agent_ops_cycles += int(
                         pipeline_result.get("completed_cycle_increment", 0)
                     )
+                    if verification_manager is not None:
+                        cycle_payload = pipeline_result.get("cycle_payload")
+                        if isinstance(cycle_payload, dict):
+                            for verification_request in extract_track_requests_from_cycle_payload(cycle_payload):
+                                verification_manager.submit_request(verification_request)
                 agent_ops_cycle_task = None
 
             try:
@@ -159,6 +168,26 @@ async def monitor_movement(
                 )
 
             now = loop.time()
+            if verification_manager is not None and verification_request_source_fn is not None:
+                try:
+                    external_requests = verification_request_source_fn()
+                except Exception as error:
+                    emit(
+                        "Verification request source failed "
+                        f"({type(error).__name__}): {error}"
+                    )
+                    external_requests = []
+
+                if isinstance(external_requests, list):
+                    for external_request in external_requests:
+                        try:
+                            verification_manager.submit_request(external_request)
+                        except Exception as error:
+                            emit(
+                                "Verification request submission failed "
+                                f"({type(error).__name__}): {error}"
+                            )
+
             if agent_ops_enabled and (now - last_agent_ops_cycle_at) >= agent_ops_interval_seconds:
                 if agent_ops_cycle_task is not None and not agent_ops_cycle_task.done():
                     emit("Skipping agent ops trigger: prior cycle still running.")

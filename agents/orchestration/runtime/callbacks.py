@@ -49,12 +49,13 @@ def make_run_agent_ops_cycle(
     format_evidence_fn: Callable[[dict[str, Any]], list[str]],
     emit: Callable[[str], None],
     default_max_tracks: int,
-) -> Callable[[ClientSession, bool, int], Awaitable[bool]]:
+) -> Callable[[ClientSession, bool, int], Awaitable[bool | dict[str, Any]]]:
     async def _run_agent_ops_cycle(
         session: ClientSession,
         request_evidence_on_uncertainty: bool = True,
         max_tracks: int = default_max_tracks,
-    ) -> bool:
+        include_payload: bool = False,
+    ) -> bool | dict[str, Any]:
         return await orchestration_control.run_agent_ops_cycle_runtime(
             session,
             request_evidence_on_uncertainty=request_evidence_on_uncertainty,
@@ -65,6 +66,7 @@ def make_run_agent_ops_cycle(
             format_cycle_fn=format_cycle_fn,
             format_evidence_fn=format_evidence_fn,
             emit=emit,
+            include_payload=include_payload,
         )
 
     return _run_agent_ops_cycle
@@ -251,6 +253,8 @@ def make_monitor_movement(
         depth_coverage_summary_enabled: bool = True,
         depth_coverage_summary_every_cycles: int = default_depth_coverage_summary_every_cycles,
         depth_coverage_sample_limit: int = default_depth_coverage_sample_limit,
+        verification_manager: Any | None = None,
+        verification_request_source_fn: Callable[[], list[Any]] | None = None,
     ) -> None:
         async def _run_tracking_cycle(session_handle: ClientSession, address: list[Any]) -> None:
             await run_tracking_cycle_fn(
@@ -278,6 +282,8 @@ def make_monitor_movement(
             run_tracking_cycle_fn=_run_tracking_cycle,
             run_agent_ops_pipeline_fn=run_agent_ops_pipeline_fn,
             emit=emit,
+            verification_manager=verification_manager,
+            verification_request_source_fn=verification_request_source_fn,
         )
 
     return _monitor_movement

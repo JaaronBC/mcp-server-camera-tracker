@@ -13,10 +13,15 @@ from agents.orchestration.runtime import app as runtime_app
 from agents.orchestration.runtime import config as runtime_config
 from agents.orchestration.runtime import core as runtime_agent
 from agents.orchestration.runtime import flow as runtime_flow
+from agents.orchestration.runtime.verification_queue import VerificationQueueManager
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 SERVER_PATH = PROJECT_ROOT / "server.py"
 ANALYSIS_INTERVAL_SECONDS = runtime_agent.ANALYSIS_INTERVAL_SECONDS
+VERIFICATION_QUEUE_CAPACITY = 32
+VERIFICATION_MAX_CONCURRENCY = 2
+VERIFICATION_REQUEST_TIMEOUT_SECONDS = 8.0
+VERIFICATION_RESULTS_CAPACITY = 512
 
 get_result_text = runtime_agent.get_result_text
 get_result_json_object = runtime_agent.get_result_json_object
@@ -159,25 +164,44 @@ async def monitor_movement(
     depth_coverage_summary_enabled: bool = True,
     depth_coverage_summary_every_cycles: int = runtime_agent.DEPTH_COVERAGE_SUMMARY_EVERY_CYCLES,
     depth_coverage_sample_limit: int = runtime_agent.DEPTH_COVERAGE_SAMPLE_LIMIT,
+    enable_visual_verification_queue: bool = True,
+    verification_request_source_fn: Any | None = None,
 ) -> None:
     """Run movement analysis loop and trigger periodic agent-ops heartbeats."""
     monitor_impl = runtime_agent.make_monitor_movement(
         run_agent_ops_pipeline_fn=_run_agent_ops_pipeline,
         analysis_interval_seconds=ANALYSIS_INTERVAL_SECONDS,
     )
-    await monitor_impl(
-        session,
-        enable_agent_ops_heartbeat=enable_agent_ops_heartbeat,
-        agent_ops_interval_seconds=agent_ops_interval_seconds,
-        agent_ops_max_tracks=agent_ops_max_tracks,
-        agent_ops_summary_every_cycles=agent_ops_summary_every_cycles,
-        agent_ops_summary_window_size=agent_ops_summary_window_size,
-        handoff_degraded_warn_rate=handoff_degraded_warn_rate,
-        handoff_degraded_critical_rate=handoff_degraded_critical_rate,
-        depth_coverage_summary_enabled=depth_coverage_summary_enabled,
-        depth_coverage_summary_every_cycles=depth_coverage_summary_every_cycles,
-        depth_coverage_sample_limit=depth_coverage_sample_limit,
-    )
+    verification_manager: VerificationQueueManager | None = None
+    if enable_visual_verification_queue:
+        verification_manager = VerificationQueueManager(
+            evidence_root_dir=PROJECT_ROOT / "captures" / "tracking_evidence",
+            queue_capacity=VERIFICATION_QUEUE_CAPACITY,
+            max_concurrency=VERIFICATION_MAX_CONCURRENCY,
+            request_timeout_seconds=VERIFICATION_REQUEST_TIMEOUT_SECONDS,
+            result_registry_capacity=VERIFICATION_RESULTS_CAPACITY,
+        )
+        await verification_manager.start(session=session)
+
+    try:
+        await monitor_impl(
+            session,
+            enable_agent_ops_heartbeat=enable_agent_ops_heartbeat,
+            agent_ops_interval_seconds=agent_ops_interval_seconds,
+            agent_ops_max_tracks=agent_ops_max_tracks,
+            agent_ops_summary_every_cycles=agent_ops_summary_every_cycles,
+            agent_ops_summary_window_size=agent_ops_summary_window_size,
+            handoff_degraded_warn_rate=handoff_degraded_warn_rate,
+            handoff_degraded_critical_rate=handoff_degraded_critical_rate,
+            depth_coverage_summary_enabled=depth_coverage_summary_enabled,
+            depth_coverage_summary_every_cycles=depth_coverage_summary_every_cycles,
+            depth_coverage_sample_limit=depth_coverage_sample_limit,
+            verification_manager=verification_manager,
+            verification_request_source_fn=verification_request_source_fn,
+        )
+    finally:
+        if verification_manager is not None:
+            await verification_manager.stop()
 
 
 async def run_agent(

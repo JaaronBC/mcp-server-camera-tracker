@@ -9,6 +9,7 @@ from pathlib import Path
 from agents.observation.agent_observation import (
     ObservationVisualVerificationError,
     ObservationVisualVerificationRequest,
+    invoke_visual_verification_llm_response,
     verify_tracking_evidence_for_observation,
 )
 
@@ -322,6 +323,37 @@ class TestObservationVisualVerification(unittest.TestCase):
                 )
 
         self.assertEqual(context.exception.code, "coordinator_validation_rejected")
+
+    def test_provider_timeout_is_enforced_in_visual_invoke(self) -> None:
+        class _SlowCompletions:
+            async def create(self, *args, **kwargs):
+                await asyncio.sleep(0.05)
+                return None
+
+        class _SlowChat:
+            def __init__(self) -> None:
+                self.completions = _SlowCompletions()
+
+        class _SlowClient:
+            def __init__(self) -> None:
+                self.chat = _SlowChat()
+
+            def close(self):
+                return None
+
+        from unittest.mock import patch
+
+        with patch("agents.observation.agent_observation._create_openai_client", return_value=_SlowClient()):
+            with self.assertRaises(TimeoutError):
+                asyncio.run(
+                    invoke_visual_verification_llm_response(
+                        model="qwen-3.8-27b",
+                        system_prompt="prompt",
+                        user_payload={"message_id": "msg-1"},
+                        image_data_url="data:image/jpeg;base64,abc",
+                        timeout_seconds=0.01,
+                    )
+                )
 
 
 if __name__ == "__main__":

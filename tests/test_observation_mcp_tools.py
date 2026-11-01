@@ -256,6 +256,21 @@ class TestObservationMcpEvidenceTools(unittest.TestCase):
         self.assertNotIn("envelope_path", serialized)
         self.assertNotIn("secret provider exception", serialized)
 
+    def test_verify_tracking_visual_evidence_unsupported_model_cannot_succeed(self) -> None:
+        with patch.object(
+            observation_evidence_tools,
+            "verify_tracking_evidence_for_observation",
+            side_effect=ObservationVisualVerificationError(
+                "unsupported_vision_model",
+                "unsupported",
+                details={"model": "gpt-oss-120b"},
+            ),
+        ):
+            result = observation_evidence_tools.verify_tracking_visual_evidence("msg-1")
+
+        self.assertFalse(result["available"])
+        self.assertEqual(result["error_code"], "unsupported_vision_model")
+
 
 class TestObservationMcpToolDiscoverability(unittest.IsolatedAsyncioTestCase):
     async def test_observation_tools_discoverable_via_list_tools(self) -> None:
