@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -27,7 +28,6 @@ class RuntimeConfig:
 
 
 def configure_logging(_config: RuntimeConfig) -> logging.Logger:
-    # Configures runtime logger for initialization-first flow.
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     return logging.getLogger("camera_tracker.runtime")
 
@@ -44,7 +44,6 @@ class RuntimeServices:
         client_session_cls: type[ClientSession],
         startup_runner: Callable[[ClientSession, RuntimeConfig], Awaitable[None]],
     ) -> None:
-        # Performs init logic for runtime service lifecycle ownership.
         self.config = config
         self.logger = logger
         self.tracking_agent = "tracking_agent"
@@ -55,6 +54,8 @@ class RuntimeServices:
         self._server_params = StdioServerParameters(
             command=python_executable,
             args=[str(server_path)],
+            env=dict(os.environ),
+            cwd=str(server_path.parent),
         )
         self._stdio_client_fn = stdio_client_fn
         self._client_session_cls = client_session_cls
@@ -65,7 +66,6 @@ class RuntimeServices:
         self.session: ClientSession | None = None
 
     async def connect(self) -> None:
-        # Connects to MCP server and initializes the session.
         self._stdio_context = self._stdio_client_fn(self._server_params)
         read_stream, write_stream = await self._stdio_context.__aenter__()
 
@@ -75,20 +75,18 @@ class RuntimeServices:
         self.observation_source = self.session
 
     async def start(self) -> None:
-        # Starts runtime services and startup checks before operator run loop.
         if self.session is None:
             raise RuntimeError("Runtime services are not connected")
         await self._startup_runner(self.session, self.config)
 
     async def stop(self) -> None:
-        # Stops runtime services and closes MCP session resources.
         session_stop_error: Exception | None = None
         stdio_stop_error: Exception | None = None
 
         if self._session_context is not None:
             try:
                 await self._session_context.__aexit__(None, None, None)
-            except Exception as error:  # pragma: no cover - exercised via lifecycle tests
+            except Exception as error:
                 session_stop_error = error
             finally:
                 self._session_context = None
@@ -98,7 +96,7 @@ class RuntimeServices:
         if self._stdio_context is not None:
             try:
                 await self._stdio_context.__aexit__(None, None, None)
-            except Exception as error:  # pragma: no cover - exercised via lifecycle tests
+            except Exception as error:
                 stdio_stop_error = error
             finally:
                 self._stdio_context = None
@@ -119,7 +117,6 @@ async def initialize_services(
     client_session_cls: type[ClientSession],
     startup_runner: Callable[[ClientSession, RuntimeConfig], Awaitable[None]],
 ) -> RuntimeServices:
-    # Initializes and returns connected runtime services.
     services = RuntimeServices(
         config,
         logger,
@@ -143,7 +140,6 @@ class RuntimeLoopCoordinator:
         services: RuntimeServices,
         run_loop: Callable[[ClientSession, RuntimeConfig], Awaitable[None]],
     ) -> None:
-        # Performs init logic for operator runtime coordinator wrapper.
         self.tracking_agent = tracking_agent
         self.observation_agent = observation_agent
         self.reasoning_agent = reasoning_agent
@@ -151,13 +147,11 @@ class RuntimeLoopCoordinator:
         self._run_loop = run_loop
 
     async def run(self) -> None:
-        # Runs the operator monitoring loop through existing runtime functions.
         if self._services.session is None:
             raise RuntimeError("Runtime services are not connected")
         await self._run_loop(self._services.session, self._services.config)
 
     async def stop(self) -> None:
-        # Stops coordinator-owned runtime operations.
         return None
 
 
@@ -166,14 +160,11 @@ AgentCoordinator = RuntimeLoopCoordinator
 
 class OrchestrationAgent:
     def __init__(self, *, coordinator: RuntimeLoopCoordinator, observation_source: Any) -> None:
-        # Performs init logic for orchestration runtime wrapper.
         self._coordinator = coordinator
         self.observation_source = observation_source
 
     async def run(self) -> None:
-        # Runs orchestration loop via coordinator.
         await self._coordinator.run()
 
     async def stop(self) -> None:
-        # Stops orchestration loop via coordinator.
         await self._coordinator.stop()

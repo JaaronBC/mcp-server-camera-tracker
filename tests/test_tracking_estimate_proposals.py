@@ -661,5 +661,212 @@ class TestTrackingEstimateProposals(unittest.TestCase):
             self.assertEqual(track_snapshot.to_dict(), before)
 
 
+    def test_verification_age_boundary_accepts_at_threshold_and_rejects_after(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            envelope = _envelope(
+                message_id="msg-boundary-verification",
+                track_id="track-boundary-verification",
+                timestamp=1000.0,
+                pixel_center=PixelPosition(x=110.0, y=55.0),
+                ground_point=None,
+                position_kind="relative_ground_estimate",
+                history=[
+                    _history_record(
+                        observation_id="obs-1",
+                        track_id="track-boundary-verification",
+                        timestamp=999.5,
+                        pixel_x=100.0,
+                        pixel_y=50.0,
+                    ),
+                    _history_record(
+                        observation_id="obs-2",
+                        track_id="track-boundary-verification",
+                        timestamp=1000.0,
+                        pixel_x=110.0,
+                        pixel_y=55.0,
+                    ),
+                ],
+            )
+            _write_envelope_record(root, envelope)
+
+            engine = TrackingEstimateProposalEngine(
+                coordinator=AgentCoordinator(),
+                evidence_root_dir=root,
+                prediction_horizon_seconds=0.5,
+                max_effective_horizon_seconds=10.0,
+                max_verification_age_seconds=5.0,
+                max_evidence_age_seconds=30.0,
+            )
+
+            at_boundary = engine.generate(
+                accepted_feedback_records=[
+                    _feedback_record(
+                        track_id="track-boundary-verification",
+                        message_id="msg-boundary-verification",
+                        verification_timestamp=1000.0,
+                    )
+                ],
+                current_tracks={"track-boundary-verification": object()},
+                now_timestamp=1005.0,
+            )
+            self.assertEqual(at_boundary["accepted_count"], 1)
+
+            over_boundary = engine.generate(
+                accepted_feedback_records=[
+                    _feedback_record(
+                        track_id="track-boundary-verification",
+                        message_id="msg-boundary-verification",
+                        verification_timestamp=1000.0,
+                    )
+                ],
+                current_tracks={"track-boundary-verification": object()},
+                now_timestamp=1005.001,
+            )
+            self.assertEqual(over_boundary["accepted_count"], 0)
+            self.assertTrue(any(item.get("reason") == "coordinator_rejected" for item in over_boundary["rejected"]))
+            stale_errors = [
+                err
+                for item in over_boundary["rejected"]
+                for err in item.get("errors", [])
+            ]
+            self.assertIn("stale_verification", stale_errors)
+
+    def test_evidence_age_boundary_accepts_at_threshold_and_rejects_after(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            envelope = _envelope(
+                message_id="msg-boundary-evidence",
+                track_id="track-boundary-evidence",
+                timestamp=1000.0,
+                pixel_center=PixelPosition(x=110.0, y=55.0),
+                ground_point=None,
+                position_kind="relative_ground_estimate",
+                history=[
+                    _history_record(
+                        observation_id="obs-1",
+                        track_id="track-boundary-evidence",
+                        timestamp=999.5,
+                        pixel_x=100.0,
+                        pixel_y=50.0,
+                    ),
+                    _history_record(
+                        observation_id="obs-2",
+                        track_id="track-boundary-evidence",
+                        timestamp=1000.0,
+                        pixel_x=110.0,
+                        pixel_y=55.0,
+                    ),
+                ],
+            )
+            _write_envelope_record(root, envelope)
+
+            engine = TrackingEstimateProposalEngine(
+                coordinator=AgentCoordinator(),
+                evidence_root_dir=root,
+                prediction_horizon_seconds=0.5,
+                max_effective_horizon_seconds=10.0,
+                max_verification_age_seconds=30.0,
+                max_evidence_age_seconds=5.0,
+            )
+
+            at_boundary = engine.generate(
+                accepted_feedback_records=[
+                    _feedback_record(
+                        track_id="track-boundary-evidence",
+                        message_id="msg-boundary-evidence",
+                        verification_timestamp=1004.9,
+                    )
+                ],
+                current_tracks={"track-boundary-evidence": object()},
+                now_timestamp=1005.0,
+            )
+            self.assertEqual(at_boundary["accepted_count"], 1)
+
+            over_boundary = engine.generate(
+                accepted_feedback_records=[
+                    _feedback_record(
+                        track_id="track-boundary-evidence",
+                        message_id="msg-boundary-evidence",
+                        verification_timestamp=1004.9,
+                    )
+                ],
+                current_tracks={"track-boundary-evidence": object()},
+                now_timestamp=1005.001,
+            )
+            self.assertEqual(over_boundary["accepted_count"], 0)
+            self.assertTrue(any(item.get("reason") == "stale_evidence" for item in over_boundary["rejected"]))
+
+    def test_effective_horizon_boundary_accepts_at_threshold_and_rejects_after(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            envelope = _envelope(
+                message_id="msg-boundary-horizon",
+                track_id="track-boundary-horizon",
+                timestamp=1000.0,
+                pixel_center=PixelPosition(x=110.0, y=55.0),
+                ground_point=None,
+                position_kind="relative_ground_estimate",
+                history=[
+                    _history_record(
+                        observation_id="obs-1",
+                        track_id="track-boundary-horizon",
+                        timestamp=999.5,
+                        pixel_x=100.0,
+                        pixel_y=50.0,
+                    ),
+                    _history_record(
+                        observation_id="obs-2",
+                        track_id="track-boundary-horizon",
+                        timestamp=1000.0,
+                        pixel_x=110.0,
+                        pixel_y=55.0,
+                    ),
+                ],
+            )
+            _write_envelope_record(root, envelope)
+
+            engine = TrackingEstimateProposalEngine(
+                coordinator=AgentCoordinator(),
+                evidence_root_dir=root,
+                prediction_horizon_seconds=0.5,
+                max_effective_horizon_seconds=2.0,
+                max_verification_age_seconds=30.0,
+                max_evidence_age_seconds=30.0,
+            )
+
+            at_boundary = engine.generate(
+                accepted_feedback_records=[
+                    _feedback_record(
+                        track_id="track-boundary-horizon",
+                        message_id="msg-boundary-horizon",
+                        verification_timestamp=1000.0,
+                    )
+                ],
+                current_tracks={"track-boundary-horizon": object()},
+                now_timestamp=1001.5,
+            )
+            self.assertEqual(at_boundary["accepted_count"], 1)
+
+            over_boundary = engine.generate(
+                accepted_feedback_records=[
+                    _feedback_record(
+                        track_id="track-boundary-horizon",
+                        message_id="msg-boundary-horizon",
+                        verification_timestamp=1000.0,
+                    )
+                ],
+                current_tracks={"track-boundary-horizon": object()},
+                now_timestamp=1001.501,
+            )
+            self.assertEqual(over_boundary["accepted_count"], 0)
+            self.assertTrue(
+                any(
+                    item.get("reason") == "insufficient_or_invalid_history_or_horizon"
+                    for item in over_boundary["rejected"]
+                )
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

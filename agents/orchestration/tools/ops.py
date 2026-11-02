@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 import uuid
 from pathlib import Path
@@ -17,11 +18,29 @@ MAX_EVIDENCE_STR_LIST_ITEMS = 5
 MAX_EVIDENCE_SELECTED_UPDATES = 3
 
 
+def _agent_events_path() -> Path:
+    configured = os.getenv("PHASE16E_AGENT_EVENTS_PATH", "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+    return AGENT_EVENTS_PATH
+
+
+def _run_id_from_env() -> str | None:
+    run_id = os.getenv("PHASE16E_RUN_ID", "").strip()
+    return run_id or None
+
+
 def _append_event(event: dict[str, Any]) -> None:
     # Implements append event behavior for this module.
-    AGENT_EVENTS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with AGENT_EVENTS_PATH.open("a", encoding="utf-8") as handle:
-        handle.write(f"{json.dumps(event)}\n")
+    event_path = _agent_events_path()
+    payload = dict(event)
+    if "run_id" not in payload:
+        run_id = _run_id_from_env()
+        if run_id:
+            payload["run_id"] = run_id
+    event_path.parent.mkdir(parents=True, exist_ok=True)
+    with event_path.open("a", encoding="utf-8") as handle:
+        handle.write(f"{json.dumps(payload)}\n")
 
 
 def _extract_track_ids(radar_state: dict[str, Any]) -> list[str]:
@@ -41,9 +60,9 @@ def _extract_track_ids(radar_state: dict[str, Any]) -> list[str]:
     return track_ids
 
 
-def _load_events(limit: int) -> tuple[list[dict[str, Any]], int]:
+def _load_events(limit: int, event_path: Path) -> tuple[list[dict[str, Any]], int]:
     # Loads events data from storage for downstream processing.
-    lines = AGENT_EVENTS_PATH.read_text(encoding="utf-8").splitlines()
+    lines = event_path.read_text(encoding="utf-8").splitlines()
     selected = lines[-limit:]
     events: list[dict[str, Any]] = []
     dropped_lines = 0
@@ -320,7 +339,7 @@ def _initialize_reasoning_cycle(max_tracks: int) -> dict[str, Any]:
             "response": {
                 "available": False,
                 "error": "radar_state_unavailable",
-                "event_log_path": str(AGENT_EVENTS_PATH),
+                "event_log_path": str(_agent_events_path()),
             },
         }
 
@@ -594,7 +613,7 @@ def _build_reasoning_cycle_response(
 ) -> dict[str, Any]:
     return {
         "available": True,
-        "event_log_path": str(AGENT_EVENTS_PATH),
+        "event_log_path": str(_agent_events_path()),
         "event_log_writable": event_log_error_count == 0,
         "event_log_error_count": event_log_error_count,
         "event_log_last_error": event_log_last_error,
@@ -711,19 +730,20 @@ def get_recent_agent_events(limit: int = 20) -> dict[str, Any]:
     if limit <= 0:
         raise ValueError("limit must be greater than zero")
 
-    if not AGENT_EVENTS_PATH.is_file():
+    event_path = _agent_events_path()
+    if not event_path.is_file():
         return {
             "available": False,
-            "event_log_path": str(AGENT_EVENTS_PATH),
+            "event_log_path": str(event_path),
             "error": "agent_events_missing",
             "events": [],
         }
 
-    events, dropped_lines = _load_events(limit)
+    events, dropped_lines = _load_events(limit, event_path)
 
     return {
         "available": True,
-        "event_log_path": str(AGENT_EVENTS_PATH),
+        "event_log_path": str(event_path),
         "requested_limit": limit,
         "returned_events": len(events),
         "dropped_lines": dropped_lines,
@@ -738,18 +758,19 @@ def summarize_agent_event_health(window_size: int = 100) -> dict[str, Any]:
     if window_size <= 0:
         raise ValueError("window_size must be greater than zero")
 
-    if not AGENT_EVENTS_PATH.is_file():
+    event_path = _agent_events_path()
+    if not event_path.is_file():
         return {
             "available": False,
-            "event_log_path": str(AGENT_EVENTS_PATH),
+            "event_log_path": str(event_path),
             "error": "agent_events_missing",
         }
 
-    events, dropped_lines = _load_events(window_size)
+    events, dropped_lines = _load_events(window_size, event_path)
     if not events:
         return {
             "available": False,
-            "event_log_path": str(AGENT_EVENTS_PATH),
+            "event_log_path": str(event_path),
             "error": "no_valid_events",
             "dropped_lines": dropped_lines,
         }
@@ -903,7 +924,7 @@ def summarize_agent_event_health(window_size: int = 100) -> dict[str, Any]:
 
     return {
         "available": True,
-        "event_log_path": str(AGENT_EVENTS_PATH),
+        "event_log_path": str(_agent_events_path()),
         "window_size": window_size,
         "returned_events": total_events,
         "dropped_lines": dropped_lines,
@@ -978,20 +999,21 @@ def prune_agent_event_log(
     if max_events_keep < 0:
         raise ValueError("max_events_keep must be zero or greater")
 
-    if not AGENT_EVENTS_PATH.is_file():
+    event_path = _agent_events_path()
+    if not event_path.is_file():
         return {
             "available": False,
-            "event_log_path": str(AGENT_EVENTS_PATH),
+            "event_log_path": str(_agent_events_path()),
             "error": "agent_events_missing",
         }
 
-    lines = AGENT_EVENTS_PATH.read_text(encoding="utf-8").splitlines()
+    lines = event_path.read_text(encoding="utf-8").splitlines()
     total_before = len(lines)
 
     if total_before <= max_events_keep:
         return {
             "available": True,
-            "event_log_path": str(AGENT_EVENTS_PATH),
+            "event_log_path": str(_agent_events_path()),
             "total_lines_before": total_before,
             "total_lines_after": total_before,
             "removed_lines": 0,
@@ -1005,17 +1027,17 @@ def prune_agent_event_log(
 
     archive_path: Path | None = None
     if archive_removed_events and removed_lines:
-        archive_path = _archive_path_for_now(AGENT_EVENTS_PATH)
+        archive_path = _archive_path_for_now(event_path)
         archive_path.write_text("\n".join(removed_lines) + "\n", encoding="utf-8")
 
     if kept_lines:
-        AGENT_EVENTS_PATH.write_text("\n".join(kept_lines) + "\n", encoding="utf-8")
+        event_path.write_text("\n".join(kept_lines) + "\n", encoding="utf-8")
     else:
-        AGENT_EVENTS_PATH.write_text("", encoding="utf-8")
+        event_path.write_text("", encoding="utf-8")
 
     return {
         "available": True,
-        "event_log_path": str(AGENT_EVENTS_PATH),
+        "event_log_path": str(_agent_events_path()),
         "total_lines_before": total_before,
         "total_lines_after": len(kept_lines),
         "removed_lines": len(removed_lines),

@@ -1,0 +1,1 @@
+{"event_type": "provider_call_attempt", "timestamp": 1793598314.7900338, "attempt_id": "attempt-mock-observation-visual", "role": "observation_visual", "outcome": "ok", "reserved_at": 1793598314.7900338, "latency_ms": 1.0, "usage": {"total_tokens": 1}, "reason": null, "error_code": null, "pid": 36859}

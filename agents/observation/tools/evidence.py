@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,20 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 EVIDENCE_ROOT_DIR = PROJECT_ROOT / "captures" / "tracking_evidence"
 DEFAULT_VISUAL_VERIFICATION_TIMEOUT_SECONDS = 6.0
 DEFAULT_VISUAL_VERIFICATION_RETRY_LIMIT = 0
+VISUAL_VERIFICATION_TIMEOUT_ENV = "OBSERVATION_VISUAL_VERIFICATION_TIMEOUT_SECONDS"
+
+
+def _resolve_visual_verification_timeout_seconds() -> float:
+    raw = os.getenv(VISUAL_VERIFICATION_TIMEOUT_ENV)
+    if raw is None:
+        return DEFAULT_VISUAL_VERIFICATION_TIMEOUT_SECONDS
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_VISUAL_VERIFICATION_TIMEOUT_SECONDS
+    if value <= 0:
+        return DEFAULT_VISUAL_VERIFICATION_TIMEOUT_SECONDS
+    return value
 
 
 def _sanitize_details(payload: Any) -> Any:
@@ -31,6 +46,13 @@ def _sanitize_details(payload: Any) -> Any:
             "missing_keys",
             "model",
             "attempts",
+            "retry_count",
+            "latency_ms",
+            "attempt_latency_ms",
+            "configured_timeout_seconds",
+            "exception_class",
+            "timeout_source",
+            "error_code",
             "message_id",
             "observation_id",
             "referenced_message_id",
@@ -155,11 +177,12 @@ def get_tracking_visual_evidence(message_id: str) -> dict[str, Any]:
 
 @mcp.tool()
 def verify_tracking_visual_evidence(message_id: str) -> dict[str, Any]:
+    selected_timeout_seconds = _resolve_visual_verification_timeout_seconds()
     try:
         result = verify_tracking_evidence_for_observation(
             ObservationVisualVerificationRequest(message_id=message_id),
             evidence_root_dir=EVIDENCE_ROOT_DIR,
-            timeout_seconds=DEFAULT_VISUAL_VERIFICATION_TIMEOUT_SECONDS,
+            timeout_seconds=selected_timeout_seconds,
             retry_limit=DEFAULT_VISUAL_VERIFICATION_RETRY_LIMIT,
         )
     except ObservationVisualVerificationError as error:

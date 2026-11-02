@@ -30,6 +30,26 @@ class FakeVisualTrackingAgent:
         return self._result
 
 
+class SequenceVisualTrackingAgent:
+    def __init__(self, results: list[VisualTrackingAgentResult], model: str = "qwen-3.8-27b") -> None:
+        self._results = list(results)
+        self._index = 0
+        self.model = model
+
+    async def propose_associations(
+        self,
+        frame_reference: str | None,
+        detections: list[DetectionCandidate],
+        event_reasons: list[str] | None = None,
+        request_timeout_seconds: float = 2.0,
+    ) -> VisualTrackingAgentResult:
+        if self._index >= len(self._results):
+            return self._results[-1]
+        value = self._results[self._index]
+        self._index += 1
+        return value
+
+
 def make_detection(relative_depth: float | None = None) -> DetectionCandidate:
     # Performs make detection logic.
     return DetectionCandidate(
@@ -208,6 +228,122 @@ class TestVisualTrackingRuntime(unittest.TestCase):
         self.assertIn("vlm_unavailable", observation.uncertainties)
         self.assertEqual(observation.updates[0].resolved_track_id, "yolo-7")
         self.assertIn("no_vlm_proposal_used", observation.updates[0].uncertainties)
+
+    def test_completed_result_is_harvested_before_next_submit(self) -> None:
+        first = VisualTrackingAgentResult(
+            available=False,
+            proposals=[],
+            uncertainty_flags=["vlm_api_key_missing"],
+            supporting_evidence=[],
+            latency_ms=None,
+            error="vlm_api_key_missing",
+        )
+        second = VisualTrackingAgentResult(
+            available=True,
+            proposals=[],
+            uncertainty_flags=["no_detections"],
+            supporting_evidence=[],
+            latency_ms=3.2,
+        )
+        agent = SequenceVisualTrackingAgent([first, second])
+        runtime = AsyncVisualTrackingRuntime(AgentCoordinator(), agent)
+        detection = make_detection()
+
+        started_first = runtime.submit_if_needed(
+            now=time.time(),
+            frame_reference=None,
+            detections=[detection],
+            event_reasons=["first"],
+        )
+        self.assertTrue(started_first)
+
+        deadline = time.time() + 1.0
+        while runtime.is_busy() and time.time() < deadline:
+            time.sleep(0.01)
+
+        started_second = runtime.submit_if_needed(
+            now=time.time(),
+            frame_reference=None,
+            detections=[detection],
+            event_reasons=["second"],
+        )
+        self.assertTrue(started_second)
+
+        first_observation = runtime.poll_latest_observation()
+        self.assertIsNotNone(first_observation)
+        assert first_observation is not None
+        self.assertIn("vlm_api_key_missing", first_observation.uncertainties)
+
+        second_observation = None
+        deadline = time.time() + 1.0
+        while second_observation is None and time.time() < deadline:
+            second_observation = runtime.poll_latest_observation()
+            time.sleep(0.01)
+
+        runtime.shutdown()
+        self.assertIsNotNone(second_observation)
+
+    def test_pending_request_is_not_replaced(self) -> None:
+        slow_agent = FakeVisualTrackingAgent(
+            VisualTrackingAgentResult(
+                available=True,
+                proposals=[],
+                uncertainty_flags=[],
+                supporting_evidence=[],
+                latency_ms=20.0,
+            ),
+            delay_seconds=0.2,
+        )
+        runtime = AsyncVisualTrackingRuntime(AgentCoordinator(), slow_agent)
+        detection = make_detection()
+
+        started = runtime.submit_if_needed(
+            now=time.time(),
+            frame_reference=None,
+            detections=[detection],
+            event_reasons=["initial"],
+        )
+        self.assertTrue(started)
+
+        started_second = runtime.submit_if_needed(
+            now=time.time(),
+            frame_reference=None,
+            detections=[detection],
+            event_reasons=["second"],
+        )
+        self.assertFalse(started_second)
+        runtime.shutdown()
+
+    def test_observation_consumed_exactly_once(self) -> None:
+        agent = FakeVisualTrackingAgent(
+            VisualTrackingAgentResult(
+                available=False,
+                proposals=[],
+                uncertainty_flags=["vlm_unavailable"],
+                supporting_evidence=[],
+                latency_ms=None,
+                error="vlm_unavailable",
+            )
+        )
+        runtime = AsyncVisualTrackingRuntime(AgentCoordinator(), agent)
+        detection = make_detection()
+
+        runtime.submit_if_needed(
+            now=time.time(),
+            frame_reference=None,
+            detections=[detection],
+            event_reasons=["once"],
+        )
+
+        observation = None
+        deadline = time.time() + 1.0
+        while observation is None and time.time() < deadline:
+            observation = runtime.poll_latest_observation()
+            time.sleep(0.01)
+
+        self.assertIsNotNone(observation)
+        self.assertIsNone(runtime.poll_latest_observation())
+        runtime.shutdown()
 
 
 if __name__ == "__main__":

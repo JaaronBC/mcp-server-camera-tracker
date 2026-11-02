@@ -3,8 +3,20 @@ from __future__ import annotations
 import asyncio
 import json
 import tempfile
+import types
 import unittest
 from pathlib import Path
+
+import sys
+
+if "mcp" not in sys.modules:
+    mcp_stub = types.ModuleType("mcp")
+
+    class _StubClientSession:
+        pass
+
+    mcp_stub.ClientSession = _StubClientSession
+    sys.modules["mcp"] = mcp_stub
 
 from agents.orchestration.runtime.verification_queue import (
     VerificationQueueManager,
@@ -86,6 +98,54 @@ def _verification_envelope(*, message_id: str, track_id: str, timestamp: float) 
 
 
 class TestVerificationQueueRuntime(unittest.IsolatedAsyncioTestCase):
+    async def test_submission_boundary_records_queued_before_completion(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            evidence_root = Path(temp_dir) / "tracking_evidence"
+            _write_validated_envelope(evidence_root, message_id="msg-1", track_id="track-1", timestamp=1000.0)
+
+            manager = VerificationQueueManager(evidence_root_dir=evidence_root, run_id="run-a")
+            queued = manager.submit_request(
+                VerificationQueueRequest(
+                    request_id="req-boundary",
+                    track_id="track-1",
+                    message_id="msg-1",
+                    source="test",
+                    requested_at=1001.0,
+                )
+            )
+            self.assertTrue(queued["accepted"])
+            self.assertEqual(manager.get_recent_results(10), [])
+
+            submissions = manager.get_recent_submissions(10)
+            self.assertEqual(len(submissions), 1)
+            self.assertEqual(submissions[0]["request_id"], "req-boundary")
+            self.assertEqual(submissions[0]["status"], "queued")
+            self.assertTrue(submissions[0]["accepted"])
+            self.assertEqual(submissions[0]["run_id"], "run-a")
+
+    async def test_submission_boundary_rejection_records_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            evidence_root = Path(temp_dir) / "tracking_evidence"
+            manager = VerificationQueueManager(evidence_root_dir=evidence_root)
+
+            rejected = manager.submit_request(
+                VerificationQueueRequest(
+                    request_id="req-invalid",
+                    track_id="",
+                    message_id="msg-1",
+                    source="test",
+                    requested_at=1001.0,
+                )
+            )
+            self.assertFalse(rejected["accepted"])
+            self.assertEqual(rejected["status"], "invalid_track_id")
+
+            submissions = manager.get_recent_submissions(10)
+            self.assertEqual(len(submissions), 1)
+            self.assertEqual(submissions[0]["request_id"], "req-invalid")
+            self.assertEqual(submissions[0]["status"], "invalid_track_id")
+            self.assertEqual(submissions[0]["reason"], "invalid_track_id")
+
     async def test_successful_verification(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             evidence_root = Path(temp_dir) / "tracking_evidence"
@@ -374,5 +434,45 @@ class TestVerificationQueueRuntime(unittest.IsolatedAsyncioTestCase):
                 await asyncio.wait_for(manager._queue.join(), timeout=1.0)
                 self.assertIn("msg-2", seen_message_ids)
                 self.assertNotIn("msg-3", seen_message_ids)
+            finally:
+                await manager.stop()
+
+    async def test_successful_verification_result_serializes_run_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            evidence_root = Path(temp_dir) / "tracking_evidence"
+            _write_validated_envelope(evidence_root, message_id="msg-run", track_id="track-1", timestamp=1000.0)
+
+            async def handler(tool_name, arguments):
+                if tool_name == "get_tracking_visual_evidence":
+                    return _FakeResult({"available": True, "track_id": "track-1"})
+                if tool_name == "verify_tracking_visual_evidence":
+                    return _FakeResult(
+                        {
+                            "available": True,
+                            "envelope": _verification_envelope(
+                                message_id="msg-run",
+                                track_id="track-1",
+                                timestamp=1000.5,
+                            ),
+                        }
+                    )
+                raise RuntimeError("unexpected tool")
+
+            manager = VerificationQueueManager(evidence_root_dir=evidence_root, run_id="run-a")
+            await manager.start(session=_FakeSession(handler))
+            try:
+                accepted = manager.submit_request(
+                    VerificationQueueRequest(
+                        request_id="req-run-id",
+                        track_id="track-1",
+                        message_id="msg-run",
+                        source="test",
+                        requested_at=1001.0,
+                    )
+                )
+                self.assertTrue(accepted["accepted"])
+                await asyncio.wait_for(manager._queue.join(), timeout=1.0)
+                results = manager.get_recent_results(1)
+                self.assertEqual(results[0]["run_id"], "run-a")
             finally:
                 await manager.stop()

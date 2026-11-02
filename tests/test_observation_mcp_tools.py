@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -13,6 +14,7 @@ from mcp.client.stdio import stdio_client
 from agents.contracts import VisualVerificationEnvelope
 from agents.observation.agent_observation import ObservationVisualVerificationError
 from agents.observation.tools import evidence as observation_evidence_tools
+from agents.orchestration.tools import control as orchestration_control
 
 
 def _write_json(path: Path, payload: dict) -> None:
@@ -233,6 +235,47 @@ class TestObservationMcpEvidenceTools(unittest.TestCase):
             observation_evidence_tools.DEFAULT_VISUAL_VERIFICATION_RETRY_LIMIT,
         )
 
+    def test_verify_tracking_visual_evidence_timeout_override_from_env(self) -> None:
+        fake_result = _FakeVerificationResult()
+        with patch.dict(
+            os.environ,
+            {observation_evidence_tools.VISUAL_VERIFICATION_TIMEOUT_ENV: "30"},
+            clear=False,
+        ):
+            with patch.object(
+                observation_evidence_tools,
+                "verify_tracking_evidence_for_observation",
+                return_value=fake_result,
+            ) as verify_mock:
+                result = observation_evidence_tools.verify_tracking_visual_evidence("msg-1")
+
+        self.assertTrue(result["available"])
+        verify_mock.assert_called_once()
+        call_kwargs = verify_mock.call_args.kwargs
+        self.assertEqual(call_kwargs["timeout_seconds"], 30.0)
+
+    def test_verify_tracking_visual_evidence_invalid_timeout_env_falls_back(self) -> None:
+        fake_result = _FakeVerificationResult()
+        with patch.dict(
+            os.environ,
+            {observation_evidence_tools.VISUAL_VERIFICATION_TIMEOUT_ENV: "not-a-number"},
+            clear=False,
+        ):
+            with patch.object(
+                observation_evidence_tools,
+                "verify_tracking_evidence_for_observation",
+                return_value=fake_result,
+            ) as verify_mock:
+                result = observation_evidence_tools.verify_tracking_visual_evidence("msg-1")
+
+        self.assertTrue(result["available"])
+        verify_mock.assert_called_once()
+        call_kwargs = verify_mock.call_args.kwargs
+        self.assertEqual(
+            call_kwargs["timeout_seconds"],
+            observation_evidence_tools.DEFAULT_VISUAL_VERIFICATION_TIMEOUT_SECONDS,
+        )
+
     def test_verify_tracking_visual_evidence_error_is_structured_and_sanitized(self) -> None:
         with patch.object(
             observation_evidence_tools,
@@ -270,6 +313,46 @@ class TestObservationMcpEvidenceTools(unittest.TestCase):
 
         self.assertFalse(result["available"])
         self.assertEqual(result["error_code"], "unsupported_vision_model")
+
+    def test_evidence_remains_retrievable_and_verifiable_after_dashboard_stop(self) -> None:
+        fake_result = _FakeVerificationResult()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            evidence_root = self._build_valid_store(Path(temp_dir), message_id="msg-post-stop")
+            with patch.object(observation_evidence_tools, "EVIDENCE_ROOT_DIR", evidence_root):
+                with (
+                    patch(
+                        "agents.orchestration.tools.control.stop_dashboard_process",
+                        return_value="Dashboard demo stopped.",
+                    ),
+                    patch(
+                        "agents.orchestration.tools.control.dashboard_process_status",
+                        return_value={
+                            "running": False,
+                            "pid": None,
+                            "return_code": None,
+                            "script_path": "agents/dashboard/live_tracking_display.py",
+                        },
+                    ),
+                ):
+                    stop_result = orchestration_control.stop_dashboard_and_confirm(
+                        timeout_seconds=0.5,
+                        poll_interval_seconds=0.01,
+                    )
+
+                self.assertTrue(stop_result["stopped"])
+
+                get_result = observation_evidence_tools.get_tracking_visual_evidence("msg-post-stop")
+                self.assertTrue(get_result["available"])
+
+                with patch.object(
+                    observation_evidence_tools,
+                    "verify_tracking_evidence_for_observation",
+                    return_value=fake_result,
+                ):
+                    verify_result = observation_evidence_tools.verify_tracking_visual_evidence("msg-post-stop")
+
+                self.assertTrue(verify_result["available"])
+                self.assertEqual(verify_result["envelope"]["referenced_message_id"], "msg-1")
 
 
 class TestObservationMcpToolDiscoverability(unittest.IsolatedAsyncioTestCase):

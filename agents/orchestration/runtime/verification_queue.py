@@ -22,6 +22,8 @@ class VerificationQueueRequest:
     message_id: str | None
     source: str
     requested_at: float
+    trigger_event_id: str | None = None
+    trigger_timestamp: float | None = None
 
 
 @dataclass(slots=True)
@@ -41,6 +43,7 @@ class VerificationQueueRecord:
     error_code: str | None
     error: str | None
     details: dict[str, Any]
+    run_id: str | None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -59,6 +62,33 @@ class VerificationQueueRecord:
             "error_code": self.error_code,
             "error": self.error,
             "details": self.details,
+            "run_id": self.run_id,
+        }
+
+
+@dataclass(slots=True)
+class VerificationSubmissionRecord:
+    request_id: str
+    source: str
+    track_id: str
+    message_id: str | None
+    submitted_at: float
+    accepted: bool
+    status: str
+    reason: str | None
+    run_id: str | None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "request_id": self.request_id,
+            "source": self.source,
+            "track_id": self.track_id,
+            "message_id": self.message_id,
+            "submitted_at": self.submitted_at,
+            "accepted": self.accepted,
+            "status": self.status,
+            "reason": self.reason,
+            "run_id": self.run_id,
         }
 
 
@@ -67,6 +97,7 @@ class VerificationQueueManager:
         self,
         *,
         evidence_root_dir: Path,
+        run_id: str | None = None,
         queue_capacity: int = 32,
         max_concurrency: int = 2,
         request_timeout_seconds: float = 8.0,
@@ -76,6 +107,7 @@ class VerificationQueueManager:
         coordinator: AgentCoordinator | None = None,
     ) -> None:
         self._evidence_root_dir = evidence_root_dir
+        self._run_id = run_id
         self._queue_capacity = max(1, int(queue_capacity))
         self._max_concurrency = max(1, int(max_concurrency))
         self._request_timeout_seconds = max(0.1, float(request_timeout_seconds))
@@ -94,6 +126,8 @@ class VerificationQueueManager:
 
         self._records_by_request_id: dict[str, VerificationQueueRecord] = {}
         self._record_order: deque[str] = deque(maxlen=self._result_registry_capacity)
+        self._submission_records_by_request_id: dict[str, VerificationSubmissionRecord] = {}
+        self._submission_order: deque[str] = deque(maxlen=self._result_registry_capacity)
 
     async def start(self, *, session: ClientSession) -> None:
         if self._workers:
@@ -126,6 +160,7 @@ class VerificationQueueManager:
                     coordinator_valid=False,
                     error_code="shutdown_cancelled",
                     error="Request cancelled during shutdown",
+                    run_id=self._run_id,
                     details={},
                 )
             )
@@ -143,13 +178,39 @@ class VerificationQueueManager:
 
     def submit_request(self, request: VerificationQueueRequest) -> dict[str, Any]:
         if self._shutdown:
-            return {"accepted": False, "status": "manager_shutdown"}
+            self._store_submission(
+                VerificationSubmissionRecord(
+                    request_id=request.request_id,
+                    source=request.source,
+                    track_id=request.track_id,
+                    message_id=request.message_id,
+                    submitted_at=time.time(),
+                    accepted=False,
+                    status="manager_shutdown",
+                    reason="manager_shutdown",
+                    run_id=self._run_id,
+                )
+            )
+            return {"accepted": False, "status": "manager_shutdown", "request_id": request.request_id}
 
         now = time.time()
         message_id = request.message_id
         track_id = request.track_id.strip() if isinstance(request.track_id, str) else ""
         if not track_id:
-            return {"accepted": False, "status": "invalid_track_id"}
+            self._store_submission(
+                VerificationSubmissionRecord(
+                    request_id=request.request_id,
+                    source=request.source,
+                    track_id="",
+                    message_id=message_id,
+                    submitted_at=now,
+                    accepted=False,
+                    status="invalid_track_id",
+                    reason="invalid_track_id",
+                    run_id=self._run_id,
+                )
+            )
+            return {"accepted": False, "status": "invalid_track_id", "request_id": request.request_id}
 
         if not isinstance(message_id, str) or not message_id.strip():
             resolved = self._resolve_latest_message_id_for_track(track_id)
@@ -170,6 +231,7 @@ class VerificationQueueManager:
                         coordinator_valid=False,
                         error_code="missing_or_invalid_evidence",
                         error="Unable to resolve validated evidence message_id for track",
+                        run_id=self._run_id,
                         details={},
                     )
                 )
@@ -201,6 +263,7 @@ class VerificationQueueManager:
                     coordinator_valid=False,
                     error_code="queue_saturated",
                     error="Verification queue capacity reached",
+                    run_id=self._run_id,
                     details={"queue_capacity": self._queue_capacity},
                 )
             )
@@ -215,12 +278,34 @@ class VerificationQueueManager:
         )
         self._queue.put_nowait(queue_request)
         self._queued_message_ids.add(message_id)
-        return {"accepted": True, "status": "queued", "message_id": message_id}
+        self._store_submission(
+            VerificationSubmissionRecord(
+                request_id=request.request_id,
+                source=request.source,
+                track_id=track_id,
+                message_id=message_id,
+                submitted_at=now,
+                accepted=True,
+                status="queued",
+                reason=None,
+                run_id=self._run_id,
+            )
+        )
+        return {"accepted": True, "status": "queued", "message_id": message_id, "request_id": request.request_id}
 
     def get_recent_results(self, limit: int = 50) -> list[dict[str, Any]]:
         limited = max(1, int(limit))
         request_ids = list(self._record_order)[-limited:]
         return [self._records_by_request_id[item].to_dict() for item in request_ids if item in self._records_by_request_id]
+
+    def get_recent_submissions(self, limit: int = 50) -> list[dict[str, Any]]:
+        limited = max(1, int(limit))
+        request_ids = list(self._submission_order)[-limited:]
+        return [
+            self._submission_records_by_request_id[item].to_dict()
+            for item in request_ids
+            if item in self._submission_records_by_request_id
+        ]
 
     def _resolve_latest_message_id_for_track(self, track_id: str) -> str | None:
         envelopes_dir = self._evidence_root_dir / "envelopes"
@@ -275,6 +360,7 @@ class VerificationQueueManager:
                     coordinator_valid=False,
                     error_code="cancelled",
                     error="Verification worker cancelled",
+                    run_id=self._run_id,
                     details={},
                 )
                 self._store_record(record)
@@ -298,6 +384,7 @@ class VerificationQueueManager:
                     coordinator_valid=False,
                     error_code="runtime_error",
                     error=f"{type(error).__name__}:{error}",
+                    run_id=self._run_id,
                     details={},
                 )
             self._store_record(record)
@@ -337,6 +424,7 @@ class VerificationQueueManager:
                 coordinator_valid=False,
                 error_code=error_code,
                 error="Evidence unavailable prior to verification",
+                run_id=self._run_id,
                 details=details,
             )
 
@@ -356,6 +444,7 @@ class VerificationQueueManager:
                 coordinator_valid=False,
                 error_code="track_id_mismatch",
                 error="Resolved evidence track_id does not match request track_id",
+                run_id=self._run_id,
                 details={},
             )
 
@@ -380,6 +469,7 @@ class VerificationQueueManager:
                 coordinator_valid=False,
                 error_code="operator_timeout",
                 error="Operator request timeout exceeded",
+                run_id=self._run_id,
                 details={"timeout_seconds": self._request_timeout_seconds},
             )
 
@@ -403,6 +493,7 @@ class VerificationQueueManager:
                 coordinator_valid=False,
                 error_code=str(verify_payload.get("error_code", "provider_failure")),
                 error=str(verify_payload.get("error", "Visual verification failed")),
+                run_id=self._run_id,
                 details=self._sanitize_details(verify_payload.get("details")),
             )
 
@@ -445,6 +536,7 @@ class VerificationQueueManager:
                 coordinator_valid=False,
                 error_code="coordinator_validation_failed",
                 error="Coordinator rejected verification envelope",
+                run_id=self._run_id,
                 details=self._sanitize_details(validation),
             )
 
@@ -466,6 +558,7 @@ class VerificationQueueManager:
             coordinator_valid=True,
             error_code=None,
             error=None,
+            run_id=self._run_id,
             details={
                 "verification_observation_id": envelope.observation_id,
                 "verification_referenced_message_id": envelope.referenced_message_id,
@@ -518,6 +611,7 @@ class VerificationQueueManager:
             coordinator_valid=False,
             error_code=code,
             error=error,
+            run_id=self._run_id,
             details={},
         )
 
@@ -539,6 +633,15 @@ class VerificationQueueManager:
         if request_id not in self._records_by_request_id:
             self._record_order.append(request_id)
         self._records_by_request_id[request_id] = record
+
+    def _store_submission(self, record: VerificationSubmissionRecord) -> None:
+        request_id = record.request_id
+        if request_id not in self._submission_records_by_request_id and len(self._submission_order) == self._result_registry_capacity:
+            oldest = self._submission_order[0]
+            self._submission_records_by_request_id.pop(oldest, None)
+        if request_id not in self._submission_records_by_request_id:
+            self._submission_order.append(request_id)
+        self._submission_records_by_request_id[request_id] = record
 
 
 def build_request_from_track_id(track_id: str, *, source: str) -> VerificationQueueRequest:

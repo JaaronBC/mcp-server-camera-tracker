@@ -109,6 +109,8 @@ async def monitor_movement(
     verification_manager: VerificationQueueManager | None = None,
     verification_request_source_fn: Callable[[], list[Any]] | None = None,
     verification_feedback_publish_fn: Callable[[list[dict[str, Any]]], dict[str, int]] | None = None,
+    verification_results_persist_fn: Callable[[list[dict[str, Any]]], None] | None = None,
+    verification_submissions_persist_fn: Callable[[list[dict[str, Any]]], None] | None = None,
 ) -> None:
     address = [tracking_address[0], tracking_address[1]]
 
@@ -211,10 +213,20 @@ async def monitor_movement(
                     )
                     last_agent_ops_cycle_at = loop.time()
 
-            if verification_manager is not None and verification_feedback_publish_fn is not None:
+            if verification_manager is not None and (
+                verification_feedback_publish_fn is not None
+                or verification_results_persist_fn is not None
+                or verification_submissions_persist_fn is not None
+            ):
                 try:
                     recent_results = verification_manager.get_recent_results(200)
-                    verification_feedback_publish_fn(recent_results)
+                    recent_submissions = verification_manager.get_recent_submissions(500)
+                    if verification_results_persist_fn is not None:
+                        verification_results_persist_fn(recent_results)
+                    if verification_submissions_persist_fn is not None:
+                        verification_submissions_persist_fn(recent_submissions)
+                    if verification_feedback_publish_fn is not None:
+                        verification_feedback_publish_fn(recent_results)
                 except Exception as error:
                     emit(
                         "Verification feedback publication failed "

@@ -8,6 +8,7 @@ from typing import Any, Awaitable, Callable
 from openai import AsyncOpenAI
 
 from .. import llm_call
+from .. import provider_call_budget
 
 DEFAULT_OPENAI_BASE_URL = "https://128.171.10.83:9443/v1"
 DEFAULT_REASONING_AGENT_MODEL = "gpt-oss-120b"
@@ -164,6 +165,8 @@ async def invoke_llm_json_response(
     user_payload: dict[str, Any],
     timeout_seconds: float,
 ) -> dict[str, Any]:
+    reservation = provider_call_budget.reserve_or_raise(provider_call_budget.ROLE_REASONING_TEXT)
+    started = time.perf_counter()
     client = _create_openai_client()
     try:
         response = await asyncio.wait_for(
@@ -176,6 +179,13 @@ async def invoke_llm_json_response(
             ),
             timeout=timeout_seconds,
         )
+        latency_ms = round((time.perf_counter() - started) * 1000.0, 3)
+        provider_call_budget.finalize_provider_call_attempt(
+            reservation,
+            outcome="ok",
+            latency_ms=latency_ms,
+            usage=llm_call.extract_usage_dict(response),
+        )
         if not response.choices:
             raise RuntimeError("llm_empty_response")
         content = response.choices[0].message.content or ""
@@ -183,6 +193,15 @@ async def invoke_llm_json_response(
         if parsed is None:
             raise RuntimeError("llm_invalid_json_response")
         return parsed
+    except Exception as error:
+        latency_ms = round((time.perf_counter() - started) * 1000.0, 3)
+        provider_call_budget.finalize_provider_call_attempt(
+            reservation,
+            outcome="error",
+            latency_ms=latency_ms,
+            error_code=llm_call.classify_llm_error(error),
+        )
+        raise
     finally:
         close_method = getattr(client, "close", None)
         if callable(close_method):

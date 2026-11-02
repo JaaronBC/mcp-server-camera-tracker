@@ -280,6 +280,97 @@ class TestVerificationQueueLiveIntegration(unittest.IsolatedAsyncioTestCase):
             finally:
                 await manager.stop()
 
+    async def test_monitor_loop_persists_submission_artifacts_from_reasoning_cycle(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            evidence_root = Path(temp_dir) / "tracking_evidence"
+            _write_validated_envelope(
+                evidence_root,
+                message_id="msg-persist",
+                track_id="track-persist",
+                timestamp=1000.0,
+            )
+
+            tracking_calls = 0
+            persisted_submissions_snapshots: list[list[dict]] = []
+
+            async def tool_handler(tool_name, arguments):
+                if tool_name == "get_tracking_visual_evidence":
+                    return _FakeResult({"available": True, "track_id": "track-persist"})
+                if tool_name == "verify_tracking_visual_evidence":
+                    return _FakeResult(
+                        {
+                            "available": True,
+                            "envelope": _verification_envelope(
+                                message_id=arguments["message_id"],
+                                track_id="track-persist",
+                                timestamp=1000.5,
+                            ),
+                        }
+                    )
+                raise RuntimeError(f"unexpected tool: {tool_name}")
+
+            async def run_tracking_cycle(_session, _address):
+                nonlocal tracking_calls
+                tracking_calls += 1
+                if tracking_calls >= 4:
+                    raise KeyboardInterrupt()
+                await asyncio.sleep(0)
+
+            async def run_agent_ops_pipeline_fn(_session, **_kwargs):
+                return {
+                    "agent_ops_enabled": True,
+                    "agent_ops_summary_enabled": False,
+                    "depth_summary_enabled": False,
+                    "completed_cycle_increment": 1,
+                    "cycle_payload": {
+                        "events": [
+                            {
+                                "track_id": "track-persist",
+                                "evidence_requested": True,
+                            }
+                        ]
+                    },
+                }
+
+            def persist_submissions(snapshot: list[dict]) -> None:
+                persisted_submissions_snapshots.append(list(snapshot))
+
+            manager = VerificationQueueManager(evidence_root_dir=evidence_root, request_timeout_seconds=2.0)
+            session = _FakeSession(tool_handler)
+            await manager.start(session=session)
+            try:
+                with self.assertRaises(KeyboardInterrupt):
+                    await runtime_flow.monitor_movement(
+                        session,
+                        tracking_address=("127.0.0.1", 5005),
+                        analysis_interval_seconds=0,
+                        enable_agent_ops_heartbeat=True,
+                        agent_ops_interval_seconds=0,
+                        agent_ops_max_tracks=10,
+                        agent_ops_summary_every_cycles=999,
+                        agent_ops_summary_window_size=10,
+                        handoff_degraded_warn_rate=0.1,
+                        handoff_degraded_critical_rate=0.3,
+                        depth_coverage_summary_enabled=False,
+                        depth_coverage_summary_every_cycles=999,
+                        depth_coverage_sample_limit=10,
+                        run_tracking_cycle_fn=run_tracking_cycle,
+                        run_agent_ops_pipeline_fn=run_agent_ops_pipeline_fn,
+                        emit=lambda _msg: None,
+                        verification_manager=manager,
+                        verification_submissions_persist_fn=persist_submissions,
+                    )
+
+                await asyncio.wait_for(manager._queue.join(), timeout=2.0)
+
+                self.assertGreaterEqual(len(persisted_submissions_snapshots), 1)
+                latest_snapshot = persisted_submissions_snapshots[-1]
+                self.assertTrue(any(item.get("track_id") == "track-persist" for item in latest_snapshot))
+                self.assertTrue(any(item.get("status") == "queued" for item in latest_snapshot))
+                self.assertTrue(any(item.get("accepted") is True for item in latest_snapshot))
+            finally:
+                await manager.stop()
+
     async def test_failed_verification_records_structured_failure_and_later_success(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             evidence_root = Path(temp_dir) / "tracking_evidence"

@@ -1,6 +1,7 @@
 # Runtime entrypoint for initialization/bootstrap and runtime lifecycle wiring.
 import argparse
 import asyncio
+import json
 import os
 import sys
 from pathlib import Path
@@ -23,6 +24,9 @@ VERIFICATION_QUEUE_CAPACITY = 32
 VERIFICATION_MAX_CONCURRENCY = 2
 VERIFICATION_REQUEST_TIMEOUT_SECONDS = 8.0
 VERIFICATION_RESULTS_CAPACITY = 512
+LATEST_VERIFICATION_QUEUE_RESULTS_PATH = PROJECT_ROOT / "captures" / "latest_verification_queue_results.json"
+LATEST_VERIFICATION_QUEUE_SUBMISSIONS_PATH = PROJECT_ROOT / "captures" / "latest_verification_queue_submissions.json"
+LATEST_OPERATOR_TRACKING_FEEDBACK_PATH = PROJECT_ROOT / "captures" / "operator_tracking_feedback.json"
 
 get_result_text = runtime_agent.get_result_text
 get_result_json_object = runtime_agent.get_result_json_object
@@ -47,6 +51,44 @@ start_orchestration_agents = runtime_agent.start_orchestration_agents
 run_agent_ops_cycle = runtime_agent.run_agent_ops_cycle
 run_agent_ops_health_summary = runtime_agent.run_agent_ops_health_summary
 run_depth_coverage_summary = runtime_agent.run_depth_coverage_summary
+
+
+def _persist_latest_verification_queue_results(results: list[dict[str, Any]]) -> None:
+    _persist_json_artifact(LATEST_VERIFICATION_QUEUE_RESULTS_PATH, results)
+
+
+def _persist_latest_verification_queue_submissions(submissions: list[dict[str, Any]]) -> None:
+    _persist_json_artifact(LATEST_VERIFICATION_QUEUE_SUBMISSIONS_PATH, submissions)
+
+
+def _persist_json_artifact(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_suffix(".tmp")
+    temp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    temp_path.replace(path)
+
+
+def _resolve_artifact_path(default_path: Path, env_var_name: str) -> Path:
+    raw = os.getenv(env_var_name, "").strip()
+    if not raw:
+        return default_path
+    return Path(raw).expanduser().resolve()
+
+
+def _resolve_verification_artifact_paths() -> tuple[Path, Path, Path]:
+    results_path = _resolve_artifact_path(
+        LATEST_VERIFICATION_QUEUE_RESULTS_PATH,
+        "PHASE16E_VERIFICATION_RESULTS_PATH",
+    )
+    submissions_path = _resolve_artifact_path(
+        LATEST_VERIFICATION_QUEUE_SUBMISSIONS_PATH,
+        "PHASE16E_VERIFICATION_SUBMISSIONS_PATH",
+    )
+    feedback_path = _resolve_artifact_path(
+        LATEST_OPERATOR_TRACKING_FEEDBACK_PATH,
+        "PHASE16E_OPERATOR_FEEDBACK_PATH",
+    )
+    return results_path, submissions_path, feedback_path
 
 def load_config(args: list[str] | None = None) -> runtime_app.RuntimeConfig:
     """Build runtime configuration from CLI args and environment defaults."""
@@ -173,18 +215,28 @@ async def monitor_movement(
         run_agent_ops_pipeline_fn=_run_agent_ops_pipeline,
         analysis_interval_seconds=ANALYSIS_INTERVAL_SECONDS,
     )
+    run_id = os.getenv("PHASE16E_RUN_ID", "").strip() or None
+    results_path, submissions_path, feedback_path = _resolve_verification_artifact_paths()
+
+    def persist_results(results: list[dict[str, Any]]) -> None:
+        _persist_json_artifact(results_path, results)
+
+    def persist_submissions(submissions: list[dict[str, Any]]) -> None:
+        _persist_json_artifact(submissions_path, submissions)
+
     verification_manager: VerificationQueueManager | None = None
     verification_feedback_publisher: VerificationFeedbackPublisher | None = None
     if enable_visual_verification_queue:
         verification_manager = VerificationQueueManager(
             evidence_root_dir=PROJECT_ROOT / "captures" / "tracking_evidence",
+            run_id=run_id,
             queue_capacity=VERIFICATION_QUEUE_CAPACITY,
             max_concurrency=VERIFICATION_MAX_CONCURRENCY,
             request_timeout_seconds=VERIFICATION_REQUEST_TIMEOUT_SECONDS,
             result_registry_capacity=VERIFICATION_RESULTS_CAPACITY,
         )
         verification_feedback_publisher = VerificationFeedbackPublisher(
-            artifact_path=PROJECT_ROOT / "captures" / "operator_tracking_feedback.json",
+            artifact_path=feedback_path,
             max_records=256,
             record_ttl_seconds=45.0,
         )
@@ -205,6 +257,16 @@ async def monitor_movement(
             depth_coverage_sample_limit=depth_coverage_sample_limit,
             verification_manager=verification_manager,
             verification_request_source_fn=verification_request_source_fn,
+            verification_results_persist_fn=(
+                None
+                if verification_manager is None
+                else persist_results
+            ),
+            verification_submissions_persist_fn=(
+                None
+                if verification_manager is None
+                else persist_submissions
+            ),
             verification_feedback_publish_fn=(
                 None
                 if verification_feedback_publisher is None

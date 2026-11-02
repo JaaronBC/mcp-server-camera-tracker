@@ -6,6 +6,7 @@ import base64
 import json
 import os
 import time
+from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,6 +18,8 @@ from openai import AsyncOpenAI
 
 from ..contracts import DetectionCandidate, VisualAssociationProposal
 from ..coordinator import AgentCoordinator
+from .. import llm_call
+from .. import provider_call_budget
 
 TRACKING_VLM_MODEL = "qwen-3.8-27b"
 DEFAULT_OPENAI_BASE_URL = "https://128.171.10.83:9443/v1"
@@ -140,6 +143,17 @@ class LLMVisualTrackingAgent:
         if frame_reference:
             user_content.append({"type": "image_url", "image_url": {"url": frame_reference}})
 
+        try:
+            reservation = provider_call_budget.reserve_or_raise(provider_call_budget.ROLE_TRACKING_VLM)
+        except provider_call_budget.ProviderCallBudgetExceeded:
+            return VisualTrackingAgentResult(
+                available=False,
+                proposals=[],
+                uncertainty_flags=["vlm_budget_exhausted"],
+                supporting_evidence=[],
+                latency_ms=0.0,
+                error="vlm_budget_exhausted",
+            )
         started = time.perf_counter()
         try:
             response = await asyncio.wait_for(
@@ -155,7 +169,19 @@ class LLMVisualTrackingAgent:
                 ),
                 timeout=request_timeout_seconds,
             )
+            provider_call_budget.finalize_provider_call_attempt(
+                reservation,
+                outcome="ok",
+                latency_ms=(time.perf_counter() - started) * 1000.0,
+                usage=llm_call.extract_usage_dict(response),
+            )
         except asyncio.TimeoutError:
+            provider_call_budget.finalize_provider_call_attempt(
+                reservation,
+                outcome="error",
+                latency_ms=(time.perf_counter() - started) * 1000.0,
+                error_code="timeout",
+            )
             return VisualTrackingAgentResult(
                 available=False,
                 proposals=[],
@@ -165,6 +191,12 @@ class LLMVisualTrackingAgent:
                 error="vlm_timeout",
             )
         except Exception:
+            provider_call_budget.finalize_provider_call_attempt(
+                reservation,
+                outcome="error",
+                latency_ms=(time.perf_counter() - started) * 1000.0,
+                error_code="runtime_error",
+            )
             return VisualTrackingAgentResult(
                 available=False,
                 proposals=[],
@@ -238,7 +270,21 @@ class AsyncVisualTrackingRuntime:
         self._executor = ThreadPoolExecutor(max_workers=1)
         self._pending_future: Future | None = None
         self._last_started_at = 0.0
-        self._latest_observation = None
+        self._completed_observations: deque = deque()
+
+    def _consume_completed_future_locked(self) -> None:
+        pending_future = self._pending_future
+        if pending_future is None or not pending_future.done():
+            return
+
+        self._pending_future = None
+        try:
+            observation = pending_future.result()
+        except Exception:
+            observation = None
+
+        if observation is not None:
+            self._completed_observations.append(observation)
 
     def submit_if_needed(
         self,
@@ -250,6 +296,7 @@ class AsyncVisualTrackingRuntime:
     ) -> bool:
         # Implements submit if needed behavior for this module.
         with self._lock:
+            self._consume_completed_future_locked()
             if self._pending_future is not None and not self._pending_future.done():
                 return False
             if (now - self._last_started_at) < self._min_invoke_interval_seconds and not event_reasons:
@@ -268,12 +315,10 @@ class AsyncVisualTrackingRuntime:
     def poll_latest_observation(self):
         # Implements poll latest observation behavior for this module.
         with self._lock:
-            if self._pending_future is not None and self._pending_future.done():
-                self._latest_observation = self._pending_future.result()
-                self._pending_future = None
-            value = self._latest_observation
-            self._latest_observation = None
-            return value
+            self._consume_completed_future_locked()
+            if not self._completed_observations:
+                return None
+            return self._completed_observations.popleft()
 
     def is_busy(self) -> bool:
         # Implements is busy behavior for this module.

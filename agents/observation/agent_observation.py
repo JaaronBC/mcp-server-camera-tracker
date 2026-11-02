@@ -13,6 +13,7 @@ from openai import AsyncOpenAI
 from ..contracts import TrackingEvidenceEnvelope, VisualVerificationEnvelope
 from ..coordinator import AgentCoordinator
 from .. import llm_call
+from .. import provider_call_budget
 from .evidence_consumption import (
     ObservationEvidenceConsumptionError,
     ObservationEvidenceRequest,
@@ -125,6 +126,27 @@ def _coerce_bool(value: Any, default: bool = False) -> bool:
 
 def _coerce_str(value: Any, default: str) -> str:
     return llm_call.coerce_str(value, default)
+
+
+def _derive_timeout_source(error: Exception) -> str | None:
+    if isinstance(error, asyncio.TimeoutError):
+        return "local_asyncio_deadline"
+
+    exception_type = type(error)
+    name = exception_type.__name__.lower()
+    module = exception_type.__module__.lower()
+    text = f"{exception_type.__name__}:{error}".lower()
+
+    if "timeout" not in name and "timeout" not in text:
+        return None
+
+    if "httpx" in module or "openai" in module:
+        return "sdk_http_timeout"
+
+    if any(token in name for token in ("readtimeout", "connecttimeout", "writetimeout", "pooltimeout", "apitimeouterror")):
+        return "sdk_http_timeout"
+
+    return "timeout_unknown_source"
 
 
 def _supports_vision_inputs(model: str) -> bool:
@@ -464,6 +486,8 @@ async def invoke_llm_json_response(
     user_payload: dict[str, Any],
     timeout_seconds: float,
 ) -> dict[str, Any]:
+    reservation = provider_call_budget.reserve_or_raise(provider_call_budget.ROLE_OBSERVATION_TEXT)
+    started = time.perf_counter()
     client = _create_openai_client()
     try:
         response = await asyncio.wait_for(
@@ -476,6 +500,13 @@ async def invoke_llm_json_response(
             ),
             timeout=timeout_seconds,
         )
+        latency_ms = round((time.perf_counter() - started) * 1000.0, 3)
+        provider_call_budget.finalize_provider_call_attempt(
+            reservation,
+            outcome="ok",
+            latency_ms=latency_ms,
+            usage=llm_call.extract_usage_dict(response),
+        )
         if not response.choices:
             raise RuntimeError("llm_empty_response")
         content = response.choices[0].message.content or ""
@@ -483,6 +514,15 @@ async def invoke_llm_json_response(
         if parsed is None:
             raise RuntimeError("llm_invalid_json_response")
         return parsed
+    except Exception as error:
+        latency_ms = round((time.perf_counter() - started) * 1000.0, 3)
+        provider_call_budget.finalize_provider_call_attempt(
+            reservation,
+            outcome="error",
+            latency_ms=latency_ms,
+            error_code=llm_call.classify_llm_error(error),
+        )
+        raise
     finally:
         close_method = getattr(client, "close", None)
         if callable(close_method):
@@ -561,8 +601,11 @@ async def invoke_visual_verification_llm_response(
     image_data_url: str,
     timeout_seconds: float,
 ) -> dict[str, Any]:
-    client = _create_openai_client()
+    reservation = provider_call_budget.reserve_or_raise(provider_call_budget.ROLE_OBSERVATION_VISUAL)
+    started = time.perf_counter()
+    client: AsyncOpenAI | None = None
     try:
+        client = _create_openai_client()
         response = await asyncio.wait_for(
             client.chat.completions.create(
                 model=model,
@@ -579,6 +622,13 @@ async def invoke_visual_verification_llm_response(
             ),
             timeout=timeout_seconds,
         )
+        latency_ms = round((time.perf_counter() - started) * 1000.0, 3)
+        provider_call_budget.finalize_provider_call_attempt(
+            reservation,
+            outcome="ok",
+            latency_ms=latency_ms,
+            usage=llm_call.extract_usage_dict(response),
+        )
         if not response.choices:
             raise RuntimeError("llm_empty_response")
         content = response.choices[0].message.content or ""
@@ -586,12 +636,22 @@ async def invoke_visual_verification_llm_response(
         if parsed is None:
             raise RuntimeError("llm_invalid_json_response")
         return parsed
+    except Exception as error:
+        latency_ms = round((time.perf_counter() - started) * 1000.0, 3)
+        provider_call_budget.finalize_provider_call_attempt(
+            reservation,
+            outcome="error",
+            latency_ms=latency_ms,
+            error_code=llm_call.classify_llm_error(error),
+        )
+        raise
     finally:
-        close_method = getattr(client, "close", None)
-        if callable(close_method):
-            close_result = close_method()
-            if asyncio.iscoroutine(close_result):
-                await close_result
+        if client is not None:
+            close_method = getattr(client, "close", None)
+            if callable(close_method):
+                close_result = close_method()
+                if asyncio.iscoroutine(close_result):
+                    await close_result
 
 
 def verify_tracking_evidence_for_observation(
@@ -665,9 +725,13 @@ def verify_tracking_evidence_for_observation(
     attempts = selected_retry_limit + 1
     last_error: str | None = None
     last_error_code: str | None = None
+    last_exception_class: str | None = None
+    last_timeout_source: str | None = None
+    last_attempt_latency_ms: float | None = None
     llm_payload: dict[str, Any] | None = None
     started = time.perf_counter()
     for attempt_index in range(attempts):
+        attempt_started = time.perf_counter()
         try:
             llm_payload = asyncio.run(
                 invoke(
@@ -691,9 +755,13 @@ def verify_tracking_evidence_for_observation(
         except Exception as error:
             last_error_code = classify_error(error)
             last_error = f"{type(error).__name__}:{error}"
+            last_exception_class = type(error).__name__
+            last_timeout_source = _derive_timeout_source(error)
+            last_attempt_latency_ms = round((time.perf_counter() - attempt_started) * 1000.0, 3)
             if attempt_index < attempts - 1 and selected_backoff > 0:
                 time.sleep(selected_backoff * (2**attempt_index))
     else:
+        latency_ms = round((time.perf_counter() - started) * 1000.0, 3)
         raise ObservationVisualVerificationError(
             "provider_failure",
             "Visual verification provider invocation failed",
@@ -702,6 +770,12 @@ def verify_tracking_evidence_for_observation(
                 "error_code": last_error_code or "runtime_error",
                 "model": selected_model,
                 "attempts": attempts,
+                "retry_count": max(0, attempts - 1),
+                "latency_ms": latency_ms,
+                "attempt_latency_ms": last_attempt_latency_ms,
+                "configured_timeout_seconds": selected_timeout,
+                "exception_class": last_exception_class,
+                "timeout_source": last_timeout_source,
             },
         )
 

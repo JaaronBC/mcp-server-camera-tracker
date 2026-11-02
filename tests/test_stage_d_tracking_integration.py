@@ -337,8 +337,20 @@ class TestStageDTrackingIntegration(unittest.IsolatedAsyncioTestCase):
                     "rejection_reasons": [],
                 },
             )
+            invalid_packaged = packager.package_detection(
+                detection=_detection("track-matrix", "det-invalid", 2001.1),
+                timestamp=2001.1,
+                frame_evidence=frame_ref,
+                update_payload={
+                    "detection_id": "det-invalid",
+                    "resolved_track_id": "track-matrix",
+                    "accepted": True,
+                    "rejection_reasons": [],
+                },
+            )
             self.assertTrue(old_packaged.validation.get("valid", False))
             self.assertTrue(new_packaged.validation.get("valid", False))
+            self.assertTrue(invalid_packaged.validation.get("valid", False))
 
             async def handler(tool_name, arguments):
                 message_id = str(arguments.get("message_id", ""))
@@ -352,6 +364,26 @@ class TestStageDTrackingIntegration(unittest.IsolatedAsyncioTestCase):
                         return _FakeResult({"available": True})
                     if message_id == "failure-msg":
                         return _FakeResult({"available": False, "error_code": "provider_failure", "error": "upstream"})
+                    if message_id == invalid_packaged.envelope.message_id:
+                        return _FakeResult(
+                            {
+                                "available": True,
+                                "envelope": _verification_envelope(
+                                    message_id=message_id,
+                                    track_id="track-matrix",
+                                    timestamp=2001.2,
+                                    source_evidence_refs=["evidence://frame/not-in-evidence"],
+                                ),
+                            }
+                        )
+                    if message_id == "budget-msg":
+                        return _FakeResult(
+                            {
+                                "available": False,
+                                "error_code": "budget_exhausted",
+                                "error": "provider budget exhausted",
+                            }
+                        )
                     if message_id in {old_packaged.envelope.message_id, new_packaged.envelope.message_id}:
                         return _FakeResult(
                             {
@@ -389,6 +421,12 @@ class TestStageDTrackingIntegration(unittest.IsolatedAsyncioTestCase):
                 manager.submit_request(
                     VerificationQueueRequest("req-failure", "track-matrix", "failure-msg", "stage_d", 2001.7)
                 )
+                manager.submit_request(
+                    VerificationQueueRequest("req-invalid", "track-matrix", invalid_packaged.envelope.message_id, "stage_d", 2001.8)
+                )
+                manager.submit_request(
+                    VerificationQueueRequest("req-budget", "track-matrix", "budget-msg", "stage_d", 2001.9)
+                )
                 await asyncio.wait_for(manager._queue.join(), timeout=4.0)
 
                 records = manager.get_recent_results(100)
@@ -398,6 +436,8 @@ class TestStageDTrackingIntegration(unittest.IsolatedAsyncioTestCase):
                 expired_record = next(item for item in records if item["request_id"] == "req-expired")
                 timeout_record = next(item for item in records if item["request_id"] == "req-timeout")
                 failure_record = next(item for item in records if item["request_id"] == "req-failure")
+                invalid_record = next(item for item in records if item["request_id"] == "req-invalid")
+                budget_record = next(item for item in records if item["request_id"] == "req-budget")
 
                 self.assertEqual(old_record["status"], "completed")
                 self.assertEqual(old_record["current_applicability"], "historical")
@@ -406,6 +446,12 @@ class TestStageDTrackingIntegration(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(expired_record["validation_outcome"], "evidence_unavailable")
                 self.assertEqual(timeout_record["status"], "timed_out")
                 self.assertEqual(failure_record["status"], "failed")
+                self.assertEqual(invalid_record["status"], "rejected")
+                self.assertEqual(invalid_record["validation_outcome"], "coordinator_validation_failed")
+                self.assertEqual(invalid_record["error_code"], "coordinator_validation_failed")
+                self.assertEqual(budget_record["status"], "failed")
+                self.assertEqual(budget_record["validation_outcome"], "provider_failure")
+                self.assertEqual(budget_record["error_code"], "budget_exhausted")
 
                 publisher = VerificationFeedbackPublisher(
                     artifact_path=feedback_artifact_path,
@@ -596,6 +642,33 @@ class TestStageDTrackingIntegration(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("possible_id_switch", reasons)
                 self.assertIn("contradicting_evidence_present", reasons)
                 self.assertIn("trusted_evidence_unavailable", reasons)
+
+                delayed_feedback = dict(base_feedback)
+                delayed_feedback["feedback_id"] = "obsfeedback-stage-d-delayed"
+                delayed_feedback["verification_request_id"] = "req-stage-d-delayed"
+                delayed_feedback["verification_timestamp"] = 2002.0
+                delayed_feedback["details"] = dict(base_feedback["details"])
+                stale_verification_result = TrackingEstimateProposalEngine(
+                    coordinator=coordinator,
+                    evidence_root_dir=evidence_root,
+                    prediction_horizon_seconds=0.5,
+                    max_effective_horizon_seconds=30.0,
+                    max_evidence_age_seconds=30.0,
+                    max_verification_age_seconds=5.0,
+                ).generate(
+                    accepted_feedback_records=[delayed_feedback],
+                    current_tracks={"track-matrix": measured_track},
+                    now_timestamp=2015.0,
+                )
+                self.assertEqual(stale_verification_result["accepted_count"], 0)
+                stale_reasons = {item.get("reason") for item in stale_verification_result["rejected"]}
+                self.assertIn("coordinator_rejected", stale_reasons)
+                stale_errors = [
+                    err
+                    for item in stale_verification_result["rejected"]
+                    for err in item.get("errors", [])
+                ]
+                self.assertIn("stale_verification", stale_errors)
                 self.assertEqual(measured_track.to_dict(), measured_before)
             finally:
                 await manager.stop()
