@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .evidence_protection import EvidenceProtectionLock, load_active_protected_frame_ids
+
 
 def _safe_value(value: str | None, fallback: str) -> str:
     if isinstance(value, str) and value.strip():
@@ -40,8 +42,10 @@ class TrackingEvidenceStore:
         *,
         max_age_seconds: float = 30.0,
         max_frame_records: int = 120,
+        max_protected_frames: int = 32,
         max_detection_records: int = 2000,
         max_envelope_records: int = 4000,
+        cleanup_lock_timeout_seconds: float = 0.0,
         process_nonce: str | None = None,
         clock: Any | None = None,
     ) -> None:
@@ -51,8 +55,10 @@ class TrackingEvidenceStore:
         self._envelopes_dir = root_dir / "envelopes"
         self._max_age_seconds = max(1.0, float(max_age_seconds))
         self._max_frame_records = max(1, int(max_frame_records))
+        self._max_protected_frames = min(self._max_frame_records, max(0, int(max_protected_frames)))
         self._max_detection_records = max(1, int(max_detection_records))
         self._max_envelope_records = max(1, int(max_envelope_records))
+        self._cleanup_lock_timeout_seconds = max(0.0, float(cleanup_lock_timeout_seconds))
         self._clock = clock or time.time
 
         self._process_nonce = _safe_value(process_nonce, "") if process_nonce else uuid.uuid4().hex[:12]
@@ -112,11 +118,22 @@ class TrackingEvidenceStore:
             "height": int(height),
             "process_nonce": self._process_nonce,
         }
-        _json_write(metadata_path, metadata)
 
-        with self._lock:
-            self._pending_frames.add(frame_id)
-            self._frame_ids.append(frame_id)
+        admission = self._admit_frame_slot(
+            now_timestamp=now,
+            new_frame_id=frame_id,
+            metadata=metadata,
+            metadata_path=metadata_path,
+        )
+        if not admission.get("admitted"):
+            status = str(admission.get("status") or "dropped_storage_error")
+            return FrameEvidenceRecord(
+                frame_reference=frame_reference,
+                frame_id=frame_id,
+                timestamp=float(timestamp),
+                expires_at=expires_at,
+                status=status,
+            )
 
         queued = True
         try:
@@ -363,20 +380,40 @@ class TrackingEvidenceStore:
             return
         self.cleanup(now_timestamp=now)
 
-    def cleanup(self, *, now_timestamp: float | None = None) -> dict[str, int]:
-        now = float(self._clock()) if now_timestamp is None else float(now_timestamp)
-        removed_expired = 0
-        removed_capacity = 0
+    def _admit_frame_slot(
+        self,
+        *,
+        now_timestamp: float,
+        new_frame_id: str,
+        metadata: dict[str, Any],
+        metadata_path: Path,
+    ) -> dict[str, Any]:
+        protection_lock = EvidenceProtectionLock(self._root_dir)
+        if not protection_lock.acquire(timeout_seconds=self._cleanup_lock_timeout_seconds):
+            return {"admitted": False, "status": "dropped_storage_lock_unavailable"}
 
-        for metadata_file in self._refs_dir.glob("*.json"):
-            try:
-                payload = json.loads(metadata_file.read_text(encoding="utf-8"))
-            except Exception:
-                continue
-            if not isinstance(payload, dict):
-                continue
-            expires_at = payload.get("expires_at")
-            if isinstance(expires_at, (int, float)) and now > float(expires_at):
+        try:
+            protected_frame_ids, _ = load_active_protected_frame_ids(
+                evidence_root_dir=self._root_dir,
+                now_timestamp=float(now_timestamp),
+                max_protected_frames=self._max_protected_frames,
+            )
+
+            frame_records = self._sorted_records(kind="frame")
+            while len(frame_records) >= self._max_frame_records:
+                evict_index: int | None = None
+                for index, (_, payload, _) in enumerate(frame_records):
+                    frame_id = payload.get("id")
+                    if isinstance(frame_id, str) and frame_id in protected_frame_ids:
+                        continue
+                    evict_index = index
+                    break
+
+                if evict_index is None:
+                    return {"admitted": False, "status": "dropped_storage_full_protected"}
+
+                _, payload, metadata_file = frame_records.pop(evict_index)
+                frame_id = payload.get("id")
                 frame_path = payload.get("frame_path")
                 if isinstance(frame_path, str):
                     try:
@@ -384,42 +421,141 @@ class TrackingEvidenceStore:
                     except Exception:
                         pass
                 metadata_file.unlink(missing_ok=True)
-                removed_expired += 1
+                if isinstance(frame_id, str):
+                    with self._lock:
+                        self._pending_frames.discard(frame_id)
 
-        frame_records = self._sorted_records(kind="frame")
-        while len(frame_records) > self._max_frame_records:
-            _, payload, metadata_file = frame_records.pop(0)
-            frame_path = payload.get("frame_path")
-            if isinstance(frame_path, str):
+            _json_write(metadata_path, metadata)
+            with self._lock:
+                self._pending_frames.add(new_frame_id)
+                self._frame_ids.append(new_frame_id)
+
+            return {"admitted": True, "status": "ok"}
+        except Exception:
+            return {"admitted": False, "status": "dropped_storage_error"}
+        finally:
+            protection_lock.release()
+
+    def cleanup(self, *, now_timestamp: float | None = None) -> dict[str, int]:
+        now = float(self._clock()) if now_timestamp is None else float(now_timestamp)
+        removed_expired = 0
+        removed_capacity = 0
+        capacity_blocked_all_protected = 0
+
+        protection_lock = EvidenceProtectionLock(self._root_dir)
+        if not protection_lock.acquire(timeout_seconds=self._cleanup_lock_timeout_seconds):
+            return {
+                "removed_expired": 0,
+                "removed_capacity": 0,
+                "capacity_blocked_all_protected": 0,
+                "lock_skipped": 1,
+                "leases_pruned_expired": 0,
+                "leases_pruned_malformed": 0,
+                "leases_pruned_stale": 0,
+                "leases_pruned_overflow": 0,
+                "leases_over_budget": 0,
+            }
+
+        lease_stats = {
+            "leases_pruned_expired": 0,
+            "leases_pruned_malformed": 0,
+            "leases_pruned_stale": 0,
+            "leases_pruned_overflow": 0,
+            "leases_over_budget": 0,
+        }
+
+        try:
+            protected_frame_ids, lease_stats = load_active_protected_frame_ids(
+                evidence_root_dir=self._root_dir,
+                now_timestamp=now,
+                max_protected_frames=self._max_protected_frames,
+            )
+
+            for metadata_file in self._refs_dir.glob("*.json"):
                 try:
-                    Path(frame_path).unlink(missing_ok=True)
+                    payload = json.loads(metadata_file.read_text(encoding="utf-8"))
                 except Exception:
-                    pass
-            metadata_file.unlink(missing_ok=True)
-            removed_capacity += 1
+                    continue
+                if not isinstance(payload, dict):
+                    continue
 
-        detection_records = self._sorted_records(kind="detection")
-        while len(detection_records) > self._max_detection_records:
-            _, _, metadata_file = detection_records.pop(0)
-            metadata_file.unlink(missing_ok=True)
-            removed_capacity += 1
+                frame_id = payload.get("id") if payload.get("kind") == "frame" else None
+                if isinstance(frame_id, str) and frame_id in protected_frame_ids:
+                    continue
 
-        envelope_records = sorted(
-            [
-                (path.stat().st_mtime, path)
-                for path in self._envelopes_dir.glob("*.json")
-                if path.is_file()
-            ],
-            key=lambda item: item[0],
-        )
-        while len(envelope_records) > self._max_envelope_records:
-            _, path = envelope_records.pop(0)
-            path.unlink(missing_ok=True)
-            removed_capacity += 1
+                expires_at = payload.get("expires_at")
+                if isinstance(expires_at, (int, float)) and now > float(expires_at):
+                    frame_path = payload.get("frame_path")
+                    if isinstance(frame_path, str):
+                        try:
+                            Path(frame_path).unlink(missing_ok=True)
+                        except Exception:
+                            pass
+                    metadata_file.unlink(missing_ok=True)
+                    if isinstance(frame_id, str):
+                        with self._lock:
+                            self._pending_frames.discard(frame_id)
+                    removed_expired += 1
+
+            frame_records = self._sorted_records(kind="frame")
+            while len(frame_records) > self._max_frame_records:
+                evict_index: int | None = None
+                for index, (_, payload, _) in enumerate(frame_records):
+                    frame_id = payload.get("id")
+                    if isinstance(frame_id, str) and frame_id in protected_frame_ids:
+                        continue
+                    evict_index = index
+                    break
+
+                if evict_index is None:
+                    capacity_blocked_all_protected = max(0, len(frame_records) - self._max_frame_records)
+                    break
+
+                _, payload, metadata_file = frame_records.pop(evict_index)
+                frame_id = payload.get("id")
+                frame_path = payload.get("frame_path")
+                if isinstance(frame_path, str):
+                    try:
+                        Path(frame_path).unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                metadata_file.unlink(missing_ok=True)
+                if isinstance(frame_id, str):
+                    with self._lock:
+                        self._pending_frames.discard(frame_id)
+                removed_capacity += 1
+
+            detection_records = self._sorted_records(kind="detection")
+            while len(detection_records) > self._max_detection_records:
+                _, _, metadata_file = detection_records.pop(0)
+                metadata_file.unlink(missing_ok=True)
+                removed_capacity += 1
+
+            envelope_records = sorted(
+                [
+                    (path.stat().st_mtime, path)
+                    for path in self._envelopes_dir.glob("*.json")
+                    if path.is_file()
+                ],
+                key=lambda item: item[0],
+            )
+            while len(envelope_records) > self._max_envelope_records:
+                _, path = envelope_records.pop(0)
+                path.unlink(missing_ok=True)
+                removed_capacity += 1
+        finally:
+            protection_lock.release()
 
         return {
             "removed_expired": removed_expired,
             "removed_capacity": removed_capacity,
+            "capacity_blocked_all_protected": capacity_blocked_all_protected,
+            "lock_skipped": 0,
+            "leases_pruned_expired": lease_stats.get("leases_pruned_expired", 0),
+            "leases_pruned_malformed": lease_stats.get("leases_pruned_malformed", 0),
+            "leases_pruned_stale": lease_stats.get("leases_pruned_stale", 0),
+            "leases_pruned_overflow": lease_stats.get("leases_pruned_overflow", 0),
+            "leases_over_budget": lease_stats.get("leases_over_budget", 0),
         }
 
     def _sorted_records(self, *, kind: str) -> list[tuple[float, dict[str, Any], Path]]:
@@ -468,6 +604,31 @@ class TrackingEvidenceStore:
         if not isinstance(metadata_path, Path):
             return
 
+        expected_frame_path = str(frame_path)
+
+        if not metadata_path.is_file():
+            try:
+                frame_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            with self._lock:
+                self._pending_frames.discard(frame_id)
+            return
+
+        metadata_before_write = self._load_metadata(frame_id)
+        if (
+            not isinstance(metadata_before_write, dict)
+            or metadata_before_write.get("status") != "pending"
+            or metadata_before_write.get("frame_path") != expected_frame_path
+        ):
+            try:
+                frame_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            with self._lock:
+                self._pending_frames.discard(frame_id)
+            return
+
         status = "available"
         try:
             import cv2
@@ -479,18 +640,58 @@ class TrackingEvidenceStore:
         except Exception:
             status = "write_failed"
 
-        metadata = self._load_metadata(frame_id) or {}
-        metadata["status"] = status
-        _json_write(metadata_path, metadata)
-
-        with self._lock:
-            self._pending_frames.discard(frame_id)
-
-        if status != "available":
+        protection_lock = EvidenceProtectionLock(self._root_dir)
+        if not protection_lock.acquire(timeout_seconds=self._cleanup_lock_timeout_seconds):
             try:
                 frame_path.unlink(missing_ok=True)
             except Exception:
                 pass
+            with self._lock:
+                self._pending_frames.discard(frame_id)
+            return
+
+        try:
+            metadata_after_write = self._load_metadata(frame_id)
+            if (
+                not isinstance(metadata_after_write, dict)
+                or metadata_after_write.get("status") != "pending"
+                or metadata_after_write.get("frame_path") != expected_frame_path
+            ):
+                try:
+                    frame_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                with self._lock:
+                    self._pending_frames.discard(frame_id)
+                return
+
+            metadata_after_write["status"] = status
+            try:
+                _json_write(metadata_path, metadata_after_write)
+            except Exception:
+                status = "write_failed"
+                fallback_metadata = self._load_metadata(frame_id)
+                if (
+                    isinstance(fallback_metadata, dict)
+                    and fallback_metadata.get("status") == "pending"
+                    and fallback_metadata.get("frame_path") == expected_frame_path
+                ):
+                    fallback_metadata["status"] = "write_failed"
+                    try:
+                        _json_write(metadata_path, fallback_metadata)
+                    except Exception:
+                        pass
+
+            if status != "available":
+                try:
+                    frame_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+        finally:
+            protection_lock.release()
+
+        with self._lock:
+            self._pending_frames.discard(frame_id)
 
 
 class TrackingEvidenceResolver:

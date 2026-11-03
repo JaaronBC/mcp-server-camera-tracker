@@ -3,6 +3,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+from pathlib import Path
+import time
 from typing import Any, Awaitable, Callable
 
 from mcp import ClientSession
@@ -53,6 +56,74 @@ def _emit_message(message: str, emit: Callable[[str], None] | None) -> None:
         emit(message)
 
 
+def _resolve_submission_decisions_path() -> Path | None:
+    explicit_path = os.getenv("PHASE16E_VERIFICATION_SUBMISSION_DECISIONS_PATH", "").strip()
+    if explicit_path:
+        return Path(explicit_path).expanduser().resolve()
+    results_path = os.getenv("PHASE16E_VERIFICATION_RESULTS_PATH", "").strip()
+    if results_path:
+        return Path(results_path).expanduser().resolve().parent / "verification_submission_decisions.jsonl"
+    return None
+
+
+def _append_submission_decision(payload: dict[str, Any]) -> None:
+    path = _resolve_submission_decisions_path()
+    if path is None:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    serialized = dict(payload)
+    serialized["logged_at"] = time.time()
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(f"{json.dumps(serialized)}\n")
+
+
+def _record_startup_activation_submission_skips(events: list[dict[str, Any]]) -> None:
+    run_id = os.getenv("PHASE16E_RUN_ID", "").strip() or None
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        if not bool(event.get("evidence_requested", False)):
+            continue
+
+        trigger_event_id = event.get("event_id")
+        if not isinstance(trigger_event_id, str) or not trigger_event_id.strip():
+            trigger_event_id = event.get("task_id")
+        if not isinstance(trigger_event_id, str) or not trigger_event_id.strip():
+            trigger_event_id = None
+
+        track_id_value = event.get("track_id")
+        track_id = track_id_value.strip() if isinstance(track_id_value, str) and track_id_value.strip() else None
+        evidence_message_id_value = event.get("evidence_message_id")
+        evidence_message_id = (
+            evidence_message_id_value.strip()
+            if isinstance(evidence_message_id_value, str) and evidence_message_id_value.strip()
+            else None
+        )
+        event_origin_value = event.get("event_origin")
+        event_origin = (
+            event_origin_value.strip()
+            if isinstance(event_origin_value, str)
+            and event_origin_value.strip() in {"startup_activation", "production_monitor"}
+            else "startup_activation"
+        )
+
+        _append_submission_decision(
+            {
+                "run_id": run_id,
+                "event_origin": event_origin,
+                "trigger_event_id": trigger_event_id,
+                "track_id": track_id,
+                "evidence_requested": True,
+                "evidence_message_id": evidence_message_id,
+                "queue_request_id": None,
+                "submission_eligibility": False,
+                "skip_reason": "startup_activation_cycle_no_submission_path",
+                "submission_attempted": False,
+                "submission_accepted": False,
+            }
+        )
+
+
 async def run_agent_ops_cycle(
     session: ClientSession,
     *,
@@ -73,6 +144,7 @@ async def run_agent_ops_cycle(
             arguments={
                 "request_evidence_on_uncertainty": request_evidence_on_uncertainty,
                 "max_tracks": max_tracks,
+                "event_origin": "production_monitor",
             },
         )
     except Exception as error:
@@ -370,6 +442,7 @@ async def start_orchestration_agents_with_activation_checks(
                 arguments={
                     "request_evidence_on_uncertainty": True,
                     "max_tracks": agent_ops_max_tracks,
+                    "event_origin": "startup_activation",
                 },
             )
         except Exception as error:
@@ -418,6 +491,7 @@ async def start_orchestration_agents_with_activation_checks(
         cycle = payload.get("cycle")
         evaluated_tracks = cycle.get("evaluated_tracks", 0) if isinstance(cycle, dict) else 0
         events = payload.get("events") if isinstance(payload.get("events"), list) else []
+        _record_startup_activation_submission_skips(events)
         observation_ok = any(
             isinstance(event, dict)
             and (

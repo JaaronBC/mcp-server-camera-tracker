@@ -38,6 +38,12 @@ def _pid_alive(pid: int) -> bool:
 
 
 class TestPhase16ERunReliability(unittest.TestCase):
+    def test_load_environment_defaults_uses_repo_dotenv_without_override(self) -> None:
+        repo_root = Path("/tmp/fake-phase16e-repo")
+        with patch.object(phase16e_run, "load_dotenv") as load_dotenv_mock:
+            phase16e_run._load_environment_defaults(repo_root)
+        load_dotenv_mock.assert_called_once_with(dotenv_path=repo_root / ".env", override=False)
+
     def _launch_runner(
         self,
         run_dir: Path,
@@ -167,6 +173,107 @@ class TestPhase16ERunReliability(unittest.TestCase):
             start_ts = float((run_dir / "start_ts.txt").read_text(encoding="utf-8").strip())
             self.assertGreaterEqual(start_ts, pre_cleanup_marker["ts"])
             self.assertTrue((run_dir / "run_id.txt").is_file())
+
+    def test_main_subprocess_env_includes_decision_log_and_watchdog_margin(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="phase16e_env_decisions_") as tmp:
+            run_dir = Path(tmp) / "run"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            captured_env: dict[str, str] = {}
+
+            class _FakeProc:
+                def __init__(self) -> None:
+                    self.pid = 999998
+                    self.returncode = 0
+
+                def poll(self) -> int:
+                    return 0
+
+            def _fake_popen(*_args, **kwargs):
+                env = kwargs.get("env")
+                if isinstance(env, dict):
+                    captured_env.update({str(key): str(value) for key, value in env.items()})
+                return _FakeProc()
+
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    str(RUNNER_PATH),
+                    "--run-dir",
+                    str(run_dir),
+                    "--main-command",
+                    "python -c \"print('ok')\"",
+                    "--bounded-session-seconds",
+                    "60",
+                    "--verification-drain-seconds",
+                    "20",
+                    "--watchdog-margin-seconds",
+                    "15",
+                ],
+            ), patch.object(phase16e_run, "_cleanup_interfering_processes", return_value=[]), patch.object(
+                phase16e_run.subprocess,
+                "Popen",
+                side_effect=_fake_popen,
+            ), patch.object(phase16e_run, "_run_report", return_value=0), patch.object(
+                phase16e_run,
+                "_collect_post_shutdown_processes",
+                return_value=[],
+            ), patch.object(
+                phase16e_run,
+                "_record_run_local_artifact_status",
+                return_value={"missing": []},
+            ):
+                rc = phase16e_run.main()
+
+            self.assertEqual(rc, 0)
+            self.assertEqual(captured_env.get("PHASE16E_WATCHDOG_MARGIN_SECONDS"), "15.0")
+            self.assertEqual(
+                captured_env.get("PHASE16E_VERIFICATION_SUBMISSION_DECISIONS_PATH"),
+                str((run_dir / "verification_submission_decisions.jsonl").resolve()),
+            )
+
+    def test_budget_defaults_and_zero_override(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="phase16e_budget_env_defaults_") as tmp:
+            default_run_dir = Path(tmp) / "default"
+            default_run_dir.mkdir(parents=True, exist_ok=True)
+            default_env: dict[str, str] = {}
+
+            phase16e_run._ensure_budget_env(default_env, default_run_dir)
+            phase16e_run._initialize_budget_artifacts(default_env)
+            phase16e_run._write_budget_configuration_diagnostics(default_run_dir)
+
+            default_state = json.loads((default_run_dir / "provider_call_budget_state.json").read_text(encoding="utf-8"))
+            self.assertEqual(default_state["limits"]["total_limit"], 1)
+            self.assertEqual(default_state["limits"]["per_role_limits"]["observation_visual"], 1)
+            self.assertEqual(default_state["limits"]["per_role_limits"]["tracking_vlm"], 0)
+            self.assertEqual(default_state["limits"]["per_role_limits"]["observation_text"], 0)
+            self.assertEqual(default_state["limits"]["per_role_limits"]["reasoning_text"], 0)
+
+            zero_run_dir = Path(tmp) / "zero"
+            zero_run_dir.mkdir(parents=True, exist_ok=True)
+            zero_env = {
+                "PROVIDER_CALL_BUDGET_ENABLED": "1",
+                "PROVIDER_CALL_BUDGET_TOTAL_LIMIT": "0",
+                "PROVIDER_CALL_BUDGET_TRACKING_VLM_LIMIT": "0",
+                "PROVIDER_CALL_BUDGET_OBSERVATION_TEXT_LIMIT": "0",
+                "PROVIDER_CALL_BUDGET_REASONING_TEXT_LIMIT": "0",
+                "PROVIDER_CALL_BUDGET_OBSERVATION_VISUAL_LIMIT": "0",
+            }
+            phase16e_run._ensure_budget_env(zero_env, zero_run_dir)
+            phase16e_run._initialize_budget_artifacts(zero_env)
+            phase16e_run._write_budget_configuration_diagnostics(zero_run_dir)
+
+            zero_state = json.loads((zero_run_dir / "provider_call_budget_state.json").read_text(encoding="utf-8"))
+            self.assertEqual(zero_state["limits"]["total_limit"], 0)
+            self.assertEqual(zero_state["limits"]["per_role_limits"]["tracking_vlm"], 0)
+            self.assertEqual(zero_state["limits"]["per_role_limits"]["observation_text"], 0)
+            self.assertEqual(zero_state["limits"]["per_role_limits"]["reasoning_text"], 0)
+            self.assertEqual(zero_state["limits"]["per_role_limits"]["observation_visual"], 0)
+
+            zero_diag = json.loads((zero_run_dir / "provider_call_budget_diagnostics.json").read_text(encoding="utf-8"))
+            self.assertEqual(zero_diag["configured_limits"]["total_limit"], 0)
+            self.assertEqual(zero_diag["attempted_provider_calls"]["state_attempted_total"], 0)
+            self.assertEqual(zero_diag["blocked_provider_calls"]["blocked_event_total"], 0)
 
     def test_report_subprocess_failure_writes_artifacts(self) -> None:
         with tempfile.TemporaryDirectory(prefix="phase16e_report_fail_") as tmp:

@@ -10,6 +10,7 @@ import numpy as np
 
 from agents.contracts import BoundingBox, DetectionCandidate
 from agents.coordinator import AgentCoordinator
+from agents.observation.evidence_consumption import ObservationEvidenceRequest, consume_tracking_evidence_by_message_id
 from agents.tracking.evidence_packaging import TrackingEvidencePackager
 from agents.tracking.evidence_store import TrackingEvidenceResolver, TrackingEvidenceStore
 from agents.tracking.state_publisher import publish_tracking_radar_state
@@ -204,6 +205,81 @@ class TestTrackingEvidencePackaging(unittest.TestCase):
             resolver.shutdown()
             store.shutdown()
 
+    def test_real_visual_evidence_lifecycle_store_to_observation_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            evidence_root = root / "tracking_evidence"
+            store = TrackingEvidenceStore(evidence_root)
+            packager = TrackingEvidencePackager(coordinator=AgentCoordinator(), evidence_store=store)
+            resolver = TrackingEvidenceResolver(evidence_root)
+
+            now = time.time()
+            frame = np.full((40, 60, 3), 127, dtype=np.uint8)
+            frame_evidence = store.register_frame(
+                frame=frame,
+                timestamp=now,
+                width=60,
+                height=40,
+            )
+
+            packaged = packager.package_detection(
+                detection=self._detection("track-1", "det-1", now),
+                timestamp=now,
+                frame_evidence=frame_evidence,
+                update_payload={
+                    "detection_id": "det-1",
+                    "resolved_track_id": "track-1",
+                    "accepted": True,
+                    "rejection_reasons": [],
+                },
+            )
+
+            self.assertTrue(packaged.validation["valid"])
+            self.assertEqual(packaged.envelope.track_id, "track-1")
+            self.assertEqual(packaged.envelope.frame_reference, frame_evidence.frame_reference)
+            self.assertTrue(self._wait_for_frame_available(resolver, frame_evidence.frame_reference, timeout_seconds=1.5))
+
+            frame_resolution = resolver.resolve_reference(
+                frame_evidence.frame_reference,
+                now_timestamp=now + 0.1,
+            )
+            self.assertTrue(frame_resolution["valid"])
+            self.assertEqual(frame_resolution["status"], "ok")
+
+            detection_reference = next(
+                ref for ref in packaged.envelope.source_evidence_refs if ref.startswith("evidence://detection/")
+            )
+            detection_resolution = resolver.resolve_reference(
+                detection_reference,
+                expected_track_id="track-1",
+                expected_detection_id="det-1",
+                expected_frame_reference=frame_evidence.frame_reference,
+                now_timestamp=now + 0.1,
+            )
+            self.assertTrue(detection_resolution["valid"])
+            self.assertEqual(detection_resolution["status"], "ok")
+
+            package = consume_tracking_evidence_by_message_id(
+                ObservationEvidenceRequest(
+                    message_id=packaged.envelope.message_id,
+                    now_timestamp=now + 0.2,
+                    require_visual_evidence=True,
+                ),
+                evidence_root_dir=evidence_root,
+            )
+
+            self.assertTrue(package.preflight["preflight_passed"])
+            self.assertTrue(package.preflight["visual_evidence_inspectable"])
+            self.assertIsNotNone(package.image_evidence)
+            assert package.image_evidence is not None
+            self.assertEqual(package.image_evidence.reference, frame_evidence.frame_reference)
+            self.assertEqual(package.envelope.track_id, "track-1")
+            self.assertEqual(package.envelope.frame_reference, frame_evidence.frame_reference)
+            self.assertGreater(len(package.image_evidence.image_bytes), 0)
+
+            resolver.shutdown()
+            store.shutdown()
+
     def test_expiration_and_capacity_limits(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -294,6 +370,84 @@ class TestTrackingEvidencePackaging(unittest.TestCase):
             self.assertNotIn("tracking_evidence_envelopes", payload)
             serialized = json.dumps(payload)
             self.assertNotIn("data:image/jpeg;base64", serialized)
+
+
+    def test_frame_capacity_cleanup_invalidates_unexpired_linked_detection_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            evidence_root = root / "tracking_evidence"
+            store = TrackingEvidenceStore(
+                evidence_root,
+                max_age_seconds=120.0,
+                max_frame_records=1,
+                max_detection_records=100,
+                max_envelope_records=100,
+            )
+            resolver = TrackingEvidenceResolver(evidence_root)
+            packager = TrackingEvidencePackager(coordinator=AgentCoordinator(), evidence_store=store)
+
+            now = time.time()
+            frame_one = np.full((24, 24, 3), 64, dtype=np.uint8)
+            frame_one_record = store.register_frame(
+                frame=frame_one,
+                timestamp=now,
+                width=24,
+                height=24,
+            )
+
+            self.assertTrue(self._wait_for_frame_available(resolver, frame_one_record.frame_reference, timeout_seconds=1.5))
+
+            packaged = packager.package_detection(
+                detection=self._detection("track-cap", "det-cap", now + 0.01),
+                timestamp=now + 0.01,
+                frame_evidence=frame_one_record,
+                update_payload={
+                    "detection_id": "det-cap",
+                    "resolved_track_id": "track-cap",
+                    "accepted": True,
+                    "rejection_reasons": [],
+                },
+            )
+
+            self.assertTrue(packaged.validation["valid"])
+            detection_reference = next(
+                ref for ref in packaged.envelope.source_evidence_refs if ref.startswith("evidence://detection/")
+            )
+            envelope_path = evidence_root / "envelopes" / f"{packaged.envelope.message_id}.json"
+            self.assertTrue(envelope_path.is_file())
+
+            frame_two = np.full((24, 24, 3), 128, dtype=np.uint8)
+            frame_two_record = store.register_frame(
+                frame=frame_two,
+                timestamp=now + 0.2,
+                width=24,
+                height=24,
+            )
+            self.assertTrue(self._wait_for_frame_available(resolver, frame_two_record.frame_reference, timeout_seconds=1.5))
+
+            cleanup_summary = store.cleanup(now_timestamp=now + 1.0)
+            self.assertGreaterEqual(cleanup_summary["removed_capacity"], 1)
+
+            frame_resolution = resolver.resolve_reference(
+                frame_one_record.frame_reference,
+                now_timestamp=now + 1.0,
+            )
+            detection_resolution = resolver.resolve_reference(
+                detection_reference,
+                expected_track_id="track-cap",
+                expected_detection_id="det-cap",
+                expected_frame_reference=frame_one_record.frame_reference,
+                now_timestamp=now + 1.0,
+            )
+
+            self.assertFalse(frame_resolution["valid"])
+            self.assertEqual(frame_resolution["status"], "missing_reference")
+            self.assertFalse(detection_resolution["valid"])
+            self.assertEqual(detection_resolution["status"], "linked_frame_unavailable")
+            self.assertEqual(detection_resolution["linked_frame"]["status"], "missing_reference")
+
+            resolver.shutdown()
+            store.shutdown()
 
 
 if __name__ == "__main__":

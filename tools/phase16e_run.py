@@ -10,9 +10,15 @@ import time
 from pathlib import Path
 from typing import Any
 
+from dotenv import load_dotenv
+
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
+
+
+def _load_environment_defaults(repo_root: Path) -> None:
+    load_dotenv(dotenv_path=repo_root / ".env", override=False)
 
 
 def _run(cmd: list[str], *, cwd: Path | None = None, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
@@ -81,15 +87,15 @@ def _cleanup_interfering_processes(run_dir: Path) -> list[str]:
 
 
 def _ensure_budget_env(env: dict[str, str], run_dir: Path) -> None:
-    env["PROVIDER_CALL_BUDGET_ENABLED"] = "1"
-    env["PROVIDER_CALL_BUDGET_TOTAL_LIMIT"] = "1"
-    env["PROVIDER_CALL_BUDGET_TRACKING_VLM_LIMIT"] = "0"
-    env["PROVIDER_CALL_BUDGET_OBSERVATION_TEXT_LIMIT"] = "0"
-    env["PROVIDER_CALL_BUDGET_REASONING_TEXT_LIMIT"] = "0"
-    env["PROVIDER_CALL_BUDGET_OBSERVATION_VISUAL_LIMIT"] = "1"
-    env["PROVIDER_CALL_BUDGET_STATE_PATH"] = str((run_dir / "provider_call_budget_state.json").resolve())
-    env["PROVIDER_CALL_BUDGET_LOCK_PATH"] = str((run_dir / "provider_call_budget_state.lock").resolve())
-    env["PROVIDER_CALL_BUDGET_LOG_PATH"] = str((run_dir / "provider_call_budget_events.jsonl").resolve())
+    env.setdefault("PROVIDER_CALL_BUDGET_ENABLED", "1")
+    env.setdefault("PROVIDER_CALL_BUDGET_TOTAL_LIMIT", "1")
+    env.setdefault("PROVIDER_CALL_BUDGET_TRACKING_VLM_LIMIT", "0")
+    env.setdefault("PROVIDER_CALL_BUDGET_OBSERVATION_TEXT_LIMIT", "0")
+    env.setdefault("PROVIDER_CALL_BUDGET_REASONING_TEXT_LIMIT", "0")
+    env.setdefault("PROVIDER_CALL_BUDGET_OBSERVATION_VISUAL_LIMIT", "1")
+    env.setdefault("PROVIDER_CALL_BUDGET_STATE_PATH", str((run_dir / "provider_call_budget_state.json").resolve()))
+    env.setdefault("PROVIDER_CALL_BUDGET_LOCK_PATH", str((run_dir / "provider_call_budget_state.lock").resolve()))
+    env.setdefault("PROVIDER_CALL_BUDGET_LOG_PATH", str((run_dir / "provider_call_budget_events.jsonl").resolve()))
 
 
 def _initialize_budget_artifacts(env: dict[str, str]) -> None:
@@ -129,6 +135,86 @@ def _initialize_budget_artifacts(env: dict[str, str]) -> None:
 
     lock_path.touch(exist_ok=True)
     log_path.touch(exist_ok=True)
+
+
+def _write_budget_configuration_diagnostics(run_dir: Path) -> None:
+    state_path = run_dir / "provider_call_budget_state.json"
+    log_path = run_dir / "provider_call_budget_events.jsonl"
+
+    configured_limits: dict[str, Any] = {}
+    attempted_total = 0
+    attempted_per_role: dict[str, int] = {
+        "tracking_vlm": 0,
+        "observation_text": 0,
+        "reasoning_text": 0,
+        "observation_visual": 0,
+    }
+    state_read_error: str | None = None
+    try:
+        if state_path.is_file():
+            state_payload = json.loads(state_path.read_text(encoding="utf-8"))
+            if isinstance(state_payload, dict):
+                limits_payload = state_payload.get("limits")
+                if isinstance(limits_payload, dict):
+                    configured_limits = limits_payload
+                totals_payload = state_payload.get("totals")
+                if isinstance(totals_payload, dict):
+                    attempted_total = int(totals_payload.get("attempted", 0) or 0)
+                    per_role_payload = totals_payload.get("per_role_attempted")
+                    if isinstance(per_role_payload, dict):
+                        for role in attempted_per_role:
+                            attempted_per_role[role] = int(per_role_payload.get(role, 0) or 0)
+    except Exception as exc:
+        state_read_error = f"{type(exc).__name__}:{exc}"
+
+    blocked_total = 0
+    blocked_per_role: dict[str, int] = {}
+    attempt_event_total = 0
+    attempt_event_per_role: dict[str, int] = {}
+    log_read_error: str | None = None
+    try:
+        if log_path.is_file():
+            for raw in log_path.read_text(encoding="utf-8").splitlines():
+                line = raw.strip()
+                if not line:
+                    continue
+                event = json.loads(line)
+                if not isinstance(event, dict):
+                    continue
+                event_type = event.get("event_type")
+                role_value = event.get("role")
+                role = role_value.strip() if isinstance(role_value, str) and role_value.strip() else None
+                if event_type == "provider_call_blocked":
+                    blocked_total += 1
+                    if role is not None:
+                        blocked_per_role[role] = blocked_per_role.get(role, 0) + 1
+                elif event_type == "provider_call_attempt":
+                    attempt_event_total += 1
+                    if role is not None:
+                        attempt_event_per_role[role] = attempt_event_per_role.get(role, 0) + 1
+    except Exception as exc:
+        log_read_error = f"{type(exc).__name__}:{exc}"
+
+    payload = {
+        "schema_version": "1.0",
+        "generated_at": time.time(),
+        "configured_limits": configured_limits,
+        "attempted_provider_calls": {
+            "state_attempted_total": attempted_total,
+            "state_attempted_per_role": attempted_per_role,
+            "attempt_event_total": attempt_event_total,
+            "attempt_event_per_role": attempt_event_per_role,
+        },
+        "blocked_provider_calls": {
+            "blocked_event_total": blocked_total,
+            "blocked_event_per_role": blocked_per_role,
+        },
+        "errors": {
+            "state_read_error": state_read_error,
+            "log_read_error": log_read_error,
+        },
+    }
+    (run_dir / "provider_call_budget_diagnostics.json").write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
 def _write(path: Path, value: str) -> None:
@@ -187,6 +273,7 @@ def _record_run_local_artifact_status(run_dir: Path) -> dict[str, Any]:
     expected = [
         "provider_call_budget_state.json",
         "provider_call_budget_events.jsonl",
+        "provider_call_budget_diagnostics.json",
         "latest_verification_queue_results.json",
         "latest_verification_queue_submissions.json",
         "operator_tracking_feedback.json",
@@ -243,6 +330,7 @@ def main() -> int:
     args = parser.parse_args()
 
     repo_root = _repo_root()
+    _load_environment_defaults(repo_root)
     python_path = repo_root / ".venv" / "bin" / "python"
     if not python_path.is_file():
         python_path = Path(sys.executable)
@@ -256,9 +344,11 @@ def main() -> int:
     main_env = dict(os.environ)
     main_env["BOUNDED_SESSION_SECONDS"] = str(args.bounded_session_seconds)
     main_env["VERIFICATION_DRAIN_SECONDS"] = str(args.verification_drain_seconds)
+    main_env["PHASE16E_WATCHDOG_MARGIN_SECONDS"] = str(args.watchdog_margin_seconds)
     main_env["PHASE16E_RUN_ID"] = run_id
     main_env["PHASE16E_VERIFICATION_RESULTS_PATH"] = str((run_dir / "latest_verification_queue_results.json").resolve())
     main_env["PHASE16E_VERIFICATION_SUBMISSIONS_PATH"] = str((run_dir / "latest_verification_queue_submissions.json").resolve())
+    main_env["PHASE16E_VERIFICATION_SUBMISSION_DECISIONS_PATH"] = str((run_dir / "verification_submission_decisions.jsonl").resolve())
     main_env["PHASE16E_OPERATOR_FEEDBACK_PATH"] = str((run_dir / "operator_tracking_feedback.json").resolve())
     main_env["PHASE16E_AGENT_EVENTS_PATH"] = str((run_dir / "agent_events.jsonl").resolve())
     _ensure_budget_env(main_env, run_dir)
@@ -365,6 +455,7 @@ def main() -> int:
             _write(run_dir / "runner_exception.txt", runtime_error + "\n")
 
         _enforce_post_shutdown_cleanup(run_dir)
+        _write_budget_configuration_diagnostics(run_dir)
         run_local_artifact_status = _record_run_local_artifact_status(run_dir)
         report_exit_code = _run_report(repo_root, run_dir, python_path)
 

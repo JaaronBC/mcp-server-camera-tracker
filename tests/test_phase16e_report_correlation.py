@@ -95,6 +95,7 @@ class TestPhase16EReportCorrelation(unittest.TestCase):
                 {
                     "run_id": "run-1",
                     "event_type": "reasoning_cycle",
+                    "event_origin": "production_monitor",
                     "timestamp": start_ts + 0.1,
                     "track_id": "track-nontrigger",
                     "evidence_requested": False,
@@ -102,6 +103,7 @@ class TestPhase16EReportCorrelation(unittest.TestCase):
                 {
                     "run_id": "run-1",
                     "event_type": "reasoning_cycle",
+                    "event_origin": "production_monitor",
                     "timestamp": start_ts + 0.2,
                     "track_id": "track-triggered",
                     "evidence_requested": True,
@@ -109,6 +111,7 @@ class TestPhase16EReportCorrelation(unittest.TestCase):
                 {
                     "run_id": "run-1",
                     "event_type": "phase16e_trigger",
+                    "event_origin": "production_monitor",
                     "timestamp": start_ts + 0.3,
                     "track_id": "track-phase16e",
                     "automatic_evidence_requested": True,
@@ -131,9 +134,13 @@ class TestPhase16EReportCorrelation(unittest.TestCase):
 
             triggered_row = next(row for row in correlated_rows if row.get("track_id") == "track-triggered")
             self.assertTrue(triggered_row.get("automatic_evidence_requested"))
+            self.assertTrue(triggered_row.get("eligible_for_genuine_chain"))
             self.assertTrue(triggered_row.get("queue_submission"))
             self.assertEqual(triggered_row.get("queue_request_id"), "verifyreq-1")
             self.assertEqual(triggered_row.get("evidence_message_id"), "trkmsg-1")
+
+            fallback_row = next(row for row in correlated_rows if row.get("track_id") == "track-phase16e")
+            self.assertFalse(fallback_row.get("eligible_for_genuine_chain"))
 
     def test_missing_run_id_records_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory(prefix="phase16e_report_run_id_missing_") as tmp:

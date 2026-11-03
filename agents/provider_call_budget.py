@@ -292,6 +292,9 @@ def reserve_provider_call_attempt(role: str) -> ProviderCallReservation:
                 fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
                 try:
                     state = _load_state(state_path, limits)
+                    state["limits"] = limits
+                    state["updated_at"] = time.time()
+                    _write_state(state_path, state)
                     totals = state["totals"]
                     per_role = totals["per_role_attempted"]
 

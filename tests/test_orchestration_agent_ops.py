@@ -9,6 +9,8 @@ from unittest.mock import patch
 
 from agents.orchestration.tools import ops as orchestration_agent_ops
 from agents.reasoning.tools import _shared as orchestration_reasoning
+from agents.tracking.state_publisher import publish_tracking_radar_state
+from agents.tracking.tracking_types import GroundPosition, RadarTrackSnapshot
 
 
 class TestOrchestrationAgentOps(unittest.TestCase):
@@ -693,6 +695,96 @@ class TestOrchestrationAgentOps(unittest.TestCase):
         # Performs test prune agent event log invalid max events keep logic.
         with self.assertRaises(ValueError):
             orchestration_agent_ops.prune_agent_event_log(max_events_keep=-1)
+
+
+    def test_production_cycle_reads_fresh_published_real_radar_state(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            radar_path = temp_root / "latest_radar_state.json"
+            history_path = temp_root / "radar_depth_coverage_history.jsonl"
+            events_path = temp_root / "agent_events.jsonl"
+
+            now = 2000.0
+            real_track_id = "track-real-1"
+            real_track = RadarTrackSnapshot(
+                track_id=real_track_id,
+                timestamp=now,
+                pixel_position=None,
+                ground_position=GroundPosition(x=1.2, z=3.4),
+                ground_coordinate_unit="relative_units",
+                position_kind="relative_ground_estimate",
+                quality_flags=["position_kind:relative_ground_estimate"],
+                confidence=0.95,
+                relative_depth=0.42,
+            )
+
+            publish_tracking_radar_state(
+                radar_state_path=radar_path,
+                radar_depth_coverage_history_path=history_path,
+                now=now,
+                coordinate_system="calibrated_ground_plane",
+                camera_status="connected",
+                detector_status="running",
+                calibration_status="loaded",
+                tracking_agent_status={},
+                last_observation_timestamp=now,
+                tracking_agent_observation=None,
+                tracks=[real_track],
+            )
+
+            with patch("agents.reasoning.tools._shared.RADAR_STATE_PATH", radar_path):
+                with patch.dict("os.environ", {"DASHBOARD_RADAR_STATE_MAX_AGE_SECONDS": "10"}, clear=False):
+                    with patch("agents.orchestration.tools.ops.AGENT_EVENTS_PATH", events_path):
+                        with patch("agents.reasoning.tools._shared.time.time", return_value=now + 0.5):
+                            with patch(
+                                "agents.reasoning.tools._shared._call_observation_agent_with_retry",
+                                return_value=(
+                                    None,
+                                    {
+                                        "status": "error",
+                                        "model": "gpt-oss-120b",
+                                        "latency_ms": 0.0,
+                                        "error": "provider_disabled_for_test",
+                                        "error_code": "provider_disabled_for_test",
+                                        "attempts": 0,
+                                        "retry_count": 0,
+                                    },
+                                ),
+                            ):
+                                with patch(
+                                    "agents.reasoning.tools._shared._call_reasoning_agent_with_retry",
+                                    return_value=(
+                                        None,
+                                        {
+                                            "status": "error",
+                                            "model": "gpt-oss-120b",
+                                            "latency_ms": 0.0,
+                                            "error": "provider_disabled_for_test",
+                                            "error_code": "provider_disabled_for_test",
+                                            "attempts": 0,
+                                            "retry_count": 0,
+                                        },
+                                    ),
+                                ):
+                                    result = orchestration_agent_ops.run_reasoning_cycle_and_log(
+                                        max_tracks=5,
+                                        event_origin="production_monitor",
+                                    )
+
+        self.assertTrue(result["available"])
+        self.assertEqual(result["cycle"]["evaluated_tracks"], 1)
+        self.assertEqual(len(result["events"]), 1)
+        event = result["events"][0]
+        self.assertEqual(event["event_origin"], "production_monitor")
+        self.assertEqual(event["track_id"], real_track_id)
+
+        evidence_trace = event.get("evidence_trace", {})
+        latest_snapshot = evidence_trace.get("latest_track_snapshot", {})
+        coordinate_context = evidence_trace.get("coordinate_context", {})
+        self.assertEqual(latest_snapshot.get("track_id"), real_track_id)
+        self.assertEqual(latest_snapshot.get("timestamp"), now)
+        self.assertEqual(coordinate_context.get("coordinate_system"), "calibrated_ground_plane")
+        self.assertNotEqual(coordinate_context.get("coordinate_system"), "simulation_fallback")
 
 
 if __name__ == "__main__":

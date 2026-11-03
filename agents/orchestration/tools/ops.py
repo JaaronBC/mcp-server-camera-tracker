@@ -490,9 +490,11 @@ def _build_reasoning_cycle_event(
     handoff_validation_error: Any,
     handoff_quality: str,
     cycle_error_code: Any,
+    event_origin: str,
 ) -> dict[str, Any]:
     return {
         "event_type": "reasoning_cycle",
+        "event_origin": event_origin,
         "cycle_id": cycle_id,
         "task_id": f"{cycle_id}:track-{index}",
         "parent_task_id": None,
@@ -633,6 +635,7 @@ def _build_reasoning_cycle_response(
 def run_reasoning_cycle_and_log(
     request_evidence_on_uncertainty: bool = True,
     max_tracks: int = 10,
+    event_origin: str = "production_monitor",
 ) -> dict[str, Any]:
     # Runs reasoning cycle and log workflow steps and returns status outcomes.
     """Run a bounded reasoning cycle for current tracks and append structured events."""
@@ -643,6 +646,11 @@ def run_reasoning_cycle_and_log(
     cycle_started_at = cycle_context["cycle_started_at"]
     cycle_id = cycle_context["cycle_id"]
     track_ids = cycle_context["track_ids"]
+    normalized_event_origin = (
+        event_origin.strip()
+        if isinstance(event_origin, str) and event_origin.strip() in {"startup_activation", "production_monitor"}
+        else "unknown"
+    )
 
     events: list[dict[str, Any]] = []
     success_count = 0
@@ -700,6 +708,7 @@ def run_reasoning_cycle_and_log(
             handoff_validation_error=handoff_validation_error,
             handoff_quality=handoff_quality,
             cycle_error_code=cycle_error_code,
+            event_origin=normalized_event_origin,
         )
 
         _attach_evidence_followup_links(event, result.get("evidence_request"))

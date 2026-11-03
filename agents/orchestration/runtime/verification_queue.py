@@ -13,6 +13,7 @@ from mcp import ClientSession
 from agents.contracts import VisualVerificationEnvelope
 from agents.coordinator import AgentCoordinator
 from agents.observation.evidence_consumption import load_validated_envelope_by_message_id
+from agents.tracking.evidence_protection import acquire_verification_evidence_lease, release_verification_evidence_lease
 
 
 @dataclass(slots=True)
@@ -24,6 +25,18 @@ class VerificationQueueRequest:
     requested_at: float
     trigger_event_id: str | None = None
     trigger_timestamp: float | None = None
+
+
+@dataclass(slots=True)
+class VerificationSubmissionDecision:
+    event_origin: str | None
+    trigger_event_id: str | None
+    track_id: str | None
+    evidence_requested: bool
+    evidence_message_id: str | None
+    queue_request: VerificationQueueRequest | None
+    submission_eligibility: bool
+    skip_reason: str | None
 
 
 @dataclass(slots=True)
@@ -104,6 +117,10 @@ class VerificationQueueManager:
         result_registry_capacity: int = 512,
         verify_tool_name: str = "verify_tracking_visual_evidence",
         evidence_tool_name: str = "get_tracking_visual_evidence",
+        max_protected_frames: int = 32,
+        max_active_leases: int = 128,
+        lease_ttl_seconds: float | None = None,
+        lease_lock_timeout_seconds: float = 0.0,
         coordinator: AgentCoordinator | None = None,
     ) -> None:
         self._evidence_root_dir = evidence_root_dir
@@ -114,6 +131,14 @@ class VerificationQueueManager:
         self._result_registry_capacity = max(1, int(result_registry_capacity))
         self._verify_tool_name = verify_tool_name
         self._evidence_tool_name = evidence_tool_name
+        self._max_protected_frames = max(0, int(max_protected_frames))
+        self._max_active_leases = max(1, int(max_active_leases))
+        self._lease_ttl_seconds = (
+            max(1.0, float(lease_ttl_seconds))
+            if lease_ttl_seconds is not None
+            else max(5.0, min(120.0, self._request_timeout_seconds * 4.0))
+        )
+        self._lease_lock_timeout_seconds = max(0.0, float(lease_lock_timeout_seconds))
         self._coordinator = coordinator or AgentCoordinator()
 
         self._queue: asyncio.Queue[VerificationQueueRequest] = asyncio.Queue(maxsize=self._queue_capacity)
@@ -128,6 +153,7 @@ class VerificationQueueManager:
         self._record_order: deque[str] = deque(maxlen=self._result_registry_capacity)
         self._submission_records_by_request_id: dict[str, VerificationSubmissionRecord] = {}
         self._submission_order: deque[str] = deque(maxlen=self._result_registry_capacity)
+        self._leases_by_request_id: dict[str, dict[str, Any]] = {}
 
     async def start(self, *, session: ClientSession) -> None:
         if self._workers:
@@ -144,6 +170,8 @@ class VerificationQueueManager:
             except asyncio.QueueEmpty:
                 break
             self._queued_message_ids.discard(pending_request.message_id or "")
+            self._release_request_lease(pending_request.request_id)
+            self._leases_by_request_id.pop(pending_request.request_id, None)
             self._store_record(
                 VerificationQueueRecord(
                     request_id=pending_request.request_id,
@@ -269,6 +297,116 @@ class VerificationQueueManager:
             )
             return {"accepted": False, "status": "queue_saturated", "message_id": message_id}
 
+        lease_result = acquire_verification_evidence_lease(
+            evidence_root_dir=self._evidence_root_dir,
+            request_id=request.request_id,
+            message_id=message_id,
+            track_id=track_id,
+            now_timestamp=now,
+            lease_ttl_seconds=self._lease_ttl_seconds,
+            max_protected_frames=self._max_protected_frames,
+            max_active_leases=self._max_active_leases,
+            lock_timeout_seconds=self._lease_lock_timeout_seconds,
+        )
+        if not bool(lease_result.get("acquired", False)):
+            status = str(lease_result.get("status", "lease_acquire_failed"))
+            self._store_submission(
+                VerificationSubmissionRecord(
+                    request_id=request.request_id,
+                    source=request.source,
+                    track_id=track_id,
+                    message_id=message_id,
+                    submitted_at=now,
+                    accepted=False,
+                    status=status,
+                    reason=status,
+                    run_id=self._run_id,
+                )
+            )
+            self._store_record(
+                VerificationQueueRecord(
+                    request_id=request.request_id,
+                    source=request.source,
+                    track_id=track_id,
+                    evidence_message_id=message_id,
+                    status="rejected",
+                    validation_outcome="lease_acquire_failed",
+                    submitted_at=now,
+                    started_at=None,
+                    finished_at=now,
+                    current_applicability="unknown",
+                    stale_for_current_decisions=False,
+                    coordinator_valid=False,
+                    error_code=status,
+                    error="Unable to acquire evidence protection lease",
+                    run_id=self._run_id,
+                    details=self._sanitize_details(lease_result.get("details")),
+                )
+            )
+            return {"accepted": False, "status": status, "message_id": message_id, "request_id": request.request_id}
+
+        lease_payload = lease_result.get("lease")
+        if not isinstance(lease_payload, dict):
+            status = "lease_payload_invalid"
+            self._store_submission(
+                VerificationSubmissionRecord(
+                    request_id=request.request_id,
+                    source=request.source,
+                    track_id=track_id,
+                    message_id=message_id,
+                    submitted_at=now,
+                    accepted=False,
+                    status=status,
+                    reason=status,
+                    run_id=self._run_id,
+                )
+            )
+            self._store_record(
+                VerificationQueueRecord(
+                    request_id=request.request_id,
+                    source=request.source,
+                    track_id=track_id,
+                    evidence_message_id=message_id,
+                    status="rejected",
+                    validation_outcome="lease_acquire_failed",
+                    submitted_at=now,
+                    started_at=None,
+                    finished_at=now,
+                    current_applicability="unknown",
+                    stale_for_current_decisions=False,
+                    coordinator_valid=False,
+                    error_code=status,
+                    error="Lease acquisition returned invalid payload",
+                    run_id=self._run_id,
+                    details={},
+                )
+            )
+            return {"accepted": False, "status": status, "message_id": message_id, "request_id": request.request_id}
+
+        if (
+            lease_payload.get("request_id") != request.request_id
+            or lease_payload.get("message_id") != message_id
+            or lease_payload.get("track_id") != track_id
+        ):
+            self._release_request_lease(request.request_id)
+            status = "lease_association_mismatch"
+            self._store_submission(
+                VerificationSubmissionRecord(
+                    request_id=request.request_id,
+                    source=request.source,
+                    track_id=track_id,
+                    message_id=message_id,
+                    submitted_at=now,
+                    accepted=False,
+                    status=status,
+                    reason=status,
+                    run_id=self._run_id,
+                )
+            )
+            return {"accepted": False, "status": status, "message_id": message_id, "request_id": request.request_id}
+
+        self._leases_by_request_id[request.request_id] = lease_payload
+
         queue_request = VerificationQueueRequest(
             request_id=request.request_id,
             track_id=track_id,
@@ -276,7 +414,25 @@ class VerificationQueueManager:
             source=request.source,
             requested_at=now,
         )
-        self._queue.put_nowait(queue_request)
+        try:
+            self._queue.put_nowait(queue_request)
+        except Exception:
+            self._release_request_lease(request.request_id)
+            self._leases_by_request_id.pop(request.request_id, None)
+            self._store_submission(
+                VerificationSubmissionRecord(
+                    request_id=request.request_id,
+                    source=request.source,
+                    track_id=track_id,
+                    message_id=message_id,
+                    submitted_at=now,
+                    accepted=False,
+                    status="queue_enqueue_failed",
+                    reason="queue_enqueue_failed",
+                    run_id=self._run_id,
+                )
+            )
+            return {"accepted": False, "status": "queue_enqueue_failed", "message_id": message_id, "request_id": request.request_id}
         self._queued_message_ids.add(message_id)
         self._store_submission(
             VerificationSubmissionRecord(
@@ -365,6 +521,8 @@ class VerificationQueueManager:
                 )
                 self._store_record(record)
                 self._inflight_message_ids.discard(message_id)
+                self._release_request_lease(request.request_id)
+                self._leases_by_request_id.pop(request.request_id, None)
                 self._queue.task_done()
                 raise
             except Exception as error:
@@ -390,6 +548,8 @@ class VerificationQueueManager:
             self._store_record(record)
             self._completed_message_ids.add(message_id)
             self._inflight_message_ids.discard(message_id)
+            self._release_request_lease(request.request_id)
+            self._leases_by_request_id.pop(request.request_id, None)
             self._queue.task_done()
 
     async def _execute_request(
@@ -401,32 +561,114 @@ class VerificationQueueManager:
         message_id = request.message_id or ""
         track_id = request.track_id
 
-        evidence_precheck = await asyncio.wait_for(
-            session.call_tool(self._evidence_tool_name, arguments={"message_id": message_id}),
-            timeout=self._request_timeout_seconds,
+        precheck_deadline = min(
+            started_at + self._request_timeout_seconds,
+            time.time() + min(0.5, self._request_timeout_seconds),
         )
-        evidence_payload = self._extract_payload(evidence_precheck)
-        if not isinstance(evidence_payload, dict) or not evidence_payload.get("available", False):
-            error_code = "missing_or_expired_evidence"
-            details = self._sanitize_details(evidence_payload)
-            return VerificationQueueRecord(
-                request_id=request.request_id,
-                source=request.source,
-                track_id=track_id,
-                evidence_message_id=message_id,
-                status="rejected",
-                validation_outcome="evidence_unavailable",
-                submitted_at=request.requested_at,
-                started_at=started_at,
-                finished_at=time.time(),
-                current_applicability="unknown",
-                stale_for_current_decisions=False,
-                coordinator_valid=False,
-                error_code=error_code,
-                error="Evidence unavailable prior to verification",
-                run_id=self._run_id,
-                details=details,
+        precheck_attempts = 0
+        evidence_payload: dict[str, Any] | None = None
+        latest_pending_details: dict[str, Any] | None = None
+        while True:
+            precheck_attempts += 1
+            remaining = precheck_deadline - time.time()
+            if remaining <= 0:
+                if latest_pending_details is not None:
+                    latest_pending_details["attempts"] = precheck_attempts
+                    return VerificationQueueRecord(
+                        request_id=request.request_id,
+                        source=request.source,
+                        track_id=track_id,
+                        evidence_message_id=message_id,
+                        status="rejected",
+                        validation_outcome="evidence_unavailable",
+                        submitted_at=request.requested_at,
+                        started_at=started_at,
+                        finished_at=time.time(),
+                        current_applicability="unknown",
+                        stale_for_current_decisions=False,
+                        coordinator_valid=False,
+                        error_code="missing_or_expired_evidence",
+                        error="Evidence unavailable prior to verification",
+                        run_id=self._run_id,
+                        details=latest_pending_details,
+                    )
+                return VerificationQueueRecord(
+                    request_id=request.request_id,
+                    source=request.source,
+                    track_id=track_id,
+                    evidence_message_id=message_id,
+                    status="timed_out",
+                    validation_outcome="operator_timeout",
+                    submitted_at=request.requested_at,
+                    started_at=started_at,
+                    finished_at=time.time(),
+                    current_applicability="unknown",
+                    stale_for_current_decisions=False,
+                    coordinator_valid=False,
+                    error_code="operator_timeout",
+                    error="Operator request timeout exceeded",
+                    run_id=self._run_id,
+                    details={"timeout_seconds": self._request_timeout_seconds},
+                )
+
+            evidence_precheck = await asyncio.wait_for(
+                session.call_tool(self._evidence_tool_name, arguments={"message_id": message_id}),
+                timeout=remaining,
             )
+            evidence_payload = self._extract_payload(evidence_precheck)
+            if isinstance(evidence_payload, dict) and evidence_payload.get("available", False):
+                break
+
+            details = self._sanitize_details(evidence_payload)
+            nested_details = evidence_payload.get("details") if isinstance(evidence_payload, dict) else None
+            if isinstance(nested_details, dict):
+                for key, value in self._sanitize_details(nested_details).items():
+                    details.setdefault(key, value)
+
+            if not self._is_pending_visual_evidence(details):
+                return VerificationQueueRecord(
+                    request_id=request.request_id,
+                    source=request.source,
+                    track_id=track_id,
+                    evidence_message_id=message_id,
+                    status="rejected",
+                    validation_outcome="evidence_unavailable",
+                    submitted_at=request.requested_at,
+                    started_at=started_at,
+                    finished_at=time.time(),
+                    current_applicability="unknown",
+                    stale_for_current_decisions=False,
+                    coordinator_valid=False,
+                    error_code="missing_or_expired_evidence",
+                    error="Evidence unavailable prior to verification",
+                    run_id=self._run_id,
+                    details=details,
+                )
+
+            latest_pending_details = details
+
+            sleep_seconds = min(0.05, max(0.0, precheck_deadline - time.time()))
+            if sleep_seconds <= 0:
+                details["attempts"] = precheck_attempts
+                return VerificationQueueRecord(
+                    request_id=request.request_id,
+                    source=request.source,
+                    track_id=track_id,
+                    evidence_message_id=message_id,
+                    status="rejected",
+                    validation_outcome="evidence_unavailable",
+                    submitted_at=request.requested_at,
+                    started_at=started_at,
+                    finished_at=time.time(),
+                    current_applicability="unknown",
+                    stale_for_current_decisions=False,
+                    coordinator_valid=False,
+                    error_code="missing_or_expired_evidence",
+                    error="Evidence unavailable prior to verification",
+                    run_id=self._run_id,
+                    details=details,
+                )
+            await asyncio.sleep(sleep_seconds)
 
         if str(evidence_payload.get("track_id", "")) != track_id:
             return VerificationQueueRecord(
@@ -625,6 +867,14 @@ class VerificationQueueManager:
             if str(key) in allowed and isinstance(value, (str, int, float, bool, list, dict, type(None)))
         }
 
+    def _is_pending_visual_evidence(self, details: dict[str, Any]) -> bool:
+        if str(details.get("upstream_code", "")) != "observation_evidence_preflight_failed":
+            return False
+        gate_errors = details.get("gate_errors")
+        if not isinstance(gate_errors, list):
+            return False
+        return any(isinstance(item, str) and item == "pending_visual_evidence" for item in gate_errors)
+
     def _store_record(self, record: VerificationQueueRecord) -> None:
         request_id = record.request_id
         if request_id not in self._records_by_request_id and len(self._record_order) == self._result_registry_capacity:
@@ -642,6 +892,13 @@ class VerificationQueueManager:
         if request_id not in self._submission_records_by_request_id:
             self._submission_order.append(request_id)
         self._submission_records_by_request_id[request_id] = record
+
+    def _release_request_lease(self, request_id: str) -> None:
+        release_verification_evidence_lease(
+            evidence_root_dir=self._evidence_root_dir,
+            request_id=request_id,
+            lock_timeout_seconds=self._lease_lock_timeout_seconds,
+        )
 
 
 def build_request_from_track_id(track_id: str, *, source: str) -> VerificationQueueRequest:
@@ -666,19 +923,155 @@ def build_request_from_message_id(track_id: str, message_id: str, *, source: str
     )
 
 
-def extract_track_requests_from_cycle_payload(payload: dict[str, Any]) -> Iterable[VerificationQueueRequest]:
+def extract_submission_decisions_from_cycle_payload(payload: dict[str, Any]) -> list[VerificationSubmissionDecision]:
     events = payload.get("events")
     if not isinstance(events, list):
-        return []
+        return [
+            VerificationSubmissionDecision(
+                event_origin=None,
+                trigger_event_id=None,
+                track_id=None,
+                evidence_requested=False,
+                evidence_message_id=None,
+                queue_request=None,
+                submission_eligibility=False,
+                skip_reason="events_missing_or_invalid",
+            )
+        ]
 
-    requests: list[VerificationQueueRequest] = []
+    decisions: list[VerificationSubmissionDecision] = []
     for event in events:
         if not isinstance(event, dict):
+            decisions.append(
+                VerificationSubmissionDecision(
+                    event_origin=None,
+                    trigger_event_id=None,
+                    track_id=None,
+                    evidence_requested=False,
+                    evidence_message_id=None,
+                    queue_request=None,
+                    submission_eligibility=False,
+                    skip_reason="event_not_dict",
+                )
+            )
             continue
-        if not bool(event.get("evidence_requested", False)):
+
+        trigger_event_id = event.get("event_id")
+        if not isinstance(trigger_event_id, str) or not trigger_event_id.strip():
+            trigger_event_id = event.get("task_id")
+        if not isinstance(trigger_event_id, str) or not trigger_event_id.strip():
+            trigger_event_id = None
+
+        evidence_requested = bool(event.get("evidence_requested", False))
+        track_id_value = event.get("track_id")
+        track_id = track_id_value.strip() if isinstance(track_id_value, str) else None
+
+        evidence_message_id_value = event.get("evidence_message_id")
+        evidence_message_id = (
+            evidence_message_id_value.strip()
+            if isinstance(evidence_message_id_value, str) and evidence_message_id_value.strip()
+            else None
+        )
+        event_origin_value = event.get("event_origin")
+        event_origin = (
+            event_origin_value.strip()
+            if isinstance(event_origin_value, str)
+            and event_origin_value.strip() in {"startup_activation", "production_monitor"}
+            else None
+        )
+
+        if not evidence_requested:
+            decisions.append(
+                VerificationSubmissionDecision(
+                    event_origin=event_origin,
+                    trigger_event_id=trigger_event_id,
+                    track_id=track_id,
+                    evidence_requested=False,
+                    evidence_message_id=evidence_message_id,
+                    queue_request=None,
+                    submission_eligibility=False,
+                    skip_reason="evidence_not_requested",
+                )
+            )
             continue
-        track_id = event.get("track_id")
+
+        if event_origin != "production_monitor":
+            decisions.append(
+                VerificationSubmissionDecision(
+                    event_origin=event_origin,
+                    trigger_event_id=trigger_event_id,
+                    track_id=track_id,
+                    evidence_requested=True,
+                    evidence_message_id=evidence_message_id,
+                    queue_request=None,
+                    submission_eligibility=False,
+                    skip_reason=(
+                        "startup_activation_event"
+                        if event_origin == "startup_activation"
+                        else "invalid_or_missing_event_origin"
+                    ),
+                )
+            )
+            continue
+
+        if bool(event.get("skip_verification", False)):
+            skip_reason = event.get("skip_reason")
+            normalized_skip_reason = skip_reason.strip() if isinstance(skip_reason, str) and skip_reason.strip() else "verification_skipped"
+            decisions.append(
+                VerificationSubmissionDecision(
+                    event_origin=event_origin,
+                    trigger_event_id=trigger_event_id,
+                    track_id=track_id,
+                    evidence_requested=True,
+                    evidence_message_id=evidence_message_id,
+                    queue_request=None,
+                    submission_eligibility=False,
+                    skip_reason=normalized_skip_reason,
+                )
+            )
+            continue
+
         if not isinstance(track_id, str) or not track_id.strip():
+            decisions.append(
+                VerificationSubmissionDecision(
+                    event_origin=event_origin,
+                    trigger_event_id=trigger_event_id,
+                    track_id=None,
+                    evidence_requested=True,
+                    evidence_message_id=evidence_message_id,
+                    queue_request=None,
+                    submission_eligibility=False,
+                    skip_reason="invalid_track_id",
+                )
+            )
             continue
-        requests.append(build_request_from_track_id(track_id.strip(), source="reasoning_cycle"))
-    return requests
+
+        if evidence_message_id is not None:
+            request = build_request_from_message_id(track_id, evidence_message_id, source="production_monitor")
+        else:
+            request = build_request_from_track_id(track_id, source="production_monitor")
+
+        request.trigger_event_id = trigger_event_id
+        event_timestamp = event.get("timestamp")
+        if isinstance(event_timestamp, (int, float)):
+            request.trigger_timestamp = float(event_timestamp)
+
+        decisions.append(
+            VerificationSubmissionDecision(
+                event_origin=event_origin,
+                trigger_event_id=trigger_event_id,
+                track_id=track_id,
+                evidence_requested=True,
+                evidence_message_id=evidence_message_id,
+                queue_request=request,
+                submission_eligibility=True,
+                skip_reason=None,
+            )
+        )
+
+    return decisions
+
+
+def extract_track_requests_from_cycle_payload(payload: dict[str, Any]) -> Iterable[VerificationQueueRequest]:
+    decisions = extract_submission_decisions_from_cycle_payload(payload)
+    return [decision.queue_request for decision in decisions if decision.queue_request is not None]

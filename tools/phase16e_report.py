@@ -130,10 +130,32 @@ def _partition_trigger_events_for_run_id(payload: list[dict[str, Any]], run_id: 
     return (accepted, missing_count, mismatched_count, total)
 
 
+def _normalize_event_origin(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    if normalized in {"startup_activation", "production_monitor"}:
+        return normalized
+    return None
+
+
+def _trigger_event_identifier(event: dict[str, Any]) -> str | None:
+    for key in ("event_id", "task_id"):
+        value = event.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _is_synthetic_track(track_id: str) -> bool:
+    return track_id.startswith("sim-")
+
+
 def _build_correlated_chain_rows(
     queue_records: list[dict[str, Any]],
     submission_records: list[dict[str, Any]],
     trigger_events: list[dict[str, Any]],
+    submission_decisions: list[dict[str, Any]],
     *,
     start_ts: float | None,
     effective_end_ts: float | None,
@@ -144,17 +166,28 @@ def _build_correlated_chain_rows(
         if request_id:
             queue_by_request_id[request_id] = item
 
+    submissions_by_request_id: dict[str, dict[str, Any]] = {}
     submissions_by_track: dict[str, list[dict[str, Any]]] = {}
     for item in submission_records:
+        request_id = str(item.get("request_id", "")).strip()
+        if request_id:
+            submissions_by_request_id[request_id] = item
         track_id = str(item.get("track_id", "")).strip()
-        if not track_id:
-            continue
-        submissions_by_track.setdefault(track_id, []).append(item)
+        if track_id:
+            submissions_by_track.setdefault(track_id, []).append(item)
 
     for track_submissions in submissions_by_track.values():
         track_submissions.sort(key=lambda row: float(row.get("submitted_at")) if isinstance(row.get("submitted_at"), (int, float)) else 0.0)
 
-    run_trigger_events = []
+    decision_by_trigger_event_id: dict[str, dict[str, Any]] = {}
+    for item in submission_decisions:
+        if not isinstance(item, dict):
+            continue
+        trigger_event_id = item.get("trigger_event_id")
+        if isinstance(trigger_event_id, str) and trigger_event_id.strip():
+            decision_by_trigger_event_id[trigger_event_id.strip()] = item
+
+    run_trigger_events: list[dict[str, Any]] = []
     for event in trigger_events:
         event_type = str(event.get("event_type", "")).strip()
         if event_type not in {"reasoning_cycle", "verification_trigger", "phase16e_trigger"}:
@@ -169,10 +202,32 @@ def _build_correlated_chain_rows(
     for event in run_trigger_events:
         track_id = str(event.get("track_id", "")).strip() or "unknown"
         trigger_timestamp = float(event.get("timestamp")) if isinstance(event.get("timestamp"), (int, float)) else None
+        trigger_event_id = _trigger_event_identifier(event)
+        decision = decision_by_trigger_event_id.get(trigger_event_id or "")
+
+        event_origin = _normalize_event_origin(event.get("event_origin"))
+        if event_origin is None:
+            event_origin = _normalize_event_origin(decision.get("event_origin") if isinstance(decision, dict) else None)
+
+        synthetic_track = _is_synthetic_track(track_id)
+        eligible_for_genuine_chain = (
+            str(event.get("event_type", "")).strip() == "reasoning_cycle"
+            and bool(event.get("evidence_requested", False))
+            and event_origin == "production_monitor"
+            and not synthetic_track
+        )
+
+        decision_queue_request_id = None
+        if isinstance(decision, dict):
+            candidate_request_id = decision.get("queue_request_id")
+            if isinstance(candidate_request_id, str) and candidate_request_id.strip():
+                decision_queue_request_id = candidate_request_id.strip()
 
         matched_submission: dict[str, Any] | None = None
         fallback_submission: dict[str, Any] | None = None
-        if track_id in submissions_by_track and trigger_timestamp is not None:
+        if decision_queue_request_id is not None:
+            matched_submission = submissions_by_request_id.get(decision_queue_request_id)
+        elif eligible_for_genuine_chain and track_id in submissions_by_track and trigger_timestamp is not None:
             for candidate in submissions_by_track[track_id]:
                 submitted_at = candidate.get("submitted_at")
                 if not isinstance(submitted_at, (int, float)):
@@ -187,7 +242,6 @@ def _build_correlated_chain_rows(
                 if bool(candidate.get("accepted", False)):
                     matched_submission = candidate
                     break
-
         if matched_submission is None:
             matched_submission = fallback_submission
 
@@ -201,6 +255,13 @@ def _build_correlated_chain_rows(
         verification_success = str(queue_item.get("validation_outcome", "")).strip() == "accepted"
         submission_status = str(matched_submission.get("status", "")).strip() if isinstance(matched_submission, dict) else "not_attempted"
         submission_reason = (str(matched_submission.get("reason", "")).strip() or None) if isinstance(matched_submission, dict) else None
+        skip_reason = (
+            str(decision.get("skip_reason")).strip()
+            if isinstance(decision, dict) and isinstance(decision.get("skip_reason"), str) and str(decision.get("skip_reason")).strip()
+            else None
+        )
+        submission_attempted_from_decision = bool(decision.get("submission_attempted", False)) if isinstance(decision, dict) else False
+        submission_accepted_from_decision = bool(decision.get("submission_accepted", False)) if isinstance(decision, dict) else False
 
         automatic_evidence_requested = (
             bool(event.get("evidence_requested", False))
@@ -210,24 +271,31 @@ def _build_correlated_chain_rows(
 
         rows.append(
             {
+                "trigger_event_id": trigger_event_id,
                 "track_id": track_id,
+                "event_origin": event_origin,
+                "synthetic_track": synthetic_track,
                 "trigger_timestamp": event.get("timestamp"),
                 "automatic_evidence_requested": automatic_evidence_requested,
-                "submission_attempted": matched_submission is not None,
+                "eligible_for_genuine_chain": eligible_for_genuine_chain,
+                "submission_decision_available": isinstance(decision, dict),
+                "submission_attempted": bool(matched_submission is not None or submission_attempted_from_decision),
                 "submission_status": submission_status,
-                "submission_reason": submission_reason,
+                "submission_reason": submission_reason or skip_reason,
                 "queue_submission": queue_submission,
                 "queue_request_id": matched_submission.get("request_id") if isinstance(matched_submission, dict) else queue_item.get("request_id"),
                 "evidence_message_id": matched_submission.get("message_id") if isinstance(matched_submission, dict) else queue_item.get("evidence_message_id"),
                 "fresh_camera_yolo_evidence": bool((matched_submission.get("message_id") if isinstance(matched_submission, dict) else queue_item.get("evidence_message_id"))),
                 "verification_status": queue_item.get("status"),
                 "verification_success": verification_success,
+                "submission_accepted_from_decision": submission_accepted_from_decision,
                 "coordinator_acceptance": bool(queue_item.get("coordinator_valid", verification_success)),
                 "feedback_publication": bool(queue_item.get("feedback_published", False)),
                 "tracking_feedback_consumer_acceptance": bool(queue_item.get("tracking_feedback_consumer_acceptance", False)),
                 "current_not_stale": str(queue_item.get("current_applicability", "")) == "current",
             }
         )
+
     return rows
 
 
@@ -244,6 +312,8 @@ def _build_failure_reasons(
     queue_mismatched_run_id_count: int,
     submission_missing_run_id_count: int,
     submission_mismatched_run_id_count: int,
+    submission_decision_missing_run_id_count: int,
+    submission_decision_mismatched_run_id_count: int,
     trigger_event_missing_run_id_count: int,
     trigger_event_mismatched_run_id_count: int,
     required_run_local_artifacts_missing: list[str],
@@ -272,6 +342,10 @@ def _build_failure_reasons(
         reasons.append(f"submission_records_missing_run_id:{submission_missing_run_id_count}")
     if submission_mismatched_run_id_count > 0:
         reasons.append(f"submission_records_mismatched_run_id:{submission_mismatched_run_id_count}")
+    if submission_decision_missing_run_id_count > 0:
+        reasons.append(f"submission_decisions_missing_run_id:{submission_decision_missing_run_id_count}")
+    if submission_decision_mismatched_run_id_count > 0:
+        reasons.append(f"submission_decisions_mismatched_run_id:{submission_decision_mismatched_run_id_count}")
     if trigger_event_missing_run_id_count > 0:
         reasons.append(f"trigger_events_missing_run_id:{trigger_event_missing_run_id_count}")
     if trigger_event_mismatched_run_id_count > 0:
@@ -290,10 +364,12 @@ def _build_failure_reasons(
         reasons.append("observation_text_attempt_count_not_zero")
     if role_counts.get("reasoning_text", 0) != 0:
         reasons.append("reasoning_text_attempt_count_not_zero")
-    if not correlated_rows:
+
+    eligible_rows = [row for row in correlated_rows if bool(row.get("eligible_for_genuine_chain", False))]
+    if not eligible_rows:
         reasons.append("correlated_chain_missing")
 
-    for row in correlated_rows:
+    for row in eligible_rows:
         track_id = str(row.get("track_id", "unknown"))
         if not bool(row.get("queue_submission", False)):
             reasons.append(f"queue_submission_missing:{track_id}")
@@ -328,11 +404,13 @@ def generate_report(run_dir: Path) -> dict[str, Any]:
     budget_state = _safe_load_json(budget_state_path)
     budget_events = _load_jsonl(budget_log_path)
     trigger_events_payload = _load_jsonl(trigger_events_path)
+    submission_decisions_payload = _load_jsonl(run_dir / "verification_submission_decisions.jsonl")
     queue_payload = _safe_load_json(run_dir / "latest_verification_queue_results.json")
     submission_payload = _safe_load_json(run_dir / "latest_verification_queue_submissions.json")
 
     queue_records, queue_missing_run_id_count, queue_mismatched_run_id_count, queue_total = _partition_records_for_run_id(queue_payload, run_id)
     submission_records, submission_missing_run_id_count, submission_mismatched_run_id_count, submission_total = _partition_records_for_run_id(submission_payload, run_id)
+    submission_decisions, submission_decision_missing_run_id_count, submission_decision_mismatched_run_id_count, submission_decision_total = _partition_records_for_run_id(submission_decisions_payload, run_id)
     trigger_events, trigger_event_missing_run_id_count, trigger_event_mismatched_run_id_count, trigger_event_total = _partition_trigger_events_for_run_id(trigger_events_payload, run_id)
 
     required_artifacts_status_payload = _safe_load_json(run_dir / "run_local_artifact_status.json")
@@ -357,7 +435,16 @@ def generate_report(run_dir: Path) -> dict[str, Any]:
         post_shutdown_processes = [line.strip() for line in post_shutdown_path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
     role_counts = _role_attempt_counts(budget_state if isinstance(budget_state, dict) else None, budget_events)
-    correlated_rows = _build_correlated_chain_rows(queue_records, submission_records, trigger_events, start_ts=start_ts, effective_end_ts=effective_end_ts)
+    correlated_rows = _build_correlated_chain_rows(
+        queue_records,
+        submission_records,
+        trigger_events,
+        submission_decisions,
+        start_ts=start_ts,
+        effective_end_ts=effective_end_ts,
+    )
+    eligible_correlated_rows = [row for row in correlated_rows if bool(row.get("eligible_for_genuine_chain", False))]
+    startup_only_observed = bool(correlated_rows) and not bool(eligible_correlated_rows)
 
     failure_reasons = _build_failure_reasons(
         run_id=run_id,
@@ -371,6 +458,8 @@ def generate_report(run_dir: Path) -> dict[str, Any]:
         queue_mismatched_run_id_count=queue_mismatched_run_id_count,
         submission_missing_run_id_count=submission_missing_run_id_count,
         submission_mismatched_run_id_count=submission_mismatched_run_id_count,
+        submission_decision_missing_run_id_count=submission_decision_missing_run_id_count,
+        submission_decision_mismatched_run_id_count=submission_decision_mismatched_run_id_count,
         trigger_event_missing_run_id_count=trigger_event_missing_run_id_count,
         trigger_event_mismatched_run_id_count=trigger_event_mismatched_run_id_count,
         required_run_local_artifacts_missing=required_run_local_artifacts_missing,
@@ -380,6 +469,10 @@ def generate_report(run_dir: Path) -> dict[str, Any]:
     verdict = "PASS" if not failure_reasons else "FAIL"
     if main_exit_code is None:
         verdict = "INCONCLUSIVE"
+    elif startup_only_observed:
+        non_infra_reasons = {"correlated_chain_missing"}
+        infra_failures = [reason for reason in failure_reasons if reason not in non_infra_reasons]
+        verdict = "FAIL" if infra_failures else "INCONCLUSIVE"
 
     report = {
         "schema_version": "1.0",
@@ -403,6 +496,7 @@ def generate_report(run_dir: Path) -> dict[str, Any]:
             "post_shutdown_processes_path": str(post_shutdown_path),
             "verification_submission_path": str(run_dir / "latest_verification_queue_submissions.json"),
             "verification_results_path": str(run_dir / "latest_verification_queue_results.json"),
+            "verification_submission_decisions_path": str(run_dir / "verification_submission_decisions.jsonl"),
             "trigger_events_path": str(trigger_events_path),
             "main_exit_code_path": str(run_dir / "main_exit_code.txt"),
             "output_path": str(run_dir / "phase16e_report.json"),
@@ -429,15 +523,28 @@ def generate_report(run_dir: Path) -> dict[str, Any]:
                 "submission_accepted_for_run_id": len(submission_records),
                 "submission_missing_run_id_count": submission_missing_run_id_count,
                 "submission_mismatched_run_id_count": submission_mismatched_run_id_count,
+                "submission_decision_total": submission_decision_total,
+                "submission_decision_accepted_for_run_id": len(submission_decisions),
+                "submission_decision_missing_run_id_count": submission_decision_missing_run_id_count,
+                "submission_decision_mismatched_run_id_count": submission_decision_mismatched_run_id_count,
                 "trigger_event_total": trigger_event_total,
                 "trigger_event_accepted_for_run_id": len(trigger_events),
                 "trigger_event_missing_run_id_count": trigger_event_missing_run_id_count,
                 "trigger_event_mismatched_run_id_count": trigger_event_mismatched_run_id_count,
             },
+            "submission_decisions": {
+                "path": str(run_dir / "verification_submission_decisions.jsonl"),
+                "records_for_run_id": len(submission_decisions),
+            },
             "required_run_local_artifacts": {
                 "expected": required_run_local_artifacts_expected,
                 "present": required_run_local_artifacts_present,
                 "missing": required_run_local_artifacts_missing,
+            },
+            "trigger_eligibility": {
+                "startup_only_observed": startup_only_observed,
+                "correlated_row_count": len(correlated_rows),
+                "eligible_row_count": len(eligible_correlated_rows),
             },
         },
         "correlated_chain_rows": correlated_rows,

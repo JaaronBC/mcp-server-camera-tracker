@@ -1,0 +1,127 @@
+{
+  "schema_version": "1.0",
+  "generated_at": 1793690372.419513,
+  "run_dir": "/Users/jaaroncabsaban/Documents/GitHub/mcp-server-camera-tracker/captures/probes/runs/camera-only-handoff-1793690275",
+  "window": {
+    "start_ts": 1793690276.452578,
+    "end_ts": 1793690371.625111,
+    "effective_end_ts": 1793690391.625111,
+    "bounded_session_seconds": 60.0,
+    "verification_drain_seconds": 20.0,
+    "watchdog_margin_seconds": 15.0,
+    "session_duration_seconds": 95.17253303527832,
+    "session_bound_seconds": 95.0
+  },
+  "artifacts": {
+    "run_id": "phase16e-1793690275",
+    "budget_state_path": "/Users/jaaroncabsaban/Documents/GitHub/mcp-server-camera-tracker/captures/probes/runs/camera-only-handoff-1793690275/provider_call_budget_state.json",
+    "budget_log_path": "/Users/jaaroncabsaban/Documents/GitHub/mcp-server-camera-tracker/captures/probes/runs/camera-only-handoff-1793690275/provider_call_budget_events.jsonl",
+    "main_log_path": "/Users/jaaroncabsaban/Documents/GitHub/mcp-server-camera-tracker/captures/probes/runs/camera-only-handoff-1793690275/main.log",
+    "post_shutdown_processes_path": "/Users/jaaroncabsaban/Documents/GitHub/mcp-server-camera-tracker/captures/probes/runs/camera-only-handoff-1793690275/post_shutdown_processes.txt",
+    "verification_submission_path": "/Users/jaaroncabsaban/Documents/GitHub/mcp-server-camera-tracker/captures/probes/runs/camera-only-handoff-1793690275/latest_verification_queue_submissions.json",
+    "verification_results_path": "/Users/jaaroncabsaban/Documents/GitHub/mcp-server-camera-tracker/captures/probes/runs/camera-only-handoff-1793690275/latest_verification_queue_results.json",
+    "verification_submission_decisions_path": "/Users/jaaroncabsaban/Documents/GitHub/mcp-server-camera-tracker/captures/probes/runs/camera-only-handoff-1793690275/verification_submission_decisions.jsonl",
+    "trigger_events_path": "/Users/jaaroncabsaban/Documents/GitHub/mcp-server-camera-tracker/captures/probes/runs/camera-only-handoff-1793690275/agent_events.jsonl",
+    "main_exit_code_path": "/Users/jaaroncabsaban/Documents/GitHub/mcp-server-camera-tracker/captures/probes/runs/camera-only-handoff-1793690275/main_exit_code.txt",
+    "output_path": "/Users/jaaroncabsaban/Documents/GitHub/mcp-server-camera-tracker/captures/probes/runs/camera-only-handoff-1793690275/phase16e_report.json"
+  },
+  "checks": {
+    "run_clean_shutdown": true,
+    "post_shutdown_processes": [],
+    "main_exit_code": 124,
+    "main_exit_code_ok": false,
+    "run_interrupted": false,
+    "budget": {
+      "state_exists": true,
+      "log_exists": true,
+      "role_attempt_counts": {
+        "tracking_vlm": 0,
+        "observation_text": 0,
+        "reasoning_text": 0,
+        "observation_visual": 0
+      },
+      "exactly_one_observation_visual_attempt": false
+    },
+    "run_identity": {
+      "run_id_present": true,
+      "queue_total": 0,
+      "queue_accepted_for_run_id": 0,
+      "queue_missing_run_id_count": 0,
+      "queue_mismatched_run_id_count": 0,
+      "submission_total": 0,
+      "submission_accepted_for_run_id": 0,
+      "submission_missing_run_id_count": 0,
+      "submission_mismatched_run_id_count": 0,
+      "submission_decision_total": 11,
+      "submission_decision_accepted_for_run_id": 11,
+      "submission_decision_missing_run_id_count": 0,
+      "submission_decision_mismatched_run_id_count": 0,
+      "trigger_event_total": 14,
+      "trigger_event_accepted_for_run_id": 14,
+      "trigger_event_missing_run_id_count": 0,
+      "trigger_event_mismatched_run_id_count": 0
+    },
+    "submission_decisions": {
+      "path": "/Users/jaaroncabsaban/Documents/GitHub/mcp-server-camera-tracker/captures/probes/runs/camera-only-handoff-1793690275/verification_submission_decisions.jsonl",
+      "records_for_run_id": 11
+    },
+    "required_run_local_artifacts": {
+      "expected": [
+        "provider_call_budget_state.json",
+        "provider_call_budget_events.jsonl",
+        "provider_call_budget_diagnostics.json",
+        "latest_verification_queue_results.json",
+        "latest_verification_queue_submissions.json",
+        "operator_tracking_feedback.json",
+        "agent_events.jsonl"
+      ],
+      "present": [
+        "provider_call_budget_state.json",
+        "provider_call_budget_events.jsonl",
+        "provider_call_budget_diagnostics.json",
+        "latest_verification_queue_results.json",
+        "latest_verification_queue_submissions.json",
+        "operator_tracking_feedback.json",
+        "agent_events.jsonl"
+      ],
+      "missing": []
+    },
+    "trigger_eligibility": {
+      "startup_only_observed": true,
+      "correlated_row_count": 1,
+      "eligible_row_count": 0
+    }
+  },
+  "correlated_chain_rows": [
+    {
+      "trigger_event_id": "cycle-46778b88800043d09a02ea44b83cef90:track-1",
+      "track_id": "sim-1",
+      "event_origin": "startup_activation",
+      "synthetic_track": true,
+      "trigger_timestamp": 1793690279.079047,
+      "automatic_evidence_requested": true,
+      "eligible_for_genuine_chain": false,
+      "submission_decision_available": true,
+      "submission_attempted": false,
+      "submission_status": "not_attempted",
+      "submission_reason": "startup_activation_cycle_no_submission_path",
+      "queue_submission": false,
+      "queue_request_id": null,
+      "evidence_message_id": null,
+      "fresh_camera_yolo_evidence": false,
+      "verification_status": null,
+      "verification_success": false,
+      "submission_accepted_from_decision": false,
+      "coordinator_acceptance": false,
+      "feedback_publication": false,
+      "tracking_feedback_consumer_acceptance": false,
+      "current_not_stale": false
+    }
+  ],
+  "verdict": "FAIL",
+  "failure_reasons": [
+    "correlated_chain_missing",
+    "main_exit_nonzero:124",
+    "observation_visual_attempt_count_not_equal_to_one"
+  ]
+}

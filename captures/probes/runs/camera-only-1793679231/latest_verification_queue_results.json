@@ -1,0 +1,38 @@
+[
+  {
+    "request_id": "verifyreq-1eb4d5c4698c479cafab9a875aea23b6",
+    "source": "production_monitor",
+    "track_id": "sim-1",
+    "evidence_message_id": "",
+    "status": "rejected",
+    "validation_outcome": "resolve_failed",
+    "submitted_at": 1793679238.484991,
+    "started_at": null,
+    "finished_at": 1793679238.484991,
+    "current_applicability": "unknown",
+    "stale_for_current_decisions": false,
+    "coordinator_valid": false,
+    "error_code": "missing_or_invalid_evidence",
+    "error": "Unable to resolve validated evidence message_id for track",
+    "details": {},
+    "run_id": "camera-only-1793679231"
+  },
+  {
+    "request_id": "verifyreq-4c3cb8680c9b4d3f91da0be405a07e72",
+    "source": "production_monitor",
+    "track_id": "sim-2",
+    "evidence_message_id": "",
+    "status": "rejected",
+    "validation_outcome": "resolve_failed",
+    "submitted_at": 1793679240.9886,
+    "started_at": null,
+    "finished_at": 1793679240.9886,
+    "current_applicability": "unknown",
+    "stale_for_current_decisions": false,
+    "coordinator_valid": false,
+    "error_code": "missing_or_invalid_evidence",
+    "error": "Unable to resolve validated evidence message_id for track",
+    "details": {},
+    "run_id": "camera-only-1793679231"
+  }
+]

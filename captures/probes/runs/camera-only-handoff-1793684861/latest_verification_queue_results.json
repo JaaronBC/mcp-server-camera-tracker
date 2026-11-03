@@ -1,0 +1,20 @@
+[
+  {
+    "request_id": "verifyreq-d573ac5943c0441084be16dd754932b8",
+    "source": "production_monitor",
+    "track_id": "2",
+    "evidence_message_id": "trkmsg-2980b4c2724c-1793684879071074-172-2-2",
+    "status": "rejected",
+    "validation_outcome": "evidence_unavailable",
+    "submitted_at": 1793684879.077898,
+    "started_at": 1793684881.7754922,
+    "finished_at": 1793684881.7784362,
+    "current_applicability": "unknown",
+    "stale_for_current_decisions": false,
+    "coordinator_valid": false,
+    "error_code": "missing_or_expired_evidence",
+    "error": "Evidence unavailable prior to verification",
+    "details": {},
+    "run_id": "camera-only-handoff-1793684861"
+  }
+]

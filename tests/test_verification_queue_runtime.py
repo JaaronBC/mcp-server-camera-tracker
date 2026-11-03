@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import tempfile
+import time
 import types
 import unittest
 from pathlib import Path
@@ -21,6 +22,7 @@ if "mcp" not in sys.modules:
 from agents.orchestration.runtime.verification_queue import (
     VerificationQueueManager,
     VerificationQueueRequest,
+    extract_submission_decisions_from_cycle_payload,
 )
 
 
@@ -43,6 +45,8 @@ class _FakeSession:
 
 
 def _envelope_payload(*, message_id: str, track_id: str, timestamp: float) -> dict:
+    frame_id = "frame-1"
+    frame_reference = "evidence://frame/frame-1"
     return {
         "schema_version": "1.0",
         "message_id": message_id,
@@ -55,9 +59,10 @@ def _envelope_payload(*, message_id: str, track_id: str, timestamp: float) -> di
             "visibility_status": "visible",
             "claim_reasons": ["test"],
         },
-        "frame_id": "frame-1",
+        "frame_id": frame_id,
         "detection_id": "det-1",
-        "source_evidence_refs": ["evidence://frame/frame-1"],
+        "frame_reference": frame_reference,
+        "source_evidence_refs": [frame_reference],
         "uncertainty": [],
         "quality_flags": ["position_kind:calibrated_ground_plane"],
         "track_history": [],
@@ -65,6 +70,34 @@ def _envelope_payload(*, message_id: str, track_id: str, timestamp: float) -> di
 
 
 def _write_validated_envelope(root: Path, *, message_id: str, track_id: str, timestamp: float) -> None:
+    frame_id = "frame-1"
+    frame_reference = "evidence://frame/frame-1"
+
+    frames = root / "frames"
+    refs = root / "refs"
+    frames.mkdir(parents=True, exist_ok=True)
+    refs.mkdir(parents=True, exist_ok=True)
+
+    frame_path = frames / f"{frame_id}.jpg"
+    frame_path.write_bytes(b"jpeg")
+    (refs / f"{frame_id}.json").write_text(
+        json.dumps(
+            {
+                "kind": "frame",
+                "id": frame_id,
+                "reference": frame_reference,
+                "timestamp": float(timestamp),
+                "created_at": float(timestamp),
+                "expires_at": float(time.time() + 3600.0),
+                "status": "available",
+                "frame_path": str(frame_path),
+                "width": 16,
+                "height": 16,
+            }
+        ),
+        encoding="utf-8",
+    )
+
     envelopes = root / "envelopes"
     envelopes.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -98,6 +131,50 @@ def _verification_envelope(*, message_id: str, track_id: str, timestamp: float) 
 
 
 class TestVerificationQueueRuntime(unittest.IsolatedAsyncioTestCase):
+    def test_extract_submission_decisions_requires_production_origin(self) -> None:
+        payload = {
+            "events": [
+                {
+                    "event_origin": "startup_activation",
+                    "task_id": "t-1",
+                    "track_id": "sim-1",
+                    "timestamp": 1000.0,
+                    "evidence_requested": True,
+                }
+            ]
+        }
+
+        decisions = extract_submission_decisions_from_cycle_payload(payload)
+        self.assertEqual(len(decisions), 1)
+        decision = decisions[0]
+        self.assertEqual(decision.event_origin, "startup_activation")
+        self.assertFalse(decision.submission_eligibility)
+        self.assertEqual(decision.skip_reason, "startup_activation_event")
+        self.assertIsNone(decision.queue_request)
+
+    def test_extract_submission_decisions_with_production_origin_queues(self) -> None:
+        payload = {
+            "events": [
+                {
+                    "event_origin": "production_monitor",
+                    "event_id": "evt-1",
+                    "track_id": "track-1",
+                    "timestamp": 1000.0,
+                    "evidence_requested": True,
+                    "evidence_message_id": "msg-1",
+                }
+            ]
+        }
+
+        decisions = extract_submission_decisions_from_cycle_payload(payload)
+        self.assertEqual(len(decisions), 1)
+        decision = decisions[0]
+        self.assertEqual(decision.event_origin, "production_monitor")
+        self.assertTrue(decision.submission_eligibility)
+        self.assertIsNotNone(decision.queue_request)
+        self.assertEqual(decision.queue_request.source, "production_monitor")
+        self.assertEqual(decision.queue_request.message_id, "msg-1")
+
     async def test_submission_boundary_records_queued_before_completion(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             evidence_root = Path(temp_dir) / "tracking_evidence"
@@ -251,26 +328,111 @@ class TestVerificationQueueRuntime(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(duplicate["accepted"])
             self.assertEqual(duplicate["status"], "duplicate_inflight")
 
-    async def test_expired_or_missing_evidence_rejected(self) -> None:
+    async def test_pending_precheck_retries_and_failed_frame_does_not(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             evidence_root = Path(temp_dir) / "tracking_evidence"
-            _write_validated_envelope(evidence_root, message_id="msg-expired", track_id="track-1", timestamp=1000.0)
+            _write_validated_envelope(evidence_root, message_id="msg-pending", track_id="track-1", timestamp=1000.0)
+            _write_validated_envelope(evidence_root, message_id="msg-failed", track_id="track-1", timestamp=1000.1)
+            _write_validated_envelope(evidence_root, message_id="msg-pending-timeout", track_id="track-1", timestamp=1000.2)
+
+            precheck_calls: dict[str, int] = {"msg-pending": 0, "msg-failed": 0, "msg-pending-timeout": 0}
 
             async def handler(tool_name, arguments):
+                message_id = str(arguments.get("message_id", ""))
                 if tool_name == "get_tracking_visual_evidence":
-                    return _FakeResult({"available": False, "error_code": "expired_reference"})
+                    if message_id in precheck_calls:
+                        precheck_calls[message_id] += 1
+                    if message_id == "msg-pending-timeout":
+                        return _FakeResult(
+                            {
+                                "available": False,
+                                "error_code": "evidence_unavailable",
+                                "details": {
+                                    "upstream_code": "observation_evidence_preflight_failed",
+                                    "gate_errors": ["pending_visual_evidence"],
+                                },
+                            }
+                        )
+                    if message_id == "msg-pending" and precheck_calls[message_id] == 1:
+                        return _FakeResult(
+                            {
+                                "available": False,
+                                "error_code": "evidence_unavailable",
+                                "details": {
+                                    "upstream_code": "observation_evidence_preflight_failed",
+                                    "gate_errors": ["pending_visual_evidence"],
+                                },
+                            }
+                        )
+                    if message_id == "msg-pending":
+                        return _FakeResult({"available": True, "track_id": "track-1"})
+                    return _FakeResult(
+                        {
+                            "available": False,
+                            "error_code": "evidence_unavailable",
+                            "details": {
+                                "upstream_code": "frame_reference_unresolvable",
+                                "gate_errors": ["missing_visual_evidence"],
+                            },
+                        }
+                    )
+                if tool_name == "verify_tracking_visual_evidence":
+                    return _FakeResult(
+                        {
+                            "available": True,
+                            "envelope": _verification_envelope(
+                                message_id=message_id,
+                                track_id="track-1",
+                                timestamp=1000.5,
+                            ),
+                        }
+                    )
                 raise RuntimeError("unexpected")
 
-            manager = VerificationQueueManager(evidence_root_dir=evidence_root)
+            manager = VerificationQueueManager(evidence_root_dir=evidence_root, max_concurrency=1)
             await manager.start(session=_FakeSession(handler))
             try:
                 manager.submit_request(
-                    VerificationQueueRequest("req-expired", "track-1", "msg-expired", "test", 0.0)
+                    VerificationQueueRequest("req-pending", "track-1", "msg-pending", "test", 0.0)
                 )
                 await asyncio.wait_for(manager._queue.join(), timeout=1.0)
-                result = manager.get_recent_results(1)[0]
-                self.assertEqual(result["status"], "rejected")
-                self.assertEqual(result["validation_outcome"], "evidence_unavailable")
+
+                manager.submit_request(
+                    VerificationQueueRequest("req-failed", "track-1", "msg-failed", "test", 0.0)
+                )
+                await asyncio.wait_for(manager._queue.join(), timeout=1.0)
+
+                manager.submit_request(
+                    VerificationQueueRequest("req-pending-timeout", "track-1", "msg-pending-timeout", "test", 0.0)
+                )
+                await asyncio.wait_for(manager._queue.join(), timeout=2.0)
+
+                results = {
+                    item["request_id"]: item
+                    for item in manager.get_recent_results(10)
+                }
+                pending_result = results["req-pending"]
+                failed_result = results["req-failed"]
+                pending_timeout_result = results["req-pending-timeout"]
+
+                self.assertEqual(pending_result["status"], "completed")
+                self.assertEqual(failed_result["status"], "rejected")
+                self.assertEqual(pending_timeout_result["status"], "rejected")
+                self.assertEqual(failed_result["validation_outcome"], "evidence_unavailable")
+                self.assertEqual(failed_result["error_code"], "missing_or_expired_evidence")
+                self.assertEqual(failed_result["details"].get("upstream_code"), "frame_reference_unresolvable")
+                self.assertEqual(pending_timeout_result["validation_outcome"], "evidence_unavailable")
+                self.assertEqual(pending_timeout_result["error_code"], "missing_or_expired_evidence")
+                self.assertEqual(
+                    pending_timeout_result["details"].get("upstream_code"),
+                    "observation_evidence_preflight_failed",
+                )
+                self.assertIn("pending_visual_evidence", pending_timeout_result["details"].get("gate_errors", []))
+                self.assertGreaterEqual(int(pending_timeout_result["details"].get("attempts", 0)), 2)
+
+                self.assertEqual(precheck_calls["msg-pending"], 2)
+                self.assertEqual(precheck_calls["msg-failed"], 1)
+                self.assertGreaterEqual(precheck_calls["msg-pending-timeout"], 2)
             finally:
                 await manager.stop()
 
@@ -476,3 +638,229 @@ class TestVerificationQueueRuntime(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(results[0]["run_id"], "run-a")
             finally:
                 await manager.stop()
+
+
+    def _lease_path(self, evidence_root: Path, request_id: str) -> Path:
+        return evidence_root / "protection" / "leases" / f"{request_id}.json"
+
+    async def test_enqueue_failure_rolls_back_acquired_lease(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            evidence_root = Path(temp_dir) / "tracking_evidence"
+            _write_validated_envelope(evidence_root, message_id="msg-rollback", track_id="track-1", timestamp=1000.0)
+
+            manager = VerificationQueueManager(evidence_root_dir=evidence_root)
+
+            def _raise_queue_full(_request: VerificationQueueRequest) -> None:
+                raise asyncio.QueueFull()
+
+            manager._queue.put_nowait = _raise_queue_full  # type: ignore[method-assign]
+
+            response = manager.submit_request(
+                VerificationQueueRequest(
+                    request_id="req-rollback",
+                    track_id="track-1",
+                    message_id="msg-rollback",
+                    source="test",
+                    requested_at=0.0,
+                )
+            )
+            self.assertFalse(response["accepted"])
+            self.assertEqual(response["status"], "queue_enqueue_failed")
+            self.assertFalse(self._lease_path(evidence_root, "req-rollback").is_file())
+
+    async def test_releases_lease_on_completion_and_shutdown_cancellation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            evidence_root = Path(temp_dir) / "tracking_evidence"
+            _write_validated_envelope(evidence_root, message_id="msg-complete", track_id="track-1", timestamp=1000.0)
+            _write_validated_envelope(evidence_root, message_id="msg-shutdown", track_id="track-1", timestamp=1001.0)
+
+            block_precheck = asyncio.Event()
+            allow_precheck = asyncio.Event()
+
+            async def handler(tool_name, arguments):
+                if tool_name == "get_tracking_visual_evidence":
+                    message_id = str(arguments.get("message_id", ""))
+                    if message_id == "msg-shutdown":
+                        block_precheck.set()
+                        await allow_precheck.wait()
+                    return _FakeResult({"available": True, "track_id": "track-1"})
+                if tool_name == "verify_tracking_visual_evidence":
+                    return _FakeResult(
+                        {
+                            "available": True,
+                            "envelope": _verification_envelope(
+                                message_id=str(arguments.get("message_id", "")),
+                                track_id="track-1",
+                                timestamp=1002.0,
+                            ),
+                        }
+                    )
+                raise RuntimeError("unexpected tool")
+
+            manager = VerificationQueueManager(evidence_root_dir=evidence_root, max_concurrency=1)
+            await manager.start(session=_FakeSession(handler))
+            try:
+                accepted = manager.submit_request(
+                    VerificationQueueRequest("req-complete", "track-1", "msg-complete", "test", 0.0)
+                )
+                self.assertTrue(accepted["accepted"])
+                await asyncio.wait_for(manager._queue.join(), timeout=1.0)
+                self.assertFalse(self._lease_path(evidence_root, "req-complete").is_file())
+
+                accepted_shutdown = manager.submit_request(
+                    VerificationQueueRequest("req-shutdown", "track-1", "msg-shutdown", "test", 0.0)
+                )
+                self.assertTrue(accepted_shutdown["accepted"])
+                await asyncio.wait_for(block_precheck.wait(), timeout=1.0)
+
+                await manager.stop()
+                self.assertFalse(self._lease_path(evidence_root, "req-shutdown").is_file())
+            finally:
+                allow_precheck.set()
+
+
+    async def test_real_evidence_generation_drives_real_queue_precheck(self) -> None:
+        import numpy as np
+        import time
+
+        from agents.contracts import BoundingBox, DetectionCandidate
+        from agents.coordinator import AgentCoordinator
+        from agents.observation.evidence_consumption import (
+            ObservationEvidenceConsumptionError,
+            ObservationEvidenceRequest,
+            consume_tracking_evidence_by_message_id,
+        )
+        from agents.tracking.evidence_packaging import TrackingEvidencePackager
+        from agents.tracking.evidence_store import TrackingEvidenceResolver, TrackingEvidenceStore
+
+        def _detection(track_id: str, detection_id: str, timestamp: float) -> DetectionCandidate:
+            return DetectionCandidate(
+                detection_id=detection_id,
+                timestamp=timestamp,
+                yolo_track_id=track_id,
+                label='person',
+                detection_confidence=0.93,
+                pixel_bbox=BoundingBox(x1=100.0, y1=120.0, x2=180.0, y2=260.0),
+                pixel_center_x=140.0,
+                pixel_center_y=190.0,
+                relative_depth=0.4,
+                ground_x=1.5,
+                ground_z=5.0,
+                ground_coordinate_unit='meters',
+                position_kind='calibrated_ground_plane',
+                motion_history=[],
+            )
+
+        def _wait_for_frame_available(resolver: TrackingEvidenceResolver, frame_reference: str, timeout_seconds: float = 1.5) -> bool:
+            deadline = time.time() + timeout_seconds
+            while time.time() < deadline:
+                resolved = resolver.resolve_reference(frame_reference)
+                if bool(resolved.get('valid', False)):
+                    return True
+                time.sleep(0.01)
+            return False
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            evidence_root = Path(temp_dir) / 'tracking_evidence'
+
+            coordinator = AgentCoordinator()
+            store = TrackingEvidenceStore(evidence_root)
+            resolver = TrackingEvidenceResolver(evidence_root)
+            packager = TrackingEvidencePackager(coordinator=coordinator, evidence_store=store)
+
+            track_id = 'track-precheck'
+            timestamp = time.time()
+            frame = np.zeros((24, 24, 3), dtype=np.uint8)
+            frame_record = store.register_frame(
+                frame=frame,
+                timestamp=timestamp,
+                width=24,
+                height=24,
+            )
+
+            packaged = packager.package_detection(
+                detection=_detection(track_id, 'det-precheck', timestamp),
+                timestamp=timestamp,
+                frame_evidence=frame_record,
+                update_payload={
+                    'detection_id': 'det-precheck',
+                    'resolved_track_id': track_id,
+                    'accepted': True,
+                    'rejection_reasons': [],
+                },
+            )
+
+            self.assertTrue(packaged.validation.get('valid', False))
+            self.assertEqual(packaged.envelope.track_id, track_id)
+            self.assertEqual(packaged.envelope.frame_reference, frame_record.frame_reference)
+            self.assertTrue(any(ref.startswith('evidence://detection/') for ref in packaged.envelope.source_evidence_refs))
+            self.assertTrue(_wait_for_frame_available(resolver, frame_record.frame_reference))
+
+            verify_calls: list[str] = []
+
+            async def handler(tool_name, arguments):
+                if tool_name == 'get_tracking_visual_evidence':
+                    message_id = str(arguments.get('message_id', ''))
+                    try:
+                        package = consume_tracking_evidence_by_message_id(
+                            ObservationEvidenceRequest(message_id=message_id, require_visual_evidence=True),
+                            evidence_root_dir=evidence_root,
+                        )
+                        payload = {
+                            'available': True,
+                            'message_id': package.message_id,
+                            'track_id': package.envelope.track_id,
+                        }
+                    except ObservationEvidenceConsumptionError as error:
+                        payload = {
+                            'available': False,
+                            'error_code': 'evidence_unavailable',
+                            'details': {
+                                'upstream_code': error.code,
+                                'gate_errors': error.details.get('gate_errors') if isinstance(error.details, dict) else None,
+                                'message_id': message_id,
+                            },
+                        }
+                    return _FakeResult(payload)
+
+                if tool_name == 'verify_tracking_visual_evidence':
+                    message_id = str(arguments.get('message_id', ''))
+                    verify_calls.append(message_id)
+                    return _FakeResult(
+                        {
+                            'available': False,
+                            'error_code': 'provider_failure',
+                            'error': 'provider intentionally mocked in test',
+                        }
+                    )
+
+                raise RuntimeError('unexpected tool')
+
+            manager = VerificationQueueManager(evidence_root_dir=evidence_root)
+            await manager.start(session=_FakeSession(handler))
+            try:
+                accepted = manager.submit_request(
+                    VerificationQueueRequest(
+                        request_id='req-real-precheck',
+                        track_id=track_id,
+                        message_id=packaged.envelope.message_id,
+                        source='test',
+                        requested_at=timestamp + 0.1,
+                    )
+                )
+                self.assertTrue(accepted['accepted'])
+
+                await asyncio.wait_for(manager._queue.join(), timeout=2.0)
+                result = manager.get_recent_results(1)[0]
+
+                self.assertEqual(verify_calls, [packaged.envelope.message_id])
+                self.assertEqual(result['request_id'], 'req-real-precheck')
+                self.assertEqual(result['track_id'], track_id)
+                self.assertEqual(result['evidence_message_id'], packaged.envelope.message_id)
+                self.assertEqual(result['status'], 'failed')
+                self.assertEqual(result['validation_outcome'], 'provider_failure')
+                self.assertEqual(result['error_code'], 'provider_failure')
+            finally:
+                await manager.stop()
+                resolver.shutdown()
+                store.shutdown()

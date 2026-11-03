@@ -2,13 +2,38 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
+import time
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from mcp import ClientSession
 
-from .verification_queue import VerificationQueueManager, extract_track_requests_from_cycle_payload
+from .verification_queue import VerificationQueueManager, extract_submission_decisions_from_cycle_payload
 
 from . import app as runtime_app
+
+
+def _resolve_submission_decisions_path() -> Path | None:
+    explicit_path = os.getenv("PHASE16E_VERIFICATION_SUBMISSION_DECISIONS_PATH", "").strip()
+    if explicit_path:
+        return Path(explicit_path).expanduser().resolve()
+    results_path = os.getenv("PHASE16E_VERIFICATION_RESULTS_PATH", "").strip()
+    if results_path:
+        return Path(results_path).expanduser().resolve().parent / "verification_submission_decisions.jsonl"
+    return None
+
+
+def _append_submission_decision(payload: dict[str, Any]) -> None:
+    path = _resolve_submission_decisions_path()
+    if path is None:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    serialized = dict(payload)
+    serialized["logged_at"] = time.time()
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(f"{json.dumps(serialized)}\n")
 
 
 async def start_runtime_services(
@@ -158,8 +183,46 @@ async def monitor_movement(
                     if verification_manager is not None:
                         cycle_payload = pipeline_result.get("cycle_payload")
                         if isinstance(cycle_payload, dict):
-                            for verification_request in extract_track_requests_from_cycle_payload(cycle_payload):
-                                verification_manager.submit_request(verification_request)
+                            run_id = os.getenv("PHASE16E_RUN_ID", "").strip() or None
+                            decisions = extract_submission_decisions_from_cycle_payload(cycle_payload)
+                            for decision in decisions:
+                                queue_request = decision.queue_request
+                                queue_request_id = queue_request.request_id if queue_request is not None else None
+                                submission_attempted = False
+                                submission_accepted = False
+                                skip_reason = decision.skip_reason
+
+                                if queue_request is not None:
+                                    submission_attempted = True
+                                    try:
+                                        outcome = verification_manager.submit_request(queue_request)
+                                    except Exception as error:
+                                        skip_reason = f"submit_exception:{type(error).__name__}"
+                                        emit(
+                                            "Verification request submission failed "
+                                            f"({type(error).__name__}): {error}"
+                                        )
+                                    else:
+                                        submission_accepted = bool(outcome.get("accepted", False)) if isinstance(outcome, dict) else False
+                                        if not submission_accepted and skip_reason is None:
+                                            status = outcome.get("status") if isinstance(outcome, dict) else None
+                                            skip_reason = f"submit_rejected:{status or 'unknown'}"
+
+                                _append_submission_decision(
+                                    {
+                                        "run_id": run_id,
+                                        "event_origin": decision.event_origin,
+                                        "trigger_event_id": decision.trigger_event_id,
+                                        "track_id": decision.track_id,
+                                        "evidence_requested": decision.evidence_requested,
+                                        "evidence_message_id": decision.evidence_message_id,
+                                        "queue_request_id": queue_request_id,
+                                        "submission_eligibility": decision.submission_eligibility,
+                                        "skip_reason": skip_reason,
+                                        "submission_attempted": submission_attempted,
+                                        "submission_accepted": submission_accepted,
+                                    }
+                                )
                 agent_ops_cycle_task = None
 
             try:
