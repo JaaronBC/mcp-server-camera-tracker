@@ -1,0 +1,36 @@
+{
+  "schema_version": "1.0",
+  "generated_at": 1793755395.553758,
+  "configured_limits": {
+    "total_limit": 1,
+    "per_role_limits": {
+      "tracking_vlm": 0,
+      "observation_text": 0,
+      "reasoning_text": 0,
+      "observation_visual": 1
+    }
+  },
+  "attempted_provider_calls": {
+    "state_attempted_total": 0,
+    "state_attempted_per_role": {
+      "tracking_vlm": 0,
+      "observation_text": 0,
+      "reasoning_text": 0,
+      "observation_visual": 0
+    },
+    "attempt_event_total": 0,
+    "attempt_event_per_role": {}
+  },
+  "blocked_provider_calls": {
+    "blocked_event_total": 363,
+    "blocked_event_per_role": {
+      "observation_text": 10,
+      "reasoning_text": 10,
+      "tracking_vlm": 343
+    }
+  },
+  "errors": {
+    "state_read_error": null,
+    "log_read_error": null
+  }
+}

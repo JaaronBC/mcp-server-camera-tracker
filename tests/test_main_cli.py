@@ -1,6 +1,8 @@
 # Handles test main cli behavior.
 from __future__ import annotations
 
+import importlib
+import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -108,6 +110,30 @@ class TestMainCliArgs(unittest.TestCase):
                     "0.4",
                 ]
             )
+
+    def test_verification_request_timeout_env_config(self) -> None:
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("VERIFICATION_REQUEST_TIMEOUT_SECONDS", None)
+            importlib.reload(main)
+            self.assertEqual(main.VERIFICATION_REQUEST_TIMEOUT_SECONDS, 8.0)
+
+        with patch.dict(os.environ, {"VERIFICATION_REQUEST_TIMEOUT_SECONDS": "20.0"}, clear=False):
+            importlib.reload(main)
+            self.assertEqual(main.VERIFICATION_REQUEST_TIMEOUT_SECONDS, 20.0)
+
+        invalid_values = ["0", "-1", "nan", "inf", "-inf", "not-a-number"]
+        for invalid in invalid_values:
+            with self.subTest(invalid=invalid):
+                with patch.dict(os.environ, {"VERIFICATION_REQUEST_TIMEOUT_SECONDS": invalid}, clear=False):
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "VERIFICATION_REQUEST_TIMEOUT_SECONDS",
+                    ):
+                        importlib.reload(main)
+
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("VERIFICATION_REQUEST_TIMEOUT_SECONDS", None)
+            importlib.reload(main)
 
 
 class TestShutdownLifecycle(unittest.IsolatedAsyncioTestCase):

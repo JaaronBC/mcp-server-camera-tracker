@@ -1,0 +1,10 @@
+{
+  "run_dir": "/Users/jaaroncabsaban/Documents/GitHub/mcp-server-camera-tracker/captures/probes/runs/phase16e_live_1793698606",
+  "main_exit": 124,
+  "watchdog_triggered": true,
+  "interrupted": false,
+  "interrupt_signal": null,
+  "report_exit": 0,
+  "run_local_artifacts_missing": [],
+  "runtime_error": null
+}

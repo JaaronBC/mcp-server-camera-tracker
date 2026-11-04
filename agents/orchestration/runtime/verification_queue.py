@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 import uuid
 from collections import deque
@@ -120,7 +121,7 @@ class VerificationQueueManager:
         max_protected_frames: int = 32,
         max_active_leases: int = 128,
         lease_ttl_seconds: float | None = None,
-        lease_lock_timeout_seconds: float = 0.0,
+        lease_lock_timeout_seconds: float = 0.1,
         coordinator: AgentCoordinator | None = None,
     ) -> None:
         self._evidence_root_dir = evidence_root_dir
@@ -154,6 +155,9 @@ class VerificationQueueManager:
         self._submission_records_by_request_id: dict[str, VerificationSubmissionRecord] = {}
         self._submission_order: deque[str] = deque(maxlen=self._result_registry_capacity)
         self._leases_by_request_id: dict[str, dict[str, Any]] = {}
+        self._pending_lease_release_request_ids: set[str] = set()
+        self._lease_release_retry_attempts_by_request_id: dict[str, int] = {}
+        self._max_lease_release_retries = 2
 
     async def start(self, *, session: ClientSession) -> None:
         if self._workers:
@@ -171,7 +175,6 @@ class VerificationQueueManager:
                 break
             self._queued_message_ids.discard(pending_request.message_id or "")
             self._release_request_lease(pending_request.request_id)
-            self._leases_by_request_id.pop(pending_request.request_id, None)
             self._store_record(
                 VerificationQueueRecord(
                     request_id=pending_request.request_id,
@@ -203,8 +206,11 @@ class VerificationQueueManager:
                 pass
         self._workers.clear()
         self._inflight_message_ids.clear()
+        self._retry_pending_lease_releases(max_passes=self._max_lease_release_retries)
 
     def submit_request(self, request: VerificationQueueRequest) -> dict[str, Any]:
+        self._retry_pending_lease_releases(max_passes=1)
+
         if self._shutdown:
             self._store_submission(
                 VerificationSubmissionRecord(
@@ -348,6 +354,8 @@ class VerificationQueueManager:
         lease_payload = lease_result.get("lease")
         if not isinstance(lease_payload, dict):
             status = "lease_payload_invalid"
+            self._leases_by_request_id.setdefault(request.request_id, {"request_id": request.request_id})
+            self._release_request_lease(request.request_id)
             self._store_submission(
                 VerificationSubmissionRecord(
                     request_id=request.request_id,
@@ -418,7 +426,6 @@ class VerificationQueueManager:
             self._queue.put_nowait(queue_request)
         except Exception:
             self._release_request_lease(request.request_id)
-            self._leases_by_request_id.pop(request.request_id, None)
             self._store_submission(
                 VerificationSubmissionRecord(
                     request_id=request.request_id,
@@ -522,7 +529,6 @@ class VerificationQueueManager:
                 self._store_record(record)
                 self._inflight_message_ids.discard(message_id)
                 self._release_request_lease(request.request_id)
-                self._leases_by_request_id.pop(request.request_id, None)
                 self._queue.task_done()
                 raise
             except Exception as error:
@@ -549,7 +555,6 @@ class VerificationQueueManager:
             self._completed_message_ids.add(message_id)
             self._inflight_message_ids.discard(message_id)
             self._release_request_lease(request.request_id)
-            self._leases_by_request_id.pop(request.request_id, None)
             self._queue.task_done()
 
     async def _execute_request(
@@ -616,13 +621,38 @@ class VerificationQueueManager:
                 timeout=remaining,
             )
             evidence_payload = self._extract_payload(evidence_precheck)
-            if isinstance(evidence_payload, dict) and evidence_payload.get("available", False):
+            if not isinstance(evidence_payload, dict):
+                return VerificationQueueRecord(
+                    request_id=request.request_id,
+                    source=request.source,
+                    track_id=track_id,
+                    evidence_message_id=message_id,
+                    status="rejected",
+                    validation_outcome="evidence_unavailable",
+                    submitted_at=request.requested_at,
+                    started_at=started_at,
+                    finished_at=time.time(),
+                    current_applicability="unknown",
+                    stale_for_current_decisions=False,
+                    coordinator_valid=False,
+                    error_code="precheck_response_malformed",
+                    error="Malformed precheck response prior to verification",
+                    run_id=self._run_id,
+                    details=self._build_precheck_malformed_details(
+                        precheck_response=evidence_precheck,
+                        extracted_payload=evidence_payload,
+                        attempts=precheck_attempts,
+                    ),
+                )
+            if evidence_payload.get("available", False):
                 break
 
             details = self._sanitize_details(evidence_payload)
             nested_details = evidence_payload.get("details") if isinstance(evidence_payload, dict) else None
             if isinstance(nested_details, dict):
                 for key, value in self._sanitize_details(nested_details).items():
+                    details.setdefault(key, value)
+                for key, value in self._derive_precheck_reference_diagnostics(nested_details).items():
                     details.setdefault(key, value)
 
             if not self._is_pending_visual_evidence(details):
@@ -828,6 +858,18 @@ class VerificationQueueManager:
                 value = getattr(item, key, None)
                 if isinstance(value, dict):
                     return value
+            text = getattr(item, "text", None)
+            if not isinstance(text, str):
+                continue
+            raw_text = text.strip()
+            if not raw_text:
+                continue
+            try:
+                decoded = json.loads(raw_text)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(decoded, dict):
+                return decoded
         return None
 
     def _rejected_record(
@@ -860,12 +902,84 @@ class VerificationQueueManager:
     def _sanitize_details(self, payload: Any) -> dict[str, Any]:
         if not isinstance(payload, dict):
             return {}
-        allowed = {"error_code", "upstream_code", "gate_errors", "attempts", "model", "message_id"}
+        allowed = {
+            "error_code",
+            "upstream_code",
+            "gate_errors",
+            "attempts",
+            "model",
+            "message_id",
+            "precheck_failure_kind",
+            "precheck_response_shape",
+            "precheck_payload_type",
+            "precheck_content_item_count",
+            "failing_reference",
+            "failing_reference_kind",
+            "failing_reference_status",
+        }
         return {
             str(key): value
             for key, value in payload.items()
             if str(key) in allowed and isinstance(value, (str, int, float, bool, list, dict, type(None)))
         }
+
+    def _build_precheck_malformed_details(
+        self,
+        *,
+        precheck_response: Any,
+        extracted_payload: Any,
+        attempts: int,
+    ) -> dict[str, Any]:
+        details: dict[str, Any] = {
+            "precheck_failure_kind": "precheck_response_malformed",
+            "attempts": int(attempts),
+        }
+        if extracted_payload is not None:
+            details["precheck_payload_type"] = type(extracted_payload).__name__
+
+        content = getattr(precheck_response, "content", None)
+        if isinstance(content, list):
+            details["precheck_content_item_count"] = len(content)
+            if content:
+                details["precheck_response_shape"] = type(content[0]).__name__
+            else:
+                details["precheck_response_shape"] = "empty_content"
+        else:
+            details["precheck_response_shape"] = type(precheck_response).__name__
+        return details
+
+    def _derive_precheck_reference_diagnostics(self, details: dict[str, Any]) -> dict[str, Any]:
+        reference_results = details.get("reference_results")
+        if not isinstance(reference_results, list):
+            return {}
+
+        for item in reference_results:
+            if not isinstance(item, dict):
+                continue
+            status = item.get("status")
+            if not isinstance(status, str) or not status:
+                continue
+            if status not in {
+                "missing_reference",
+                "expired_reference",
+                "pending_reference",
+                "reference_mismatch",
+                "invalid_reference",
+            }:
+                continue
+
+            diagnostics: dict[str, Any] = {
+                "precheck_failure_kind": "reference_validation_failed",
+                "failing_reference_status": status,
+            }
+            reference = item.get("reference")
+            if isinstance(reference, str) and reference:
+                diagnostics["failing_reference"] = reference
+            kind = item.get("kind")
+            if isinstance(kind, str) and kind:
+                diagnostics["failing_reference_kind"] = kind
+            return diagnostics
+        return {}
 
     def _is_pending_visual_evidence(self, details: dict[str, Any]) -> bool:
         if str(details.get("upstream_code", "")) != "observation_evidence_preflight_failed":
@@ -893,12 +1007,46 @@ class VerificationQueueManager:
             self._submission_order.append(request_id)
         self._submission_records_by_request_id[request_id] = record
 
-    def _release_request_lease(self, request_id: str) -> None:
-        release_verification_evidence_lease(
+    def _release_request_lease(self, request_id: str) -> bool:
+        normalized_request_id = request_id.strip() if isinstance(request_id, str) else ""
+        if not normalized_request_id:
+            return True
+
+        release_result = release_verification_evidence_lease(
             evidence_root_dir=self._evidence_root_dir,
-            request_id=request_id,
+            request_id=normalized_request_id,
             lock_timeout_seconds=self._lease_lock_timeout_seconds,
         )
+        released = bool(release_result.get("released", False))
+        status = str(release_result.get("status", "unknown"))
+
+        if released or status == "invalid_request_id":
+            self._leases_by_request_id.pop(normalized_request_id, None)
+            self._pending_lease_release_request_ids.discard(normalized_request_id)
+            self._lease_release_retry_attempts_by_request_id.pop(normalized_request_id, None)
+            return True
+
+        if status == "lease_lock_unavailable":
+            attempts = self._lease_release_retry_attempts_by_request_id.get(normalized_request_id, 0) + 1
+            self._lease_release_retry_attempts_by_request_id[normalized_request_id] = attempts
+            self._pending_lease_release_request_ids.add(normalized_request_id)
+            self._leases_by_request_id.setdefault(normalized_request_id, {"request_id": normalized_request_id})
+            return False
+
+        self._leases_by_request_id.pop(normalized_request_id, None)
+        self._pending_lease_release_request_ids.discard(normalized_request_id)
+        self._lease_release_retry_attempts_by_request_id.pop(normalized_request_id, None)
+        return False
+
+    def _retry_pending_lease_releases(self, *, max_passes: int) -> None:
+        total_passes = max(1, int(max_passes))
+        for _ in range(total_passes):
+            pending_request_ids = list(self._pending_lease_release_request_ids)
+            if not pending_request_ids:
+                return
+
+            for pending_request_id in pending_request_ids:
+                self._release_request_lease(pending_request_id)
 
 
 def build_request_from_track_id(track_id: str, *, source: str) -> VerificationQueueRequest:

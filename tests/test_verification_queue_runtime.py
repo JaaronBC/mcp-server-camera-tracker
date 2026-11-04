@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import tempfile
+import threading
 import time
 import types
 import unittest
@@ -19,11 +20,14 @@ if "mcp" not in sys.modules:
     mcp_stub.ClientSession = _StubClientSession
     sys.modules["mcp"] = mcp_stub
 
+import agents.orchestration.runtime.verification_queue as verification_queue_runtime
+
 from agents.orchestration.runtime.verification_queue import (
     VerificationQueueManager,
     VerificationQueueRequest,
     extract_submission_decisions_from_cycle_payload,
 )
+from agents.tracking.evidence_protection import EvidenceProtectionLock
 
 
 class _FakeItem:
@@ -199,6 +203,48 @@ class TestVerificationQueueRuntime(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(submissions[0]["status"], "queued")
             self.assertTrue(submissions[0]["accepted"])
             self.assertEqual(submissions[0]["run_id"], "run-a")
+
+    async def test_submit_request_retries_brief_lease_lock_contention_within_default_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            evidence_root = Path(temp_dir) / "tracking_evidence"
+            _write_validated_envelope(
+                evidence_root,
+                message_id="msg-lock-retry",
+                track_id="track-1",
+                timestamp=1000.0,
+            )
+
+            contention_lock = EvidenceProtectionLock(evidence_root)
+            self.assertTrue(contention_lock.acquire(timeout_seconds=0.0))
+
+            manager = VerificationQueueManager(evidence_root_dir=evidence_root)
+
+            release_thread = threading.Thread(
+                target=lambda: (time.sleep(0.03), contention_lock.release()),
+                daemon=True,
+            )
+            release_thread.start()
+            try:
+                response = manager.submit_request(
+                    VerificationQueueRequest(
+                        request_id="req-lock-retry",
+                        track_id="track-1",
+                        message_id="msg-lock-retry",
+                        source="test",
+                        requested_at=1001.0,
+                    )
+                )
+            finally:
+                release_thread.join(timeout=0.5)
+                contention_lock.release()
+
+            self.assertTrue(response["accepted"])
+            self.assertEqual(response["status"], "queued")
+
+            submissions = manager.get_recent_submissions(10)
+            self.assertEqual(len(submissions), 1)
+            self.assertEqual(submissions[0]["request_id"], "req-lock-retry")
+            self.assertTrue(submissions[0]["accepted"])
 
     async def test_submission_boundary_rejection_records_reason(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -642,6 +688,108 @@ class TestVerificationQueueRuntime(unittest.IsolatedAsyncioTestCase):
 
     def _lease_path(self, evidence_root: Path, request_id: str) -> Path:
         return evidence_root / "protection" / "leases" / f"{request_id}.json"
+
+    async def test_invalid_lease_payload_releases_acquired_lease(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            evidence_root = Path(temp_dir) / "tracking_evidence"
+            _write_validated_envelope(evidence_root, message_id="msg-invalid-payload", track_id="track-1", timestamp=1000.0)
+
+            manager = VerificationQueueManager(evidence_root_dir=evidence_root)
+
+            original_acquire = verification_queue_runtime.acquire_verification_evidence_lease
+            original_release = verification_queue_runtime.release_verification_evidence_lease
+            release_calls: list[str] = []
+
+            def _fake_acquire(*, evidence_root_dir, request_id, message_id, track_id, now_timestamp, lease_ttl_seconds, max_protected_frames, max_active_leases, lock_timeout_seconds):
+                return {"acquired": True, "status": "acquired", "lease": "invalid"}
+
+            def _fake_release(*, evidence_root_dir, request_id, lock_timeout_seconds):
+                release_calls.append(str(request_id))
+                return {"released": True, "status": "released"}
+
+            verification_queue_runtime.acquire_verification_evidence_lease = _fake_acquire
+            verification_queue_runtime.release_verification_evidence_lease = _fake_release
+            try:
+                response = manager.submit_request(
+                    VerificationQueueRequest(
+                        request_id="req-invalid-payload",
+                        track_id="track-1",
+                        message_id="msg-invalid-payload",
+                        source="test",
+                        requested_at=0.0,
+                    )
+                )
+            finally:
+                verification_queue_runtime.acquire_verification_evidence_lease = original_acquire
+                verification_queue_runtime.release_verification_evidence_lease = original_release
+
+            self.assertFalse(response["accepted"])
+            self.assertEqual(response["status"], "lease_payload_invalid")
+            self.assertEqual(release_calls, ["req-invalid-payload"])
+            self.assertNotIn("req-invalid-payload", manager._leases_by_request_id)
+
+    async def test_transient_release_lock_unavailable_retries_then_releases(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            evidence_root = Path(temp_dir) / "tracking_evidence"
+            manager = VerificationQueueManager(evidence_root_dir=evidence_root)
+
+            original_release = verification_queue_runtime.release_verification_evidence_lease
+            release_calls: list[str] = []
+
+            def _fake_release(*, evidence_root_dir, request_id, lock_timeout_seconds):
+                release_calls.append(str(request_id))
+                if len(release_calls) == 1:
+                    return {"released": False, "status": "lease_lock_unavailable"}
+                return {"released": True, "status": "released"}
+
+            verification_queue_runtime.release_verification_evidence_lease = _fake_release
+            try:
+                manager._leases_by_request_id["req-retry-release"] = {"request_id": "req-retry-release"}
+
+                first_released = manager._release_request_lease("req-retry-release")
+                self.assertFalse(first_released)
+                self.assertIn("req-retry-release", manager._leases_by_request_id)
+                self.assertIn("req-retry-release", manager._pending_lease_release_request_ids)
+
+                manager._retry_pending_lease_releases(max_passes=1)
+
+                self.assertNotIn("req-retry-release", manager._leases_by_request_id)
+                self.assertNotIn("req-retry-release", manager._pending_lease_release_request_ids)
+                self.assertNotIn("req-retry-release", manager._lease_release_retry_attempts_by_request_id)
+                self.assertEqual(release_calls, ["req-retry-release", "req-retry-release"])
+            finally:
+                verification_queue_runtime.release_verification_evidence_lease = original_release
+
+    async def test_retry_pending_release_attempts_all_bounded_passes_until_success(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            evidence_root = Path(temp_dir) / "tracking_evidence"
+            manager = VerificationQueueManager(evidence_root_dir=evidence_root)
+
+            original_release = verification_queue_runtime.release_verification_evidence_lease
+            release_calls: list[str] = []
+
+            def _fake_release(*, evidence_root_dir, request_id, lock_timeout_seconds):
+                release_calls.append(str(request_id))
+                if len(release_calls) <= 3:
+                    return {"released": False, "status": "lease_lock_unavailable"}
+                return {"released": True, "status": "released"}
+
+            verification_queue_runtime.release_verification_evidence_lease = _fake_release
+            try:
+                manager._leases_by_request_id["req-retry-many"] = {"request_id": "req-retry-many"}
+                manager._pending_lease_release_request_ids.add("req-retry-many")
+
+                manager._retry_pending_lease_releases(max_passes=4)
+
+                self.assertEqual(
+                    release_calls,
+                    ["req-retry-many", "req-retry-many", "req-retry-many", "req-retry-many"],
+                )
+                self.assertNotIn("req-retry-many", manager._pending_lease_release_request_ids)
+                self.assertNotIn("req-retry-many", manager._leases_by_request_id)
+                self.assertNotIn("req-retry-many", manager._lease_release_retry_attempts_by_request_id)
+            finally:
+                verification_queue_runtime.release_verification_evidence_lease = original_release
 
     async def test_enqueue_failure_rolls_back_acquired_lease(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

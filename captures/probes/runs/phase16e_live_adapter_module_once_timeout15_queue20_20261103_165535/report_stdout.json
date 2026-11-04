@@ -1,0 +1,8 @@
+{
+  "report_path": "/Users/jaaroncabsaban/Documents/GitHub/mcp-server-camera-tracker/captures/probes/runs/phase16e_live_adapter_module_once_timeout15_queue20_20261103_165535/phase16e_report.json",
+  "verdict": "FAIL",
+  "failure_reasons": [
+    "correlated_chain_missing",
+    "run_local_artifact_missing:agent_events.jsonl"
+  ]
+}

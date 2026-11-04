@@ -2,6 +2,7 @@
 import argparse
 import asyncio
 import json
+import math
 import os
 import sys
 from pathlib import Path
@@ -22,11 +23,32 @@ SERVER_PATH = PROJECT_ROOT / "server.py"
 ANALYSIS_INTERVAL_SECONDS = runtime_agent.ANALYSIS_INTERVAL_SECONDS
 VERIFICATION_QUEUE_CAPACITY = 32
 VERIFICATION_MAX_CONCURRENCY = 2
-VERIFICATION_REQUEST_TIMEOUT_SECONDS = 8.0
 VERIFICATION_RESULTS_CAPACITY = 512
 LATEST_VERIFICATION_QUEUE_RESULTS_PATH = PROJECT_ROOT / "captures" / "latest_verification_queue_results.json"
 LATEST_VERIFICATION_QUEUE_SUBMISSIONS_PATH = PROJECT_ROOT / "captures" / "latest_verification_queue_submissions.json"
 LATEST_OPERATOR_TRACKING_FEEDBACK_PATH = PROJECT_ROOT / "captures" / "operator_tracking_feedback.json"
+
+
+def _resolve_verification_request_timeout_seconds() -> float:
+    raw = os.getenv("VERIFICATION_REQUEST_TIMEOUT_SECONDS")
+    if raw is None:
+        return 8.0
+    try:
+        value = float(raw)
+    except ValueError as error:
+        raise ValueError(
+            "Invalid configuration for VERIFICATION_REQUEST_TIMEOUT_SECONDS: "
+            f"expected a positive finite float, got {raw!r}"
+        ) from error
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(
+            "Invalid configuration for VERIFICATION_REQUEST_TIMEOUT_SECONDS: "
+            f"expected a positive finite float, got {raw!r}"
+        )
+    return value
+
+
+VERIFICATION_REQUEST_TIMEOUT_SECONDS = _resolve_verification_request_timeout_seconds()
 
 get_result_text = runtime_agent.get_result_text
 get_result_json_object = runtime_agent.get_result_json_object
