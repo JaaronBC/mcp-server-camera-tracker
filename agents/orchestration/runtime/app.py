@@ -24,6 +24,7 @@ class RuntimeConfig:
     depth_coverage_summary_enabled: bool
     depth_coverage_summary_every_cycles: int
     depth_coverage_sample_limit: int
+    video_path: str | None = None
 
 
 def configure_logging(_config: RuntimeConfig) -> logging.Logger:

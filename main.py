@@ -60,11 +60,15 @@ def load_config(args: list[str] | None = None) -> runtime_app.RuntimeConfig:
         depth_coverage_summary_enabled=not options.disable_depth_coverage_summary,
         depth_coverage_summary_every_cycles=options.depth_coverage_summary_every_cycles,
         depth_coverage_sample_limit=options.depth_coverage_sample_limit,
+        video_path=options.video_path,
     )
 
 
 async def initialize_runtime_services(session: ClientSession, config: runtime_app.RuntimeConfig) -> None:
     """Run startup checks and activate required runtime services/tools."""
+    async def start_tracking(session: ClientSession) -> None:
+        await start_live_tracking(session, video_path=config.video_path)
+
     await runtime_flow.start_runtime_services(
         session,
         config,
@@ -72,7 +76,7 @@ async def initialize_runtime_services(session: ClientSession, config: runtime_ap
         print_depth_coverage_startup_snapshot_fn=print_depth_coverage_startup_snapshot,
         print_pipeline_contract_startup_snapshot_fn=print_pipeline_contract_startup_snapshot,
         verify_required_tools_fn=verify_required_tools,
-        start_live_tracking_fn=start_live_tracking,
+        start_live_tracking_fn=start_tracking,
         start_orchestration_agents_fn=start_orchestration_agents,
         emit=lambda message: print(message, flush=True),
     )
@@ -268,6 +272,42 @@ def cli_main(args: list[str] | None = None) -> None:
         )
         raise SystemExit(1) from error
 
+def user_main() -> None:
+    """Choose webcam or video-file input before starting the runtime."""
+    args = sys.argv[1:]
+    if "--video-path" in args:
+        cli_main(args)
+        return
+
+    print("Type 0 for webcam, 1 for video:")
+    try:
+        choice = input().strip()
+    except EOFError:
+        print(
+            "Error: No input available. Use --video-path <path> or run "
+            "interactively to choose webcam or video."
+        )
+        sys.exit(2)
+
+    if choice == "1":
+        print("Enter the path to the video file:")
+        try:
+            video_path = input().strip()
+        except EOFError:
+            print("Error: No video path was provided.")
+            sys.exit(2)
+
+        video_file = Path(video_path).expanduser()
+        if not video_file.is_file():
+            print(f"Error: File '{video_path}' does not exist.")
+            sys.exit(1)
+        cli_main(["--video-path", str(video_file), *args])
+    elif choice == "0":
+        cli_main(args)
+    else:
+        print(f"Error: Invalid input choice '{choice}'. Enter 0 or 1.")
+        sys.exit(2)
+
 
 if __name__ == "__main__":
-    cli_main()
+    user_main()

@@ -7,12 +7,14 @@ from agents.tracking.tracking_types import RadarTrackSnapshot
 
 
 class SharedDashboardState:
-    def __init__(self) -> None:
+    def __init__(self, video_path: str | None = None) -> None:
         self.lock = threading.Lock()
         self.running = True
 
         self.camera_status = "starting"
         self.detector_status = "starting"
+        self.video_path = video_path
+        self.input_error: str | None = None
         self.calibration_status = "unknown"
         self.mapping_mode = "relative_image_plane"
 
