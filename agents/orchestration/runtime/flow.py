@@ -2,11 +2,38 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
+import time
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from mcp import ClientSession
 
+from .verification_queue import VerificationQueueManager, extract_submission_decisions_from_cycle_payload
+
 from . import app as runtime_app
+
+
+def _resolve_submission_decisions_path() -> Path | None:
+    explicit_path = os.getenv("PHASE16E_VERIFICATION_SUBMISSION_DECISIONS_PATH", "").strip()
+    if explicit_path:
+        return Path(explicit_path).expanduser().resolve()
+    results_path = os.getenv("PHASE16E_VERIFICATION_RESULTS_PATH", "").strip()
+    if results_path:
+        return Path(results_path).expanduser().resolve().parent / "verification_submission_decisions.jsonl"
+    return None
+
+
+def _append_submission_decision(payload: dict[str, Any]) -> None:
+    path = _resolve_submission_decisions_path()
+    if path is None:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    serialized = dict(payload)
+    serialized["logged_at"] = time.time()
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(f"{json.dumps(serialized)}\n")
 
 
 async def start_runtime_services(
@@ -104,6 +131,11 @@ async def monitor_movement(
     run_tracking_cycle_fn: Callable[[ClientSession, list[Any]], Awaitable[None]],
     run_agent_ops_pipeline_fn: Callable[..., Awaitable[dict[str, Any]]],
     emit: Callable[[str], None],
+    verification_manager: VerificationQueueManager | None = None,
+    verification_request_source_fn: Callable[[], list[Any]] | None = None,
+    verification_feedback_publish_fn: Callable[[list[dict[str, Any]]], dict[str, int]] | None = None,
+    verification_results_persist_fn: Callable[[list[dict[str, Any]]], None] | None = None,
+    verification_submissions_persist_fn: Callable[[list[dict[str, Any]]], None] | None = None,
 ) -> None:
     address = [tracking_address[0], tracking_address[1]]
 
@@ -148,6 +180,49 @@ async def monitor_movement(
                     completed_agent_ops_cycles += int(
                         pipeline_result.get("completed_cycle_increment", 0)
                     )
+                    if verification_manager is not None:
+                        cycle_payload = pipeline_result.get("cycle_payload")
+                        if isinstance(cycle_payload, dict):
+                            run_id = os.getenv("PHASE16E_RUN_ID", "").strip() or None
+                            decisions = extract_submission_decisions_from_cycle_payload(cycle_payload)
+                            for decision in decisions:
+                                queue_request = decision.queue_request
+                                queue_request_id = queue_request.request_id if queue_request is not None else None
+                                submission_attempted = False
+                                submission_accepted = False
+                                skip_reason = decision.skip_reason
+
+                                if queue_request is not None:
+                                    submission_attempted = True
+                                    try:
+                                        outcome = verification_manager.submit_request(queue_request)
+                                    except Exception as error:
+                                        skip_reason = f"submit_exception:{type(error).__name__}"
+                                        emit(
+                                            "Verification request submission failed "
+                                            f"({type(error).__name__}): {error}"
+                                        )
+                                    else:
+                                        submission_accepted = bool(outcome.get("accepted", False)) if isinstance(outcome, dict) else False
+                                        if not submission_accepted and skip_reason is None:
+                                            status = outcome.get("status") if isinstance(outcome, dict) else None
+                                            skip_reason = f"submit_rejected:{status or 'unknown'}"
+
+                                _append_submission_decision(
+                                    {
+                                        "run_id": run_id,
+                                        "event_origin": decision.event_origin,
+                                        "trigger_event_id": decision.trigger_event_id,
+                                        "track_id": decision.track_id,
+                                        "evidence_requested": decision.evidence_requested,
+                                        "evidence_message_id": decision.evidence_message_id,
+                                        "queue_request_id": queue_request_id,
+                                        "submission_eligibility": decision.submission_eligibility,
+                                        "skip_reason": skip_reason,
+                                        "submission_attempted": submission_attempted,
+                                        "submission_accepted": submission_accepted,
+                                    }
+                                )
                 agent_ops_cycle_task = None
 
             try:
@@ -159,6 +234,26 @@ async def monitor_movement(
                 )
 
             now = loop.time()
+            if verification_manager is not None and verification_request_source_fn is not None:
+                try:
+                    external_requests = verification_request_source_fn()
+                except Exception as error:
+                    emit(
+                        "Verification request source failed "
+                        f"({type(error).__name__}): {error}"
+                    )
+                    external_requests = []
+
+                if isinstance(external_requests, list):
+                    for external_request in external_requests:
+                        try:
+                            verification_manager.submit_request(external_request)
+                        except Exception as error:
+                            emit(
+                                "Verification request submission failed "
+                                f"({type(error).__name__}): {error}"
+                            )
+
             if agent_ops_enabled and (now - last_agent_ops_cycle_at) >= agent_ops_interval_seconds:
                 if agent_ops_cycle_task is not None and not agent_ops_cycle_task.done():
                     emit("Skipping agent ops trigger: prior cycle still running.")
@@ -180,6 +275,26 @@ async def monitor_movement(
                         )
                     )
                     last_agent_ops_cycle_at = loop.time()
+
+            if verification_manager is not None and (
+                verification_feedback_publish_fn is not None
+                or verification_results_persist_fn is not None
+                or verification_submissions_persist_fn is not None
+            ):
+                try:
+                    recent_results = verification_manager.get_recent_results(200)
+                    recent_submissions = verification_manager.get_recent_submissions(500)
+                    if verification_results_persist_fn is not None:
+                        verification_results_persist_fn(recent_results)
+                    if verification_submissions_persist_fn is not None:
+                        verification_submissions_persist_fn(recent_submissions)
+                    if verification_feedback_publish_fn is not None:
+                        verification_feedback_publish_fn(recent_results)
+                except Exception as error:
+                    emit(
+                        "Verification feedback publication failed "
+                        f"({type(error).__name__}): {error}"
+                    )
 
             elapsed = loop.time() - iteration_started_at
             await asyncio.sleep(max(0, analysis_interval_seconds - elapsed))

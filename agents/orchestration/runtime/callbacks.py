@@ -53,12 +53,13 @@ def make_run_agent_ops_cycle(
     format_evidence_fn: Callable[[dict[str, Any]], list[str]],
     emit: Callable[[str], None],
     default_max_tracks: int,
-) -> Callable[[ClientSession, bool, int], Awaitable[bool]]:
+) -> Callable[[ClientSession, bool, int], Awaitable[bool | dict[str, Any]]]:
     async def _run_agent_ops_cycle(
         session: ClientSession,
         request_evidence_on_uncertainty: bool = True,
         max_tracks: int = default_max_tracks,
-    ) -> bool:
+        include_payload: bool = False,
+    ) -> bool | dict[str, Any]:
         return await orchestration_control.run_agent_ops_cycle_runtime(
             session,
             request_evidence_on_uncertainty=request_evidence_on_uncertainty,
@@ -69,6 +70,7 @@ def make_run_agent_ops_cycle(
             format_cycle_fn=format_cycle_fn,
             format_evidence_fn=format_evidence_fn,
             emit=emit,
+            include_payload=include_payload,
         )
 
     return _run_agent_ops_cycle
@@ -224,47 +226,6 @@ def make_print_pipeline_contract_startup_snapshot(
     return _print_pipeline_contract_startup_snapshot
 
 
-def make_run_agent_ops_pipeline(
-    *,
-    run_pipeline_fn: Callable[..., Awaitable[dict[str, Any]]],
-    run_cycle_fn: Callable[..., Awaitable[bool]],
-    run_health_summary_fn: Callable[..., Awaitable[bool]],
-    run_depth_summary_fn: Callable[..., Awaitable[bool]],
-) -> Callable[..., Awaitable[dict[str, Any]]]:
-    async def _run_agent_ops_pipeline(
-        session: ClientSession,
-        *,
-        cycle_number: int,
-        max_tracks: int,
-        agent_ops_summary_enabled: bool,
-        agent_ops_summary_every_cycles: int,
-        agent_ops_summary_window_size: int,
-        handoff_degraded_warn_rate: float,
-        handoff_degraded_critical_rate: float,
-        depth_summary_enabled: bool,
-        depth_coverage_summary_every_cycles: int,
-        depth_coverage_sample_limit: int,
-    ) -> dict[str, Any]:
-        return await run_pipeline_fn(
-            session,
-            cycle_number=cycle_number,
-            max_tracks=max_tracks,
-            agent_ops_summary_enabled=agent_ops_summary_enabled,
-            agent_ops_summary_every_cycles=agent_ops_summary_every_cycles,
-            agent_ops_summary_window_size=agent_ops_summary_window_size,
-            handoff_degraded_warn_rate=handoff_degraded_warn_rate,
-            handoff_degraded_critical_rate=handoff_degraded_critical_rate,
-            depth_summary_enabled=depth_summary_enabled,
-            depth_coverage_summary_every_cycles=depth_coverage_summary_every_cycles,
-            depth_coverage_sample_limit=depth_coverage_sample_limit,
-            run_cycle_fn=run_cycle_fn,
-            run_health_summary_fn=run_health_summary_fn,
-            run_depth_summary_fn=run_depth_summary_fn,
-        )
-
-    return _run_agent_ops_pipeline
-
-
 def make_monitor_movement(
     *,
     monitor_movement_fn: Callable[..., Awaitable[None]],
@@ -296,6 +257,11 @@ def make_monitor_movement(
         depth_coverage_summary_enabled: bool = True,
         depth_coverage_summary_every_cycles: int = default_depth_coverage_summary_every_cycles,
         depth_coverage_sample_limit: int = default_depth_coverage_sample_limit,
+        verification_manager: Any | None = None,
+        verification_request_source_fn: Callable[[], list[Any]] | None = None,
+        verification_feedback_publish_fn: Callable[[list[dict[str, Any]]], dict[str, int]] | None = None,
+        verification_results_persist_fn: Callable[[list[dict[str, Any]]], None] | None = None,
+        verification_submissions_persist_fn: Callable[[list[dict[str, Any]]], None] | None = None,
     ) -> None:
         async def _run_tracking_cycle(session_handle: ClientSession, address: list[Any]) -> None:
             await run_tracking_cycle_fn(
@@ -323,6 +289,11 @@ def make_monitor_movement(
             run_tracking_cycle_fn=_run_tracking_cycle,
             run_agent_ops_pipeline_fn=run_agent_ops_pipeline_fn,
             emit=emit,
+            verification_manager=verification_manager,
+            verification_request_source_fn=verification_request_source_fn,
+            verification_feedback_publish_fn=verification_feedback_publish_fn,
+            verification_results_persist_fn=verification_results_persist_fn,
+            verification_submissions_persist_fn=verification_submissions_persist_fn,
         )
 
     return _monitor_movement

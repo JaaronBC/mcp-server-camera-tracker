@@ -116,6 +116,20 @@ async def run_tracking_cycle(
         return
 
     frame_data = result_text_fn(result)
+    payload = get_result_json_object(result)
+
+    if isinstance(payload, dict):
+        status = payload.get("status")
+        if status == "dashboard_stopped":
+            _emit_message("Movement analysis stopped: dashboard not running.", emit)
+            return
+        if status == "frame_timeout":
+            _emit_message(
+                "Movement analysis timeout: dashboard running but no frame received.",
+                emit,
+            )
+            return
+
     if getattr(result, "is_error", False):
         _emit_message(f"Movement analysis failed: {frame_data}", emit)
     elif not frame_data:

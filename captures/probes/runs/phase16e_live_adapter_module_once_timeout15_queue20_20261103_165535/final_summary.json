@@ -1,0 +1,12 @@
+{
+  "run_dir": "/Users/jaaroncabsaban/Documents/GitHub/mcp-server-camera-tracker/captures/probes/runs/phase16e_live_adapter_module_once_timeout15_queue20_20261103_165535",
+  "main_exit": 0,
+  "watchdog_triggered": false,
+  "interrupted": false,
+  "interrupt_signal": null,
+  "report_exit": 0,
+  "run_local_artifacts_missing": [
+    "agent_events.jsonl"
+  ],
+  "runtime_error": null
+}

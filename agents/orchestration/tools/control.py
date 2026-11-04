@@ -62,7 +62,8 @@ async def run_agent_ops_cycle_runtime(
     format_cycle_fn: Callable[[dict[str, Any]], str],
     format_evidence_fn: Callable[[dict[str, Any]], list[str]],
     emit: Callable[[str], None],
-) -> bool:
+    include_payload: bool = False,
+) -> bool | dict[str, Any]:
     return await orchestration_agent.run_agent_ops_cycle(
         session,
         request_evidence_on_uncertainty=request_evidence_on_uncertainty,
@@ -73,6 +74,7 @@ async def run_agent_ops_cycle_runtime(
         format_cycle_fn=format_cycle_fn,
         format_evidence_fn=format_evidence_fn,
         emit=emit,
+        include_payload=include_payload,
     )
 
 

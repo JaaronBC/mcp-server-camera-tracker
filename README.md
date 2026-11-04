@@ -24,7 +24,10 @@ python -m pip install -r requirements.txt
 
 Set shared model endpoint configuration in your environment or `.env`:
 
--
+- `OPENROUTER_API_KEY=<your_api_key>`
+- `OPENAI_BASE_URL=https://128.171.10.83:9443/v1`
+
+If `OPENAI_BASE_URL` is unset, the project defaults to `https://128.171.10.83:9443/v1`.
 
 ## Testing
 

@@ -262,29 +262,6 @@ def make_monitor_movement(
     )
 
 
-async def run_monitoring_loop(
-    session: ClientSession,
-    config: runtime_app.RuntimeConfig,
-) -> None:
-    monitor_impl = make_monitor_movement(
-        run_agent_ops_pipeline_fn=_run_agent_ops_pipeline_bound,
-        analysis_interval_seconds=ANALYSIS_INTERVAL_SECONDS,
-    )
-    await monitor_impl(
-        session,
-        enable_agent_ops_heartbeat=config.enable_agent_ops_heartbeat,
-        agent_ops_interval_seconds=config.agent_ops_interval_seconds,
-        agent_ops_max_tracks=config.agent_ops_max_tracks,
-        agent_ops_summary_every_cycles=config.agent_ops_summary_every_cycles,
-        agent_ops_summary_window_size=config.agent_ops_summary_window_size,
-        handoff_degraded_warn_rate=config.handoff_degraded_warn_rate,
-        handoff_degraded_critical_rate=config.handoff_degraded_critical_rate,
-        depth_coverage_summary_enabled=config.depth_coverage_summary_enabled,
-        depth_coverage_summary_every_cycles=config.depth_coverage_summary_every_cycles,
-        depth_coverage_sample_limit=config.depth_coverage_sample_limit,
-    )
-
-
 async def run_agent(
     *,
     run_with_runtime_config_fn: Callable[[runtime_app.RuntimeConfig], Awaitable[None]],

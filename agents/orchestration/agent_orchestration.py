@@ -3,6 +3,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+from pathlib import Path
+import time
 from typing import Any, Awaitable, Callable
 
 from mcp import ClientSession
@@ -53,6 +56,74 @@ def _emit_message(message: str, emit: Callable[[str], None] | None) -> None:
         emit(message)
 
 
+def _resolve_submission_decisions_path() -> Path | None:
+    explicit_path = os.getenv("PHASE16E_VERIFICATION_SUBMISSION_DECISIONS_PATH", "").strip()
+    if explicit_path:
+        return Path(explicit_path).expanduser().resolve()
+    results_path = os.getenv("PHASE16E_VERIFICATION_RESULTS_PATH", "").strip()
+    if results_path:
+        return Path(results_path).expanduser().resolve().parent / "verification_submission_decisions.jsonl"
+    return None
+
+
+def _append_submission_decision(payload: dict[str, Any]) -> None:
+    path = _resolve_submission_decisions_path()
+    if path is None:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    serialized = dict(payload)
+    serialized["logged_at"] = time.time()
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(f"{json.dumps(serialized)}\n")
+
+
+def _record_startup_activation_submission_skips(events: list[dict[str, Any]]) -> None:
+    run_id = os.getenv("PHASE16E_RUN_ID", "").strip() or None
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        if not bool(event.get("evidence_requested", False)):
+            continue
+
+        trigger_event_id = event.get("event_id")
+        if not isinstance(trigger_event_id, str) or not trigger_event_id.strip():
+            trigger_event_id = event.get("task_id")
+        if not isinstance(trigger_event_id, str) or not trigger_event_id.strip():
+            trigger_event_id = None
+
+        track_id_value = event.get("track_id")
+        track_id = track_id_value.strip() if isinstance(track_id_value, str) and track_id_value.strip() else None
+        evidence_message_id_value = event.get("evidence_message_id")
+        evidence_message_id = (
+            evidence_message_id_value.strip()
+            if isinstance(evidence_message_id_value, str) and evidence_message_id_value.strip()
+            else None
+        )
+        event_origin_value = event.get("event_origin")
+        event_origin = (
+            event_origin_value.strip()
+            if isinstance(event_origin_value, str)
+            and event_origin_value.strip() in {"startup_activation", "production_monitor"}
+            else "startup_activation"
+        )
+
+        _append_submission_decision(
+            {
+                "run_id": run_id,
+                "event_origin": event_origin,
+                "trigger_event_id": trigger_event_id,
+                "track_id": track_id,
+                "evidence_requested": True,
+                "evidence_message_id": evidence_message_id,
+                "queue_request_id": None,
+                "submission_eligibility": False,
+                "skip_reason": "startup_activation_cycle_no_submission_path",
+                "submission_attempted": False,
+                "submission_accepted": False,
+            }
+        )
+
+
 async def run_agent_ops_cycle(
     session: ClientSession,
     *,
@@ -64,7 +135,8 @@ async def run_agent_ops_cycle(
     format_cycle_fn: Callable[[dict[str, Any]], str] | None = None,
     format_evidence_fn: Callable[[dict[str, Any]], list[str]] | None = None,
     emit: Callable[[str], None] | None = None,
-) -> bool:
+    include_payload: bool = False,
+) -> bool | dict[str, Any]:
     # Runs one observation/reasoning cycle and reports availability status.
     try:
         result = await session.call_tool(
@@ -72,6 +144,7 @@ async def run_agent_ops_cycle(
             arguments={
                 "request_evidence_on_uncertainty": request_evidence_on_uncertainty,
                 "max_tracks": max_tracks,
+                "event_origin": "production_monitor",
             },
         )
     except Exception as error:
@@ -82,8 +155,8 @@ async def run_agent_ops_cycle(
         )
         if "not registered" in message or "unknown tool" in message or "not found" in message:
             _emit_message("Disabling agent ops heartbeat: tool unavailable.", emit)
-            return False
-        return True
+            return {"enabled": False, "payload": None} if include_payload else False
+        return {"enabled": True, "payload": None} if include_payload else True
 
     message = result_text_fn(result)
     if getattr(result, "is_error", False):
@@ -91,8 +164,8 @@ async def run_agent_ops_cycle(
         lowered = (message or "").lower()
         if "not registered" in lowered or "unknown tool" in lowered or "not found" in lowered:
             _emit_message("Disabling agent ops heartbeat: tool unavailable.", emit)
-            return False
-        return True
+            return {"enabled": False, "payload": None} if include_payload else False
+        return {"enabled": True, "payload": None} if include_payload else True
 
     payload = result_json_fn(result)
     if payload is None:
@@ -100,7 +173,7 @@ async def run_agent_ops_cycle(
             _emit_message(f"Agent ops cycle: {message}", emit)
         else:
             _emit_message("Agent ops cycle completed with no structured payload.", emit)
-        return True
+        return {"enabled": True, "payload": None} if include_payload else True
 
     if format_cycle_fn is None:
         _emit_message("Agent ops cycle completed with structured payload.", emit)
@@ -110,6 +183,8 @@ async def run_agent_ops_cycle(
     if format_evidence_fn is not None:
         for evidence_line in format_evidence_fn(payload):
             _emit_message(evidence_line, emit)
+    if include_payload:
+        return {"enabled": True, "payload": payload}
     return True
 
 
@@ -249,11 +324,22 @@ async def run_agent_ops_pipeline(
         "completed_cycle_increment": 0,
     }
 
-    agent_ops_enabled = await run_cycle_fn(
+    cycle_result = await run_cycle_fn(
         session,
         max_tracks=max_tracks,
+        include_payload=True,
     )
+    cycle_payload: dict[str, Any] | None = None
+    if isinstance(cycle_result, dict):
+        agent_ops_enabled = bool(cycle_result.get("enabled", True))
+        payload_candidate = cycle_result.get("payload")
+        if isinstance(payload_candidate, dict):
+            cycle_payload = payload_candidate
+    else:
+        agent_ops_enabled = bool(cycle_result)
+
     result["agent_ops_enabled"] = agent_ops_enabled
+    result["cycle_payload"] = cycle_payload
     if not agent_ops_enabled:
         return result
 
@@ -356,6 +442,7 @@ async def start_orchestration_agents_with_activation_checks(
                 arguments={
                     "request_evidence_on_uncertainty": True,
                     "max_tracks": agent_ops_max_tracks,
+                    "event_origin": "startup_activation",
                 },
             )
         except Exception as error:
@@ -404,6 +491,7 @@ async def start_orchestration_agents_with_activation_checks(
         cycle = payload.get("cycle")
         evaluated_tracks = cycle.get("evaluated_tracks", 0) if isinstance(cycle, dict) else 0
         events = payload.get("events") if isinstance(payload.get("events"), list) else []
+        _record_startup_activation_submission_skips(events)
         observation_ok = any(
             isinstance(event, dict)
             and (

@@ -1,0 +1,9 @@
+{
+  "report_path": "/Users/jaaroncabsaban/Documents/GitHub/mcp-server-camera-tracker/captures/probes/runs/phase16e_live_adapter_module_once_parserfix_20261103_162959/phase16e_report.json",
+  "verdict": "FAIL",
+  "failure_reasons": [
+    "correlated_chain_missing",
+    "main_exit_nonzero:2",
+    "run_local_artifact_missing:agent_events.jsonl"
+  ]
+}

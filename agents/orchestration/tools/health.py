@@ -8,7 +8,7 @@ from typing import Any
 
 from ...registry import mcp
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
 RADAR_STATE_PATH = PROJECT_ROOT / "captures" / "latest_radar_state.json"
 
 

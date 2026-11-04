@@ -1,0 +1,720 @@
+diff --git a/agents/dashboard/config.py b/agents/dashboard/config.py
+index b846e2a..b230c43 100644
+--- a/agents/dashboard/config.py
++++ b/agents/dashboard/config.py
+@@ -36,6 +36,20 @@ def _env_positive_float(name: str, default: float) -> float:
+     return parsed
+ 
+ 
++def _env_path(name: str, default: Path) -> Path:
++    raw = os.getenv(name)
++    if raw is None:
++        return default
++    value = raw.strip()
++    if not value:
++        return default
++    return Path(value).expanduser()
++
++
++TRACKING_FEEDBACK_CONSUMER_DECISIONS_PATH = _env_path(
++    "PHASE16E_TRACKING_FEEDBACK_CONSUMER_DECISIONS_PATH",
++    CAPTURES_DIR / "tracking_feedback_consumer_decisions.jsonl",
++)
+ MAX_GROUND_Z = _env_positive_float("DASHBOARD_MAX_GROUND_Z", 20.0)
+ TRACKING_MISSING_TRACK_GRACE_SECONDS = _env_positive_float(
+     "TRACKING_MISSING_TRACK_GRACE_SECONDS",
+diff --git a/agents/dashboard/tracking_loop.py b/agents/dashboard/tracking_loop.py
+index b7d0329..9e03392 100644
+--- a/agents/dashboard/tracking_loop.py
++++ b/agents/dashboard/tracking_loop.py
+@@ -1,5 +1,6 @@
+ from __future__ import annotations
+ 
++import os
+ import socket
+ import time
+ from pathlib import Path
+@@ -37,6 +38,7 @@ from .config import (
+     GROUND_CALIBRATION_PATH,
+     LATEST_TRACKING_ESTIMATE_DIAGNOSTICS_PATH,
+     LATEST_TRACKING_FRAME_PATH,
++    TRACKING_FEEDBACK_CONSUMER_DECISIONS_PATH,
+     MAX_GROUND_X,
+     MAX_GROUND_Z,
+     TRACKING_MAX_EFFECTIVE_HORIZON_SECONDS,
+@@ -282,6 +284,11 @@ def _consume_tracking_observation_feedback(
+             "error": "feedback_poll_failed",
+         }
+ 
++    _append_tracking_feedback_consumer_decisions(
++        feedback_summary=feedback_summary,
++        now=now,
++    )
++
+     with state.lock:
+         state.latest_tracking_observation_feedback = feedback_summary
+ 
+@@ -427,6 +434,71 @@ def _publish_tracking_estimate_diagnostics(
+     write_json_payload(diagnostics_path, payload)
+ 
+ 
++def _resolve_tracking_feedback_run_id() -> str | None:
++    value = os.getenv("PHASE16E_RUN_ID", "").strip()
++    return value if value else None
++
++
++def _append_tracking_feedback_consumer_decisions(
++    *,
++    feedback_summary: dict[str, Any],
++    now: float,
++    diagnostics_path: Path = TRACKING_FEEDBACK_CONSUMER_DECISIONS_PATH,
++) -> None:
++    evaluated_payload = feedback_summary.get("evaluated_records") if isinstance(feedback_summary, dict) else None
++    evaluated_records = [item for item in evaluated_payload if isinstance(item, dict)] if isinstance(evaluated_payload, list) else []
++
++    outcome_payload = feedback_summary.get("consumer_outcome") if isinstance(feedback_summary, dict) else None
++    consumer_outcome = outcome_payload if isinstance(outcome_payload, dict) else {}
++    poll_error = feedback_summary.get("error") if isinstance(feedback_summary, dict) else None
++    run_id = _resolve_tracking_feedback_run_id()
++
++    rows: list[dict[str, Any]] = []
++    if evaluated_records:
++        for item in evaluated_records:
++            rows.append(
++                {
++                    "schema_version": "1.0",
++                    "logged_at": float(now),
++                    "run_id": run_id,
++                    "feedback_id": item.get("feedback_id"),
++                    "verification_request_id": item.get("verification_request_id"),
++                    "track_id": item.get("track_id"),
++                    "evidence_message_id": item.get("evidence_message_id"),
++                    "verification_observation_id": item.get("verification_observation_id"),
++                    "decision": item.get("decision"),
++                    "reason": item.get("reason"),
++                    "consumer_outcome": consumer_outcome,
++                    "poll_error": poll_error,
++                }
++            )
++    else:
++        rows.append(
++            {
++                "schema_version": "1.0",
++                "logged_at": float(now),
++                "run_id": run_id,
++                "feedback_id": None,
++                "verification_request_id": None,
++                "track_id": None,
++                "evidence_message_id": None,
++                "verification_observation_id": None,
++                "decision": "none",
++                "reason": "no_records",
++                "consumer_outcome": consumer_outcome,
++                "poll_error": poll_error,
++            }
++        )
++
++    try:
++        diagnostics_path.parent.mkdir(parents=True, exist_ok=True)
++        with diagnostics_path.open("a", encoding="utf-8") as handle:
++            for row in rows:
++                handle.write(json.dumps(row, separators=(",", ":")) + "\n")
++    except OSError:
++        return
++
++
+ def _initialize_tracking_runtime(
+     state: SharedDashboardState,
+ ) -> tuple[YOLO, object, GroundPlaneCalibration | None, socket.socket, AsyncVisualTrackingRuntime] | None:
+diff --git a/agents/tracking/observation_feedback.py b/agents/tracking/observation_feedback.py
+index 789e83d..cd49bd1 100644
+--- a/agents/tracking/observation_feedback.py
++++ b/agents/tracking/observation_feedback.py
+@@ -44,6 +44,14 @@ class TrackingObservationFeedbackConsumer:
+                 "accepted_count": 0,
+                 "rejected_count": 0,
+                 "error": None,
++                "evaluated_records": [],
++                "consumer_outcome": {
++                    "status": "ok",
++                    "evaluated_count": 0,
++                    "accepted_count": 0,
++                    "rejected_count": 0,
++                    "duplicate_count": 0,
++                },
+             }
+ 
+         artifact = TrackingObservationFeedbackArtifact.from_dict(payload)
+@@ -53,12 +61,30 @@ class TrackingObservationFeedbackConsumer:
+                 "accepted_count": 0,
+                 "rejected_count": 0,
+                 "error": "schema_mismatch",
++                "evaluated_records": [],
++                "consumer_outcome": {
++                    "status": "schema_mismatch",
++                    "evaluated_count": 0,
++                    "accepted_count": 0,
++                    "rejected_count": 0,
++                    "duplicate_count": 0,
++                },
+             }
+ 
+         accepted: list[dict[str, Any]] = []
++        evaluated_records: list[dict[str, Any]] = []
+         rejected_count = 0
++        duplicate_count = 0
+ 
+         for record in artifact.records:
++            record_view = {
++                "feedback_id": record.feedback_id,
++                "verification_request_id": record.verification_request_id,
++                "track_id": record.track_id,
++                "evidence_message_id": record.evidence_message_id,
++                "verification_observation_id": record.verification_observation_id,
++            }
++
+             valid, rejection_reason = self._validate_record(
+                 record,
+                 now_timestamp=now,
+@@ -69,19 +95,50 @@ class TrackingObservationFeedbackConsumer:
+             if not valid:
+                 if rejection_reason is not None:
+                     rejected_count += 1
++                evaluated_records.append(
++                    {
++                        **record_view,
++                        "decision": "rejected",
++                        "reason": rejection_reason,
++                    }
++                )
+                 continue
+ 
+             if record.feedback_id in self._seen_feedback_ids:
++                duplicate_count += 1
++                evaluated_records.append(
++                    {
++                        **record_view,
++                        "decision": "duplicate",
++                        "reason": "already_seen",
++                    }
++                )
+                 continue
+ 
+             self._track_seen_feedback(record.feedback_id)
+             accepted.append(record.to_dict())
++            evaluated_records.append(
++                {
++                    **record_view,
++                    "decision": "accepted",
++                    "reason": None,
++                }
++            )
+ 
++        accepted_count = len(accepted)
+         return {
+             "accepted": accepted,
+-            "accepted_count": len(accepted),
++            "accepted_count": accepted_count,
+             "rejected_count": rejected_count,
+             "error": None,
++            "evaluated_records": evaluated_records,
++            "consumer_outcome": {
++                "status": "ok",
++                "evaluated_count": len(evaluated_records),
++                "accepted_count": accepted_count,
++                "rejected_count": rejected_count,
++                "duplicate_count": duplicate_count,
++            },
+         }
+ 
+     def _load_payload(self) -> dict[str, Any] | None:
+diff --git a/tests/adapters/non_reasoning_live_verification_adapter.py b/tests/adapters/non_reasoning_live_verification_adapter.py
+index fea0b82..a831379 100644
+--- a/tests/adapters/non_reasoning_live_verification_adapter.py
++++ b/tests/adapters/non_reasoning_live_verification_adapter.py
+@@ -40,6 +40,23 @@ def _load_json(path: Path) -> dict[str, Any] | list[Any] | None:
+         return None
+ 
+ 
++def _load_jsonl(path: Path) -> list[dict[str, Any]]:
++    if not path.is_file():
++        return []
++    rows: list[dict[str, Any]] = []
++    try:
++        for raw in path.read_text(encoding="utf-8").splitlines():
++            line = raw.strip()
++            if not line:
++                continue
++            payload = json.loads(line)
++            if isinstance(payload, dict):
++                rows.append(payload)
++    except (OSError, json.JSONDecodeError):
++        return []
++    return rows
++
++
+ def _resolve_run_dir() -> Path:
+     results_path = os.getenv("PHASE16E_VERIFICATION_RESULTS_PATH", "").strip()
+     if results_path:
+@@ -47,6 +64,17 @@ def _resolve_run_dir() -> Path:
+     return (Path(__file__).resolve().parents[2] / "captures" / "probes" / "runs").resolve()
+ 
+ 
++def _read_run_id(run_dir: Path) -> str | None:
++    run_id_path = run_dir / "run_id.txt"
++    if not run_id_path.is_file():
++        return None
++    try:
++        value = run_id_path.read_text(encoding="utf-8").strip()
++    except OSError:
++        return None
++    return value if value else None
++
++
+ def _parse_positive_float(value: str | None, default: float) -> float:
+     if value is None:
+         return default
+@@ -286,20 +314,48 @@ def evaluate_boundaries(
+         )
+         publication_reason = "ok" if publication_success else "feedback_record_mismatch"
+ 
+-    consumption_success = False
+-    consumption_reason = "tracking_diagnostics_missing"
+-    if isinstance(verification_observation_id, str) and verification_observation_id:
++    run_id = _read_run_id(run_dir)
++    all_consumer_decision_rows = _load_jsonl(run_dir / "tracking_feedback_consumer_decisions.jsonl")
++    if isinstance(run_id, str):
++        consumer_decision_rows = [
++            row
++            for row in all_consumer_decision_rows
++            if isinstance(row.get("run_id"), str) and row.get("run_id") == run_id
++        ]
++    else:
++        consumer_decision_rows = all_consumer_decision_rows
++    consumer_acceptance_success = False
++    consumer_acceptance_reason = "consumer_decision_log_missing"
++    if isinstance(verification_observation_id, str) and verification_observation_id and isinstance(message_id, str) and message_id:
++        for row in consumer_decision_rows:
++            row_observation_id = row.get("verification_observation_id")
++            row_message_id = row.get("evidence_message_id")
++            row_decision = row.get("decision")
++            if row_observation_id != verification_observation_id:
++                continue
++            if row_message_id != message_id:
++                continue
++            if row_decision == "accepted":
++                consumer_acceptance_success = True
++                consumer_acceptance_reason = "ok"
++                break
++        if not consumer_acceptance_success and consumer_decision_rows:
++            consumer_acceptance_reason = "decision_not_accepted_or_mismatched_ids"
++
++    estimate_generation_success = False
++    estimate_generation_reason = "tracking_diagnostics_missing"
++    if isinstance(verification_observation_id, str) and verification_observation_id and isinstance(message_id, str) and message_id:
+         for estimate in estimates:
+             source_observation_id = estimate.get("source_verification_observation_id")
+             source_tracking_message_ids = estimate.get("source_tracking_evidence_ids")
+             if source_observation_id != verification_observation_id:
+                 continue
+             if isinstance(source_tracking_message_ids, list) and message_id in source_tracking_message_ids:
+-                consumption_success = True
+-                consumption_reason = "ok"
++                estimate_generation_success = True
++                estimate_generation_reason = "ok"
+                 break
+-        if not consumption_success and consumption_reason != "ok":
+-            consumption_reason = (
++        if not estimate_generation_success and estimate_generation_reason != "ok":
++            estimate_generation_reason = (
+                 "likely_stale_or_mismatched_latest_message"
+                 if publication_success
+                 else "verification_not_consumed"
+@@ -328,9 +384,17 @@ def evaluate_boundaries(
+             "reason": publication_reason,
+             "record": feedback_record,
+         },
++        "feedback_consumer_acceptance": {
++            "success": consumer_acceptance_success,
++            "reason": consumer_acceptance_reason,
++        },
++        "estimate_generation": {
++            "success": estimate_generation_success,
++            "reason": estimate_generation_reason,
++        },
+         "feedback_consumption": {
+-            "success": consumption_success,
+-            "reason": consumption_reason,
++            "success": estimate_generation_success,
++            "reason": estimate_generation_reason,
+         },
+     }
+ 
+@@ -440,7 +504,9 @@ async def run_adapter() -> int:
+ 
+     visual_success = bool(evaluation.get("visual_verification", {}).get("success", False))
+     publication_success = bool(evaluation.get("feedback_publication", {}).get("success", False))
+-    if visual_success and publication_success:
++    consumer_acceptance_success = bool(evaluation.get("feedback_consumer_acceptance", {}).get("success", False))
++    estimate_generation_success = bool(evaluation.get("estimate_generation", {}).get("success", False))
++    if visual_success and publication_success and consumer_acceptance_success and estimate_generation_success:
+         return 0
+     return 2
+ 
+diff --git a/tests/test_non_reasoning_live_verification_adapter.py b/tests/test_non_reasoning_live_verification_adapter.py
+index 90683bb..ed54e7a 100644
+--- a/tests/test_non_reasoning_live_verification_adapter.py
++++ b/tests/test_non_reasoning_live_verification_adapter.py
+@@ -113,10 +113,12 @@ class TestNonReasoningLiveVerificationAdapter(unittest.TestCase):
+             self.assertEqual(first_batch[0].message_id, "msg-live")
+             self.assertEqual(first_batch[0].source, "external_source")
+ 
+-    def test_evaluate_boundaries_distinguishes_visual_and_consumption(self) -> None:
++    def test_evaluate_boundaries_reports_separate_publication_consumer_estimate_outcomes(self) -> None:
+         with tempfile.TemporaryDirectory() as temp_dir:
+             run_dir = Path(temp_dir)
+             request_id = "verifyreq-123"
++            (run_dir / "run_id.txt").write_text("run-1\n", encoding="utf-8")
++
+             candidate = EvidenceCandidate(
+                 track_id="track-1",
+                 message_id="msg-1",
+@@ -143,6 +145,18 @@ class TestNonReasoningLiveVerificationAdapter(unittest.TestCase):
+                 run_dir / "operator_tracking_feedback.json",
+                 {"schema_version": "1.0", "generated_at": 1001.0, "records": [{"feedback_id": f"obsfeedback-{request_id}", "verification_request_id": request_id, "track_id": "track-1", "evidence_message_id": "msg-1"}]},
+             )
++            (run_dir / "tracking_feedback_consumer_decisions.jsonl").write_text(
++                json.dumps(
++                    {
++                        "run_id": "run-1",
++                        "verification_observation_id": "verify-msg-1",
++                        "evidence_message_id": "msg-1",
++                        "decision": "accepted",
++                    }
++                )
++                + "\n",
++                encoding="utf-8",
++            )
+             _write_json(run_dir / "latest_tracking_estimate_diagnostics.json", {"current_valid_estimates": []})
+ 
+             evaluation = evaluate_boundaries(
+@@ -153,12 +167,141 @@ class TestNonReasoningLiveVerificationAdapter(unittest.TestCase):
+ 
+             self.assertTrue(evaluation["visual_verification"]["success"])
+             self.assertTrue(evaluation["feedback_publication"]["success"])
+-            self.assertFalse(evaluation["feedback_consumption"]["success"])
++            self.assertTrue(evaluation["feedback_consumer_acceptance"]["success"])
++            self.assertFalse(evaluation["estimate_generation"]["success"])
+             self.assertEqual(
+-                evaluation["feedback_consumption"]["reason"],
++                evaluation["estimate_generation"]["reason"],
+                 "likely_stale_or_mismatched_latest_message",
+             )
+ 
++    def test_evaluate_boundaries_requires_both_observation_and_message_for_consumer_acceptance(self) -> None:
++        with tempfile.TemporaryDirectory() as temp_dir:
++            run_dir = Path(temp_dir)
++            request_id = "verifyreq-both-ids"
++            (run_dir / "run_id.txt").write_text("run-ids\n", encoding="utf-8")
++
++            candidate = EvidenceCandidate(
++                track_id="track-ids",
++                message_id="msg-ids",
++                stored_at=1000.0,
++                frame_reference="evidence://frame/frame-ids",
++                detection_reference="evidence://detection/det-ids",
++            )
++
++            class _Request:
++                def __init__(self, request_id: str):
++                    self.request_id = request_id
++
++            request = _Request(request_id=request_id)
++
++            _write_json(
++                run_dir / "latest_verification_queue_submissions.json",
++                [{"request_id": request_id, "source": "external_source", "track_id": "track-ids", "message_id": "msg-ids", "accepted": True}],
++            )
++            _write_json(
++                run_dir / "latest_verification_queue_results.json",
++                [{"request_id": request_id, "status": "completed", "validation_outcome": "accepted", "coordinator_valid": True, "details": {"verification_observation_id": "verify-msg-ids", "verification_referenced_message_id": "msg-ids"}}],
++            )
++            _write_json(
++                run_dir / "operator_tracking_feedback.json",
++                {"schema_version": "1.0", "generated_at": 1001.0, "records": [{"feedback_id": f"obsfeedback-{request_id}", "verification_request_id": request_id, "track_id": "track-ids", "evidence_message_id": "msg-ids"}]},
++            )
++            (run_dir / "tracking_feedback_consumer_decisions.jsonl").write_text(
++                "\n".join(
++                    [
++                        json.dumps(
++                            {
++                                "run_id": "run-ids",
++                                "verification_observation_id": "verify-msg-ids",
++                                "evidence_message_id": "msg-other",
++                                "decision": "accepted",
++                            }
++                        ),
++                        json.dumps(
++                            {
++                                "run_id": "run-ids",
++                                "verification_observation_id": "verify-msg-ids",
++                                "evidence_message_id": "msg-ids",
++                                "decision": "rejected",
++                            }
++                        ),
++                    ]
++                )
++                + "\n",
++                encoding="utf-8",
++            )
++            _write_json(run_dir / "latest_tracking_estimate_diagnostics.json", {"current_valid_estimates": []})
++
++            evaluation = evaluate_boundaries(
++                run_dir=run_dir,
++                selected_candidate=candidate,
++                submitted_request=request,
++            )
++
++            self.assertFalse(evaluation["feedback_consumer_acceptance"]["success"])
++            self.assertEqual(
++                evaluation["feedback_consumer_acceptance"]["reason"],
++                "decision_not_accepted_or_mismatched_ids",
++            )
++
++    def test_evaluate_boundaries_ignores_stale_run_consumer_decisions(self) -> None:
++        with tempfile.TemporaryDirectory() as temp_dir:
++            run_dir = Path(temp_dir)
++            request_id = "verifyreq-run-filter"
++            (run_dir / "run_id.txt").write_text("run-current\n", encoding="utf-8")
++
++            candidate = EvidenceCandidate(
++                track_id="track-current",
++                message_id="msg-current",
++                stored_at=1000.0,
++                frame_reference="evidence://frame/frame-current",
++                detection_reference="evidence://detection/det-current",
++            )
++
++            class _Request:
++                def __init__(self, request_id: str):
++                    self.request_id = request_id
++
++            request = _Request(request_id=request_id)
++
++            _write_json(
++                run_dir / "latest_verification_queue_submissions.json",
++                [{"request_id": request_id, "source": "external_source", "track_id": "track-current", "message_id": "msg-current", "accepted": True}],
++            )
++            _write_json(
++                run_dir / "latest_verification_queue_results.json",
++                [{"request_id": request_id, "status": "completed", "validation_outcome": "accepted", "coordinator_valid": True, "details": {"verification_observation_id": "verify-msg-current", "verification_referenced_message_id": "msg-current"}}],
++            )
++            _write_json(
++                run_dir / "operator_tracking_feedback.json",
++                {"schema_version": "1.0", "generated_at": 1001.0, "records": [{"feedback_id": f"obsfeedback-{request_id}", "verification_request_id": request_id, "track_id": "track-current", "evidence_message_id": "msg-current"}]},
++            )
++            (run_dir / "tracking_feedback_consumer_decisions.jsonl").write_text(
++                json.dumps(
++                    {
++                        "run_id": "run-stale",
++                        "verification_observation_id": "verify-msg-current",
++                        "evidence_message_id": "msg-current",
++                        "decision": "accepted",
++                    }
++                )
++                + "\n",
++                encoding="utf-8",
++            )
++            _write_json(run_dir / "latest_tracking_estimate_diagnostics.json", {"current_valid_estimates": []})
++
++            evaluation = evaluate_boundaries(
++                run_dir=run_dir,
++                selected_candidate=candidate,
++                submitted_request=request,
++            )
++
++            self.assertFalse(evaluation["feedback_consumer_acceptance"]["success"])
++            self.assertEqual(
++                evaluation["feedback_consumer_acceptance"]["reason"],
++                "consumer_decision_log_missing",
++            )
++
+ 
+ if __name__ == "__main__":
+     unittest.main()
+diff --git a/tests/test_phase16e_run_reliability.py b/tests/test_phase16e_run_reliability.py
+index 1599fd7..d98f99b 100644
+--- a/tests/test_phase16e_run_reliability.py
++++ b/tests/test_phase16e_run_reliability.py
+@@ -125,6 +125,7 @@ class TestPhase16ERunReliability(unittest.TestCase):
+             missing = set(payload.get("missing", []))
+             self.assertIn("latest_verification_queue_results.json", missing)
+             self.assertIn("latest_verification_queue_submissions.json", missing)
++            self.assertIn("tracking_feedback_consumer_decisions.jsonl", missing)
+ 
+     def test_start_timestamp_written_after_pre_cleanup(self) -> None:
+         with tempfile.TemporaryDirectory(prefix="phase16e_start_ts_") as tmp:
+@@ -231,6 +232,10 @@ class TestPhase16ERunReliability(unittest.TestCase):
+                 captured_env.get("PHASE16E_VERIFICATION_SUBMISSION_DECISIONS_PATH"),
+                 str((run_dir / "verification_submission_decisions.jsonl").resolve()),
+             )
++            self.assertEqual(
++                captured_env.get("PHASE16E_TRACKING_FEEDBACK_CONSUMER_DECISIONS_PATH"),
++                str((run_dir / "tracking_feedback_consumer_decisions.jsonl").resolve()),
++            )
+ 
+     def test_budget_defaults_and_zero_override(self) -> None:
+         with tempfile.TemporaryDirectory(prefix="phase16e_budget_env_defaults_") as tmp:
+diff --git a/tests/test_tracking_observation_feedback.py b/tests/test_tracking_observation_feedback.py
+index 241a6d2..d664678 100644
+--- a/tests/test_tracking_observation_feedback.py
++++ b/tests/test_tracking_observation_feedback.py
+@@ -427,5 +427,128 @@ class TestTrackingObservationFeedback(unittest.TestCase):
+             self.assertEqual(second_poll["accepted_count"], 0)
+ 
+ 
++    def test_poll_reports_accepted_and_rejected_decisions_for_mixed_records(self) -> None:
++        with tempfile.TemporaryDirectory() as temp_dir:
++            artifact_path = Path(temp_dir) / "operator_tracking_feedback.json"
++            publisher = VerificationFeedbackPublisher(artifact_path=artifact_path)
++            consumer = TrackingObservationFeedbackConsumer(artifact_path=artifact_path)
++
++            publisher.publish_from_results(
++                [
++                    _accepted_result(request_id="req-accepted", track_id="track-accepted", message_id="msg-accepted"),
++                    _accepted_result(request_id="req-unrelated", track_id="track-unrelated", message_id="msg-unrelated"),
++                ],
++                now_timestamp=1301.0,
++            )
++
++            consumed = consumer.poll(
++                current_track_ids={"track-accepted"},
++                latest_message_id_by_track={"track-accepted": "msg-accepted"},
++                now_timestamp=1301.2,
++            )
++
++            self.assertEqual(consumed["accepted_count"], 1)
++            self.assertEqual(consumed["rejected_count"], 1)
++            self.assertIn("evaluated_records", consumed)
++            self.assertIn("consumer_outcome", consumed)
++
++            evaluated = consumed["evaluated_records"]
++            self.assertEqual(len(evaluated), 2)
++            by_track = {
++                row.get("track_id"): row
++                for row in evaluated
++                if isinstance(row, dict) and isinstance(row.get("track_id"), str)
++            }
++            self.assertEqual(by_track["track-accepted"]["decision"], "accepted")
++            self.assertEqual(by_track["track-unrelated"]["decision"], "rejected")
++            self.assertEqual(by_track["track-unrelated"]["reason"], "mismatched_track")
++
++            outcome = consumed["consumer_outcome"]
++            self.assertEqual(outcome["accepted_count"], 1)
++            self.assertEqual(outcome["rejected_count"], 1)
++            self.assertEqual(outcome["duplicate_count"], 0)
++            self.assertEqual(outcome["evaluated_count"], 2)
++
++    def test_poll_reports_duplicate_decision_on_repeat_poll(self) -> None:
++        with tempfile.TemporaryDirectory() as temp_dir:
++            artifact_path = Path(temp_dir) / "operator_tracking_feedback.json"
++            publisher = VerificationFeedbackPublisher(artifact_path=artifact_path)
++            consumer = TrackingObservationFeedbackConsumer(artifact_path=artifact_path)
++
++            publisher.publish_from_results(
++                [_accepted_result(request_id="req-dup", track_id="track-dup", message_id="msg-dup")],
++                now_timestamp=1401.0,
++            )
++
++            first = consumer.poll(
++                current_track_ids={"track-dup"},
++                latest_message_id_by_track={"track-dup": "msg-dup"},
++                now_timestamp=1401.1,
++            )
++            second = consumer.poll(
++                current_track_ids={"track-dup"},
++                latest_message_id_by_track={"track-dup": "msg-dup"},
++                now_timestamp=1401.2,
++            )
++
++            self.assertEqual(first["accepted_count"], 1)
++            self.assertEqual(second["accepted_count"], 0)
++            self.assertEqual(second["rejected_count"], 0)
++            self.assertEqual(second["consumer_outcome"]["duplicate_count"], 1)
++            self.assertEqual(second["consumer_outcome"]["accepted_count"], 0)
++            self.assertEqual(second["consumer_outcome"]["evaluated_count"], 1)
++            self.assertEqual(second["evaluated_records"][0]["decision"], "duplicate")
++            self.assertEqual(second["evaluated_records"][0]["reason"], "already_seen")
++
++    def test_poll_empty_payload_reports_zero_decisions(self) -> None:
++        with tempfile.TemporaryDirectory() as temp_dir:
++            artifact_path = Path(temp_dir) / "operator_tracking_feedback.json"
++            consumer = TrackingObservationFeedbackConsumer(artifact_path=artifact_path)
++
++            consumed = consumer.poll(
++                current_track_ids={"track-empty"},
++                latest_message_id_by_track={"track-empty": "msg-empty"},
++                now_timestamp=1501.0,
++            )
++
++            self.assertEqual(consumed["accepted_count"], 0)
++            self.assertEqual(consumed["rejected_count"], 0)
++            self.assertEqual(consumed["evaluated_records"], [])
++            self.assertEqual(consumed["consumer_outcome"]["status"], "ok")
++            self.assertEqual(consumed["consumer_outcome"]["evaluated_count"], 0)
++
++    def test_poll_rejects_contradictory_current_stale_feedback(self) -> None:
++        with tempfile.TemporaryDirectory() as temp_dir:
++            artifact_path = Path(temp_dir) / "operator_tracking_feedback.json"
++            publisher = VerificationFeedbackPublisher(artifact_path=artifact_path)
++            consumer = TrackingObservationFeedbackConsumer(artifact_path=artifact_path)
++
++            publisher.publish_from_results(
++                [
++                    _accepted_result(
++                        request_id="req-contradictory",
++                        track_id="track-contradictory",
++                        message_id="msg-contradictory",
++                        applicability="current",
++                        stale_for_current=True,
++                    )
++                ],
++                now_timestamp=1601.0,
++            )
++
++            consumed = consumer.poll(
++                current_track_ids={"track-contradictory"},
++                latest_message_id_by_track={"track-contradictory": "msg-contradictory"},
++                now_timestamp=1601.1,
++            )
++
++            self.assertEqual(consumed["accepted_count"], 0)
++            self.assertGreaterEqual(consumed["rejected_count"], 1)
++            self.assertEqual(consumed["consumer_outcome"]["rejected_count"], 1)
++            self.assertEqual(consumed["consumer_outcome"]["accepted_count"], 0)
++            self.assertEqual(consumed["evaluated_records"][0]["decision"], "rejected")
++            self.assertEqual(consumed["evaluated_records"][0]["reason"], "stale_for_current_decisions")
++
++
+ if __name__ == "__main__":
+     unittest.main()
+diff --git a/tools/phase16e_run.py b/tools/phase16e_run.py
+index 1171c4b..7681183 100644
+--- a/tools/phase16e_run.py
++++ b/tools/phase16e_run.py
+@@ -277,6 +277,7 @@ def _record_run_local_artifact_status(run_dir: Path) -> dict[str, Any]:
+         "latest_verification_queue_results.json",
+         "latest_verification_queue_submissions.json",
+         "operator_tracking_feedback.json",
++        "tracking_feedback_consumer_decisions.jsonl",
+         "agent_events.jsonl",
+     ]
+     present = [name for name in expected if (run_dir / name).is_file()]
+@@ -350,6 +351,7 @@ def main() -> int:
+     main_env["PHASE16E_VERIFICATION_SUBMISSIONS_PATH"] = str((run_dir / "latest_verification_queue_submissions.json").resolve())
+     main_env["PHASE16E_VERIFICATION_SUBMISSION_DECISIONS_PATH"] = str((run_dir / "verification_submission_decisions.jsonl").resolve())
+     main_env["PHASE16E_OPERATOR_FEEDBACK_PATH"] = str((run_dir / "operator_tracking_feedback.json").resolve())
++    main_env["PHASE16E_TRACKING_FEEDBACK_CONSUMER_DECISIONS_PATH"] = str((run_dir / "tracking_feedback_consumer_decisions.jsonl").resolve())
+     main_env["PHASE16E_AGENT_EVENTS_PATH"] = str((run_dir / "agent_events.jsonl").resolve())
+     _ensure_budget_env(main_env, run_dir)
+     _initialize_budget_artifacts(main_env)

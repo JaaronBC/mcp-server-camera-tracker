@@ -56,6 +56,8 @@ def resolve_retry_backoff_seconds(default_value: float) -> float:
 
 def classify_llm_error(error: Exception) -> str:
     text = f"{type(error).__name__}:{error}".lower()
+    if "budget_exhausted" in text or "provider_call_budget_exhausted" in text:
+        return "budget_exhausted"
     if "timeout" in text:
         return "timeout"
     if "api_key" in text or "unauthorized" in text or "authentication" in text:
@@ -124,3 +126,19 @@ def coerce_str(value: Any, default: str) -> str:
     if isinstance(value, str) and value.strip():
         return value.strip()
     return default
+
+
+def extract_usage_dict(response: Any) -> dict[str, int] | None:
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return None
+
+    payload: dict[str, int] = {}
+    for field in ("prompt_tokens", "completion_tokens", "total_tokens"):
+        value = getattr(usage, field, None)
+        if isinstance(value, int):
+            payload[field] = value
+
+    if not payload:
+        return None
+    return payload

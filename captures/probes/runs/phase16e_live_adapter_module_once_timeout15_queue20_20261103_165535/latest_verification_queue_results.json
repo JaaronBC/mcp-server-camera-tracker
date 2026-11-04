@@ -1,0 +1,44 @@
+[
+  {
+    "request_id": "verifyreq-ed363c9424934236815c885b8cdf9800",
+    "source": "external_source",
+    "track_id": "1",
+    "evidence_message_id": "trkmsg-48a796d9499e-1793760943255362-46-1-1",
+    "status": "completed",
+    "validation_outcome": "accepted",
+    "submitted_at": 1793760944.157186,
+    "started_at": 1793760944.171125,
+    "finished_at": 1793760956.5804548,
+    "current_applicability": "historical",
+    "stale_for_current_decisions": true,
+    "coordinator_valid": true,
+    "error_code": null,
+    "error": null,
+    "details": {
+      "verification_observation_id": "verify-trkmsg-48a796d9499e-1793760943255362-46-1-1-1793760943255362",
+      "verification_referenced_message_id": "trkmsg-48a796d9499e-1793760943255362-46-1-1",
+      "verification_timestamp": 1793760943.255362,
+      "verification_status": "inconclusive",
+      "identity_consistency": "consistent",
+      "visibility_status": "visible",
+      "possible_id_switch": false,
+      "confidence": 0.72,
+      "visual_content_inspected": true,
+      "source_evidence_refs": [
+        "evidence://detection/detref-48a796d9499e-1793760943255362-92-1-1"
+      ],
+      "supporting_evidence_refs": [
+        "evidence://detection/detref-48a796d9499e-1793760943255362-92-1-1"
+      ],
+      "contradicting_evidence_refs": [],
+      "uncertainty": [],
+      "limitations": [
+        "Only one image frame provided; temporal continuity of track_id 1 across the 20 observations cannot be visually confirmed.",
+        "No reference/crop of the previously tracked appearance is supplied to perform a direct identity match.",
+        "Ground positions are relative/estimated and not visually verifiable from the image.",
+        "Pixel center (~1097,1073) is consistent with the right-of-center location of the visible person but exact bbox alignment cannot be pixel-verified."
+      ]
+    },
+    "run_id": "phase16e-1793760935"
+  }
+]
