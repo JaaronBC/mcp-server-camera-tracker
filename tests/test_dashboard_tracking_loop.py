@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from collections import deque
+import importlib
+import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -276,6 +279,157 @@ class TestTrackingFeedbackDecisionLogging(unittest.TestCase):
             self.assertEqual(len(lines), 1)
             self.assertIn('"decision":"error"', lines[0])
             self.assertIn('"reason":"feedback_poll_failed"', lines[0])
+
+
+class TestTrackingFeedbackPathResolution(unittest.TestCase):
+    def _reload_dashboard_modules(self) -> tuple[object, object]:
+        config_module = importlib.import_module("agents.dashboard.config")
+        tracking_module = importlib.import_module("agents.dashboard.tracking_loop")
+        config_module = importlib.reload(config_module)
+        tracking_module = importlib.reload(tracking_module)
+        return config_module, tracking_module
+
+    def test_default_feedback_path_used_when_env_not_set(self) -> None:
+        original_env = os.environ.pop("PHASE16E_OPERATOR_FEEDBACK_PATH", None)
+        try:
+            config_module, tracking_module = self._reload_dashboard_modules()
+            expected_default = config_module.CAPTURES_DIR / "operator_tracking_feedback.json"
+            self.assertEqual(config_module.LATEST_OPERATOR_TRACKING_FEEDBACK_PATH, expected_default)
+            self.assertEqual(tracking_module.LATEST_OPERATOR_TRACKING_FEEDBACK_PATH, expected_default)
+        finally:
+            if original_env is None:
+                os.environ.pop("PHASE16E_OPERATOR_FEEDBACK_PATH", None)
+            else:
+                os.environ["PHASE16E_OPERATOR_FEEDBACK_PATH"] = original_env
+            self._reload_dashboard_modules()
+
+    def test_env_feedback_path_used_when_set_before_import(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            run_local_path = Path(temp_dir) / "operator_tracking_feedback.json"
+            original_env = os.environ.get("PHASE16E_OPERATOR_FEEDBACK_PATH")
+            try:
+                os.environ["PHASE16E_OPERATOR_FEEDBACK_PATH"] = str(run_local_path)
+                config_module, tracking_module = self._reload_dashboard_modules()
+                self.assertEqual(config_module.LATEST_OPERATOR_TRACKING_FEEDBACK_PATH, run_local_path)
+                self.assertEqual(tracking_module.LATEST_OPERATOR_TRACKING_FEEDBACK_PATH, run_local_path)
+            finally:
+                if original_env is None:
+                    os.environ.pop("PHASE16E_OPERATOR_FEEDBACK_PATH", None)
+                else:
+                    os.environ["PHASE16E_OPERATOR_FEEDBACK_PATH"] = original_env
+                self._reload_dashboard_modules()
+
+    def test_run_local_feedback_record_is_discovered_and_evaluated(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            feedback_path = Path(temp_dir) / "operator_tracking_feedback.json"
+            feedback_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "records": [
+                            {
+                                "schema_version": "1.0",
+                                "feedback_id": "fb-1",
+                                "verification_request_id": "req-1",
+                                "track_id": "track-1",
+                                "evidence_message_id": "msg-1",
+                                "verification_observation_id": "obs-1",
+                                "verification_message_id": "msg-1",
+                                "verification_timestamp": 900.0,
+                                "source": "external_source",
+                                "current_applicability": "historical",
+                                "historical_observation": True,
+                                "stale_for_current_decisions": True,
+                                "coordinator_valid": True,
+                                "validation_outcome": "accepted",
+                                "submitted_at": 901.0,
+                                "started_at": 902.0,
+                                "finished_at": 903.0,
+                                "published_at": 904.0,
+                                "expires_at": 1100.0,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            original_env = os.environ.get("PHASE16E_OPERATOR_FEEDBACK_PATH")
+            try:
+                os.environ["PHASE16E_OPERATOR_FEEDBACK_PATH"] = str(feedback_path)
+                _, tracking_module = self._reload_dashboard_modules()
+                consumer = tracking_module.TrackingObservationFeedbackConsumer(
+                    artifact_path=tracking_module.LATEST_OPERATOR_TRACKING_FEEDBACK_PATH,
+                    max_seen_feedback_ids=16,
+                    max_artifact_bytes=128_000,
+                )
+                summary = consumer.poll(
+                    current_track_ids={"track-1"},
+                    temporarily_lost_track_ids=set(),
+                    latest_message_id_by_track={"track-1": "msg-1"},
+                    now_timestamp=1000.0,
+                )
+                self.assertEqual(summary.get("accepted_count"), 1)
+                evaluated = summary.get("evaluated_records")
+                self.assertIsInstance(evaluated, list)
+                self.assertEqual(len(evaluated), 1)
+                self.assertEqual(evaluated[0].get("verification_observation_id"), "obs-1")
+                self.assertEqual(evaluated[0].get("decision"), "accepted")
+            finally:
+                if original_env is None:
+                    os.environ.pop("PHASE16E_OPERATOR_FEEDBACK_PATH", None)
+                else:
+                    os.environ["PHASE16E_OPERATOR_FEEDBACK_PATH"] = original_env
+                self._reload_dashboard_modules()
+
+
+    def test_initialize_runtime_uses_configured_feedback_artifact_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            run_local_path = Path(temp_dir) / "operator_tracking_feedback.json"
+            original_env = os.environ.get("PHASE16E_OPERATOR_FEEDBACK_PATH")
+            captured_artifact_path: dict[str, Path] = {}
+
+            def _consumer_factory(*, artifact_path: Path, max_seen_feedback_ids: int, max_artifact_bytes: int):
+                captured_artifact_path["value"] = artifact_path
+                return object()
+
+            try:
+                os.environ["PHASE16E_OPERATOR_FEEDBACK_PATH"] = str(run_local_path)
+                _, tracking_module = self._reload_dashboard_modules()
+
+                state = SharedDashboardState()
+                fake_camera = _FakeCamera(opened=True)
+                fake_socket = _FakeSocket()
+                fake_runtime = _FakeTrackingRuntime()
+
+                with (
+                    patch.object(tracking_module, "YOLO", return_value=object()),
+                    patch.object(tracking_module.cv2, "VideoCapture", return_value=fake_camera),
+                    patch.object(tracking_module, "load_ground_plane_calibration", return_value=None),
+                    patch.object(tracking_module.socket, "socket", return_value=fake_socket),
+                    patch.object(tracking_module, "AgentCoordinator", return_value=object()),
+                    patch.object(tracking_module, "LLMVisualTrackingAgent", return_value=_FakeAgent()),
+                    patch.object(tracking_module, "AsyncVisualTrackingRuntime", return_value=fake_runtime),
+                    patch.object(tracking_module, "TrackingEvidenceStore", return_value=object()),
+                    patch.object(tracking_module, "TrackingEvidencePackager", return_value=object()),
+                    patch.object(
+                        tracking_module,
+                        "TrackingObservationFeedbackConsumer",
+                        side_effect=_consumer_factory,
+                    ),
+                    patch.object(tracking_module, "TrackingEstimateProposalEngine", return_value=object()),
+                ):
+                    initialized = tracking_module._initialize_tracking_runtime(state)
+
+                self.assertIsNotNone(initialized)
+                self.assertEqual(tracking_module.LATEST_OPERATOR_TRACKING_FEEDBACK_PATH, run_local_path)
+                self.assertEqual(captured_artifact_path.get("value"), run_local_path)
+            finally:
+                if original_env is None:
+                    os.environ.pop("PHASE16E_OPERATOR_FEEDBACK_PATH", None)
+                else:
+                    os.environ["PHASE16E_OPERATOR_FEEDBACK_PATH"] = original_env
+                self._reload_dashboard_modules()
 
 
 if __name__ == "__main__":

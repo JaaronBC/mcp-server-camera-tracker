@@ -39,6 +39,7 @@ from .config import (
     GROUND_CALIBRATION_PATH,
     LATEST_TRACKING_ESTIMATE_DIAGNOSTICS_PATH,
     LATEST_TRACKING_FRAME_PATH,
+    LATEST_OPERATOR_TRACKING_FEEDBACK_PATH,
     TRACKING_FEEDBACK_CONSUMER_DECISIONS_PATH,
     MAX_GROUND_X,
     MAX_GROUND_Z,
@@ -564,7 +565,7 @@ def _initialize_tracking_runtime(
             max_history_per_track=20,
         )
         feedback_consumer = TrackingObservationFeedbackConsumer(
-            artifact_path=CAPTURES_DIR / "operator_tracking_feedback.json",
+            artifact_path=LATEST_OPERATOR_TRACKING_FEEDBACK_PATH,
             max_seen_feedback_ids=1024,
             max_artifact_bytes=512_000,
         )

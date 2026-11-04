@@ -1,0 +1,133 @@
+{
+  "schema_version": "1.0",
+  "generated_at": 1793773059.332035,
+  "selected": {
+    "track_id": "1",
+    "message_id": "trkmsg-f94f98cb17ed-1793773018234092-39-1-1",
+    "request_id": "verifyreq-67b7edc9656347a399b86b231b2f96ce",
+    "verification_observation_id": "verify-trkmsg-f94f98cb17ed-1793773018234092-39-1-1-1793773018234092"
+  },
+  "submission": {
+    "found": true,
+    "record": {
+      "request_id": "verifyreq-67b7edc9656347a399b86b231b2f96ce",
+      "source": "external_source",
+      "track_id": "1",
+      "message_id": "trkmsg-f94f98cb17ed-1793773018234092-39-1-1",
+      "submitted_at": 1793773019.478063,
+      "accepted": true,
+      "status": "queued",
+      "reason": null,
+      "run_id": "phase16e-isolated-live-20261103_201649"
+    }
+  },
+  "visual_verification": {
+    "success": true,
+    "reason": "ok",
+    "record": {
+      "request_id": "verifyreq-67b7edc9656347a399b86b231b2f96ce",
+      "source": "external_source",
+      "track_id": "1",
+      "evidence_message_id": "trkmsg-f94f98cb17ed-1793773018234092-39-1-1",
+      "status": "completed",
+      "validation_outcome": "accepted",
+      "submitted_at": 1793773019.478063,
+      "started_at": 1793773019.479856,
+      "finished_at": 1793773033.797119,
+      "current_applicability": "historical",
+      "stale_for_current_decisions": true,
+      "coordinator_valid": true,
+      "error_code": null,
+      "error": null,
+      "details": {
+        "verification_observation_id": "verify-trkmsg-f94f98cb17ed-1793773018234092-39-1-1-1793773018234092",
+        "verification_referenced_message_id": "trkmsg-f94f98cb17ed-1793773018234092-39-1-1",
+        "verification_timestamp": 1793773018.234092,
+        "verification_status": "inconclusive",
+        "identity_consistency": "consistent",
+        "visibility_status": "visible",
+        "possible_id_switch": false,
+        "confidence": 0.8,
+        "visual_content_inspected": true,
+        "source_evidence_refs": [
+          "evidence://detection/detref-f94f98cb17ed-1793773018234092-80-1-1"
+        ],
+        "supporting_evidence_refs": [
+          "evidence://detection/detref-f94f98cb17ed-1793773018234092-80-1-1"
+        ],
+        "contradicting_evidence_refs": [],
+        "uncertainty": [],
+        "limitations": [
+          "Only a single frame image is available; no earlier frames to confirm appearance continuity over the 20-observation history.",
+          "Ground position and relative depth are inferred/relative estimates, not directly measurable from the image.",
+          "Exact detector bbox extents are not given, so pixel-center alignment to the face is approximate.",
+          "No reference identity descriptor (e.g., known person template) is provided to anchor absolute identity."
+        ]
+      },
+      "run_id": "phase16e-isolated-live-20261103_201649"
+    }
+  },
+  "feedback_publication": {
+    "success": true,
+    "reason": "ok",
+    "record": {
+      "schema_version": "1.0",
+      "feedback_id": "obsfeedback-verifyreq-67b7edc9656347a399b86b231b2f96ce",
+      "verification_request_id": "verifyreq-67b7edc9656347a399b86b231b2f96ce",
+      "track_id": "1",
+      "evidence_message_id": "trkmsg-f94f98cb17ed-1793773018234092-39-1-1",
+      "verification_observation_id": "verify-trkmsg-f94f98cb17ed-1793773018234092-39-1-1-1793773018234092",
+      "verification_message_id": "trkmsg-f94f98cb17ed-1793773018234092-39-1-1",
+      "verification_timestamp": 1793773018.234092,
+      "source": "external_source",
+      "current_applicability": "historical",
+      "historical_observation": true,
+      "stale_for_current_decisions": true,
+      "coordinator_valid": true,
+      "validation_outcome": "accepted",
+      "submitted_at": 1793773019.478063,
+      "started_at": 1793773019.479856,
+      "finished_at": 1793773033.797119,
+      "published_at": 1793773033.82971,
+      "expires_at": 1793773078.82971,
+      "provenance": {
+        "publisher": "verification_queue",
+        "source": "external_source"
+      },
+      "details": {
+        "verification_status": "inconclusive",
+        "identity_consistency": "consistent",
+        "visibility_status": "visible",
+        "possible_id_switch": false,
+        "confidence": 0.8,
+        "visual_content_inspected": true,
+        "source_evidence_refs": [
+          "evidence://detection/detref-f94f98cb17ed-1793773018234092-80-1-1"
+        ],
+        "supporting_evidence_refs": [
+          "evidence://detection/detref-f94f98cb17ed-1793773018234092-80-1-1"
+        ],
+        "contradicting_evidence_refs": [],
+        "uncertainty": [],
+        "limitations": [
+          "Only a single frame image is available; no earlier frames to confirm appearance continuity over the 20-observation history.",
+          "Ground position and relative depth are inferred/relative estimates, not directly measurable from the image.",
+          "Exact detector bbox extents are not given, so pixel-center alignment to the face is approximate.",
+          "No reference identity descriptor (e.g., known person template) is provided to anchor absolute identity."
+        ]
+      }
+    }
+  },
+  "feedback_consumer_acceptance": {
+    "success": false,
+    "reason": "consumer_decision_log_missing"
+  },
+  "estimate_generation": {
+    "success": false,
+    "reason": "likely_stale_or_mismatched_latest_message"
+  },
+  "feedback_consumption": {
+    "success": false,
+    "reason": "consumer_decision_log_missing"
+  }
+}
