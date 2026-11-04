@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
 
@@ -11,7 +12,9 @@ from agents.dashboard._live_tracking_display_impl import *  # noqa: F401,F403
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Run the live tracking dashboard")
+    parser.add_argument("--video-path", help="Path to a video file to track")
+    main(video_path=parser.parse_args().video_path)
 
 """
 # Live dashboard pipeline that captures camera frames, tracks detections, applies tracking-agent updates, and renders radar/display state.

@@ -155,12 +155,17 @@ def _format_assessment_summary(
     return summary_line, limits_line, color
 
 
-def draw_placeholder_webcam_panel(width: int, height: int, message: str):
+def draw_placeholder_webcam_panel(
+    width: int,
+    height: int,
+    message: str,
+    source_label: str = "Webcam",
+):
     panel = cv2.UMat(height, width, cv2.CV_8UC3).get()
     panel[:] = (22, 22, 22)
     cv2.putText(
         panel,
-        "Webcam feed unavailable",
+        f"{source_label} feed unavailable",
         (20, 60),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.9,
@@ -270,6 +275,8 @@ def render_dashboard(state: SharedDashboardState) -> None:
 
             camera_status = state.camera_status
             detector_status = state.detector_status
+            video_path = state.video_path
+            input_error = state.input_error
             calibration_status = state.calibration_status
             mapping_mode = state.mapping_mode
             latest_frame = state.latest_annotated_frame
@@ -300,18 +307,20 @@ def render_dashboard(state: SharedDashboardState) -> None:
         header_height = 132
         panel_height = dashboard_height - header_height
         panel_width = dashboard_width // 2
+        source_label = "Video" if video_path is not None else "Webcam"
 
         if latest_frame is None:
             webcam_panel = draw_placeholder_webcam_panel(
                 panel_width,
                 panel_height,
-                f"camera_status={camera_status}",
+                input_error or f"camera_status={camera_status}",
+                source_label=source_label,
             )
         else:
             webcam_panel = cv2.resize(latest_frame, (panel_width, panel_height))
             cv2.putText(
                 webcam_panel,
-                "Live Webcam (YOLO + ByteTrack)",
+                f"Live {source_label} (YOLO + ByteTrack)",
                 (18, 30),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.7,
@@ -319,6 +328,17 @@ def render_dashboard(state: SharedDashboardState) -> None:
                 2,
                 cv2.LINE_AA,
             )
+            if input_error:
+                cv2.putText(
+                    webcam_panel,
+                    input_error[:100],
+                    (18, 60),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.45,
+                    (0, 0, 255),
+                    1,
+                    cv2.LINE_AA,
+                )
 
         radar_panel = draw_radar_panel(panel_width, panel_height, tracks, trails, now)
         cv2.putText(

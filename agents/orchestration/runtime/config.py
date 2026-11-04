@@ -179,6 +179,10 @@ def parse_cli_args(
         help="Suppress startup banner prints in main runtime",
     )
     parser.add_argument(
+        "--video-path",
+        help="Path to a video file to track instead of the default webcam",
+    )
+    parser.add_argument(
         "--handoff-degraded-warn-rate",
         type=unit_interval_float,
         default=handoff_degraded_warn_rate_default,

@@ -28,13 +28,17 @@ def make_start_live_tracking(
     tool_name: str,
     result_text_fn: Callable[[Any], str],
     emit: Callable[[str], None],
-) -> Callable[[ClientSession], Awaitable[None]]:
-    async def _start_live_tracking(session: ClientSession) -> None:
+) -> Callable[[ClientSession, str | None], Awaitable[None]]:
+    async def _start_live_tracking(
+        session: ClientSession,
+        video_path: str | None = None,
+    ) -> None:
         await orchestration_control.start_live_tracking_runtime(
             session,
             tool_name=tool_name,
             result_text_fn=result_text_fn,
             emit=emit,
+            video_path=video_path,
         )
 
     return _start_live_tracking

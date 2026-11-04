@@ -18,7 +18,7 @@ def _is_running() -> bool:
     return _dashboard_process is not None and _dashboard_process.poll() is None
 
 
-def start_dashboard_process() -> tuple[bool, str]:
+def start_dashboard_process(video_path: str | None = None) -> tuple[bool, str]:
     # Performs start dashboard process logic.
     global _dashboard_process
 
@@ -32,8 +32,15 @@ def start_dashboard_process() -> tuple[bool, str]:
     if not DASHBOARD_SCRIPT_PATH.is_file():
         raise FileNotFoundError(f"Dashboard script not found: {DASHBOARD_SCRIPT_PATH}")
 
+    command = [sys.executable, str(DASHBOARD_SCRIPT_PATH)]
+    if video_path is not None:
+        video_file = Path(video_path).expanduser()
+        if not video_file.is_file():
+            raise FileNotFoundError(f"Video file not found: {video_file}")
+        command.extend(["--video-path", str(video_file)])
+
     _dashboard_process = subprocess.Popen(
-        [sys.executable, str(DASHBOARD_SCRIPT_PATH)],
+        command,
         cwd=str(DASHBOARD_SCRIPT_PATH.parent),
         stdin=subprocess.DEVNULL,
         stdout=sys.stderr,

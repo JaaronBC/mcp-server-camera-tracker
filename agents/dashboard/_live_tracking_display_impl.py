@@ -65,12 +65,16 @@ def build_tracking_message(timestamp: float, detections: list[dict]) -> dict:
     return build_tracking_frame_message(timestamp, detections)
 
 
-def main() -> None:
+def main(video_path: str | None = None) -> None:
     CAPTURES_DIR.mkdir(parents=True, exist_ok=True)
 
-    state = SharedDashboardState()
+    state = SharedDashboardState(video_path=video_path)
 
-    tracking_thread = threading.Thread(target=run_live_tracking_loop, args=(state,), daemon=True)
+    tracking_thread = threading.Thread(
+        target=run_live_tracking_loop,
+        args=(state, video_path),
+        daemon=True,
+    )
     radar_thread = threading.Thread(target=run_radar_loop, args=(state,), daemon=True)
 
     tracking_thread.start()

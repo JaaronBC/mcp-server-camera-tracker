@@ -24,6 +24,39 @@ class TestMainCliArgs(unittest.TestCase):
         self.assertEqual(options.depth_coverage_sample_limit, 50)
         self.assertEqual(options.handoff_degraded_warn_rate, 0.1)
         self.assertEqual(options.handoff_degraded_critical_rate, 0.3)
+        self.assertIsNone(main.load_config([]).video_path)
+
+    def test_video_path_option_is_added_to_runtime_config(self) -> None:
+        # A supplied file path is retained for startup tracking.
+        config = main.load_config(["--video-path", "sample.mp4"])
+        self.assertEqual(config.video_path, "sample.mp4")
+
+    def test_user_main_reports_eof_when_input_is_non_interactive(self) -> None:
+        with (
+            patch("main.sys.argv", ["main.py"]),
+            patch("builtins.input", side_effect=EOFError),
+            patch("builtins.print") as print_mock,
+            self.assertRaises(SystemExit) as exit_context,
+        ):
+            main.user_main()
+
+        self.assertEqual(exit_context.exception.code, 2)
+        self.assertIn("--video-path", print_mock.call_args.args[0])
+
+    def test_user_main_reports_eof_when_video_path_is_missing(self) -> None:
+        with (
+            patch("main.sys.argv", ["main.py"]),
+            patch("builtins.input", side_effect=["1", EOFError]),
+            patch("builtins.print") as print_mock,
+            self.assertRaises(SystemExit) as exit_context,
+        ):
+            main.user_main()
+
+        self.assertEqual(exit_context.exception.code, 2)
+        self.assertEqual(
+            print_mock.call_args.args[0],
+            "Error: No video path was provided.",
+        )
 
     def test_parse_cli_args_agent_ops_overrides(self) -> None:
         # Performs test parse cli args agent ops overrides logic.

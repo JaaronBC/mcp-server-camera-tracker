@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import subprocess
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from agents.orchestration import process as orchestration_process
@@ -63,6 +65,22 @@ class TestOrchestrationProcess(unittest.TestCase):
         self.assertTrue(started)
         self.assertIn("Process ID: 6789", message)
         self.assertIs(orchestration_process._dashboard_process, mock_process)
+
+    @patch("agents.orchestration.process.subprocess.Popen")
+    @patch("agents.orchestration.process.DASHBOARD_SCRIPT_PATH")
+    def test_start_dashboard_process_passes_video_path(self, mock_path, mock_popen) -> None:
+        mock_path.is_file.return_value = True
+        mock_path.parent = "/tmp"
+        mock_process = DummyProcess(pid=6789)
+        mock_popen.return_value = mock_process
+
+        with tempfile.TemporaryDirectory() as directory:
+            video_file = Path(directory) / "sample.mp4"
+            video_file.touch()
+            orchestration_process.start_dashboard_process(str(video_file))
+
+        command = mock_popen.call_args.args[0]
+        self.assertEqual(command[-2:], ["--video-path", str(video_file)])
 
     def test_start_dashboard_process_returns_existing_running_message(self) -> None:
         # Performs test start dashboard process returns existing running message logic.

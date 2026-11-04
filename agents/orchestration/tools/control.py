@@ -40,12 +40,14 @@ async def start_live_tracking_runtime(
     tool_name: str,
     result_text_fn: Callable[[Any], str],
     emit: Callable[[str], None],
+    video_path: str | None = None,
 ) -> None:
     await tracking_runtime_module.start_live_tracking(
         session,
         tool_name=tool_name,
         result_text_fn=result_text_fn,
         emit=emit,
+        video_path=video_path,
     )
 
 

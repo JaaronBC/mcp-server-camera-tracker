@@ -78,9 +78,11 @@ async def start_live_tracking(
     tool_name: str = LIVE_TRACKING_TOOL_NAME,
     result_text_fn: Callable[[Any], str] = get_result_text,
     emit: Callable[[str], None] | None = None,
+    video_path: str | None = None,
 ) -> None:
     # Starts live tracking through MCP tool and emits startup feedback.
-    result = await session.call_tool(tool_name, arguments={})
+    arguments = {} if video_path is None else {"video_path": video_path}
+    result = await session.call_tool(tool_name, arguments=arguments)
     message = result_text_fn(result)
     if getattr(result, "is_error", False):
         raise RuntimeError(f"Could not start live tracking: {message}")
