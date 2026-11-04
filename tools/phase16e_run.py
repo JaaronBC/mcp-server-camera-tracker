@@ -277,6 +277,7 @@ def _record_run_local_artifact_status(run_dir: Path) -> dict[str, Any]:
         "latest_verification_queue_results.json",
         "latest_verification_queue_submissions.json",
         "operator_tracking_feedback.json",
+        "tracking_feedback_consumer_decisions.jsonl",
         "agent_events.jsonl",
     ]
     present = [name for name in expected if (run_dir / name).is_file()]
@@ -350,6 +351,7 @@ def main() -> int:
     main_env["PHASE16E_VERIFICATION_SUBMISSIONS_PATH"] = str((run_dir / "latest_verification_queue_submissions.json").resolve())
     main_env["PHASE16E_VERIFICATION_SUBMISSION_DECISIONS_PATH"] = str((run_dir / "verification_submission_decisions.jsonl").resolve())
     main_env["PHASE16E_OPERATOR_FEEDBACK_PATH"] = str((run_dir / "operator_tracking_feedback.json").resolve())
+    main_env["PHASE16E_TRACKING_FEEDBACK_CONSUMER_DECISIONS_PATH"] = str((run_dir / "tracking_feedback_consumer_decisions.jsonl").resolve())
     main_env["PHASE16E_AGENT_EVENTS_PATH"] = str((run_dir / "agent_events.jsonl").resolve())
     _ensure_budget_env(main_env, run_dir)
     _initialize_budget_artifacts(main_env)

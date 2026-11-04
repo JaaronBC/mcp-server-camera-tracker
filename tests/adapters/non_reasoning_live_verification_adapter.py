@@ -40,11 +40,39 @@ def _load_json(path: Path) -> dict[str, Any] | list[Any] | None:
         return None
 
 
+def _load_jsonl(path: Path) -> list[dict[str, Any]]:
+    if not path.is_file():
+        return []
+    rows: list[dict[str, Any]] = []
+    try:
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            payload = json.loads(line)
+            if isinstance(payload, dict):
+                rows.append(payload)
+    except (OSError, json.JSONDecodeError):
+        return []
+    return rows
+
+
 def _resolve_run_dir() -> Path:
     results_path = os.getenv("PHASE16E_VERIFICATION_RESULTS_PATH", "").strip()
     if results_path:
         return Path(results_path).expanduser().resolve().parent
     return (Path(__file__).resolve().parents[2] / "captures" / "probes" / "runs").resolve()
+
+
+def _read_run_id(run_dir: Path) -> str | None:
+    run_id_path = run_dir / "run_id.txt"
+    if not run_id_path.is_file():
+        return None
+    try:
+        value = run_id_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return value if value else None
 
 
 def _parse_positive_float(value: str | None, default: float) -> float:
@@ -286,20 +314,56 @@ def evaluate_boundaries(
         )
         publication_reason = "ok" if publication_success else "feedback_record_mismatch"
 
-    consumption_success = False
-    consumption_reason = "tracking_diagnostics_missing"
-    if isinstance(verification_observation_id, str) and verification_observation_id:
+    run_id = _read_run_id(run_dir)
+    consumer_acceptance_success = False
+    consumer_acceptance_reason = "run_id_missing"
+    matching_decisions: set[str] = set()
+
+    if isinstance(run_id, str) and run_id:
+        all_consumer_decision_rows = _load_jsonl(run_dir / "tracking_feedback_consumer_decisions.jsonl")
+        consumer_decision_rows = [
+            row
+            for row in all_consumer_decision_rows
+            if isinstance(row.get("run_id"), str) and row.get("run_id") == run_id
+        ]
+        consumer_acceptance_reason = "consumer_decision_log_missing"
+
+        if isinstance(verification_observation_id, str) and verification_observation_id and isinstance(message_id, str) and message_id:
+            for row in consumer_decision_rows:
+                row_observation_id = row.get("verification_observation_id")
+                row_message_id = row.get("evidence_message_id")
+                if row_observation_id != verification_observation_id:
+                    continue
+                if row_message_id != message_id:
+                    continue
+                row_decision = row.get("decision")
+                if isinstance(row_decision, str) and row_decision:
+                    matching_decisions.add(row_decision)
+
+            if "accepted" in matching_decisions and "rejected" in matching_decisions:
+                consumer_acceptance_reason = "contradictory_consumer_decisions"
+            elif "accepted" in matching_decisions:
+                consumer_acceptance_success = True
+                consumer_acceptance_reason = "ok"
+            elif "rejected" in matching_decisions:
+                consumer_acceptance_reason = "consumer_rejected"
+            elif consumer_decision_rows:
+                consumer_acceptance_reason = "decision_not_accepted_or_mismatched_ids"
+
+    estimate_generation_success = False
+    estimate_generation_reason = "tracking_diagnostics_missing"
+    if isinstance(verification_observation_id, str) and verification_observation_id and isinstance(message_id, str) and message_id:
         for estimate in estimates:
             source_observation_id = estimate.get("source_verification_observation_id")
             source_tracking_message_ids = estimate.get("source_tracking_evidence_ids")
             if source_observation_id != verification_observation_id:
                 continue
             if isinstance(source_tracking_message_ids, list) and message_id in source_tracking_message_ids:
-                consumption_success = True
-                consumption_reason = "ok"
+                estimate_generation_success = True
+                estimate_generation_reason = "ok"
                 break
-        if not consumption_success and consumption_reason != "ok":
-            consumption_reason = (
+        if not estimate_generation_success and estimate_generation_reason != "ok":
+            estimate_generation_reason = (
                 "likely_stale_or_mismatched_latest_message"
                 if publication_success
                 else "verification_not_consumed"
@@ -328,9 +392,17 @@ def evaluate_boundaries(
             "reason": publication_reason,
             "record": feedback_record,
         },
+        "feedback_consumer_acceptance": {
+            "success": consumer_acceptance_success,
+            "reason": consumer_acceptance_reason,
+        },
+        "estimate_generation": {
+            "success": estimate_generation_success,
+            "reason": estimate_generation_reason,
+        },
         "feedback_consumption": {
-            "success": consumption_success,
-            "reason": consumption_reason,
+            "success": consumer_acceptance_success,
+            "reason": consumer_acceptance_reason,
         },
     }
 
@@ -440,7 +512,8 @@ async def run_adapter() -> int:
 
     visual_success = bool(evaluation.get("visual_verification", {}).get("success", False))
     publication_success = bool(evaluation.get("feedback_publication", {}).get("success", False))
-    if visual_success and publication_success:
+    consumer_acceptance_success = bool(evaluation.get("feedback_consumer_acceptance", {}).get("success", False))
+    if visual_success and publication_success and consumer_acceptance_success:
         return 0
     return 2
 

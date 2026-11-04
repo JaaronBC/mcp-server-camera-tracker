@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from collections import deque
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from agents.dashboard.state import SharedDashboardState
@@ -227,6 +229,53 @@ class TestDashboardTrackingLoopTrailSnapshot(unittest.TestCase):
         self.assertIsNot(snapshot, state.track_trails)
         self.assertEqual(snapshot.keys(), state.track_trails.keys())
         self.assertIs(snapshot["7"], state.track_trails["7"])
+
+
+class TestTrackingFeedbackDecisionLogging(unittest.TestCase):
+    def test_empty_poll_does_not_append_decision_row(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            diagnostics_path = Path(temp_dir) / "tracking_feedback_consumer_decisions.jsonl"
+            tracking_loop._append_tracking_feedback_consumer_decisions(
+                feedback_summary={
+                    "accepted": [],
+                    "accepted_count": 0,
+                    "rejected_count": 0,
+                    "error": None,
+                    "evaluated_records": [],
+                    "consumer_outcome": {
+                        "status": "ok",
+                        "evaluated_count": 0,
+                        "accepted_count": 0,
+                        "rejected_count": 0,
+                        "duplicate_count": 0,
+                    },
+                },
+                now=1001.0,
+                diagnostics_path=diagnostics_path,
+            )
+
+            self.assertFalse(diagnostics_path.exists())
+
+    def test_poll_error_appends_error_diagnostic_row(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            diagnostics_path = Path(temp_dir) / "tracking_feedback_consumer_decisions.jsonl"
+            tracking_loop._append_tracking_feedback_consumer_decisions(
+                feedback_summary={
+                    "accepted": [],
+                    "accepted_count": 0,
+                    "rejected_count": 0,
+                    "error": "feedback_poll_failed",
+                    "evaluated_records": [],
+                },
+                now=1002.0,
+                diagnostics_path=diagnostics_path,
+            )
+
+            self.assertTrue(diagnostics_path.is_file())
+            lines = diagnostics_path.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(lines), 1)
+            self.assertIn('"decision":"error"', lines[0])
+            self.assertIn('"reason":"feedback_poll_failed"', lines[0])
 
 
 if __name__ == "__main__":

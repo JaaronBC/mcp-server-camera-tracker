@@ -44,6 +44,14 @@ class TrackingObservationFeedbackConsumer:
                 "accepted_count": 0,
                 "rejected_count": 0,
                 "error": None,
+                "evaluated_records": [],
+                "consumer_outcome": {
+                    "status": "ok",
+                    "evaluated_count": 0,
+                    "accepted_count": 0,
+                    "rejected_count": 0,
+                    "duplicate_count": 0,
+                },
             }
 
         artifact = TrackingObservationFeedbackArtifact.from_dict(payload)
@@ -53,12 +61,30 @@ class TrackingObservationFeedbackConsumer:
                 "accepted_count": 0,
                 "rejected_count": 0,
                 "error": "schema_mismatch",
+                "evaluated_records": [],
+                "consumer_outcome": {
+                    "status": "schema_mismatch",
+                    "evaluated_count": 0,
+                    "accepted_count": 0,
+                    "rejected_count": 0,
+                    "duplicate_count": 0,
+                },
             }
 
         accepted: list[dict[str, Any]] = []
+        evaluated_records: list[dict[str, Any]] = []
         rejected_count = 0
+        duplicate_count = 0
 
         for record in artifact.records:
+            record_view = {
+                "feedback_id": record.feedback_id,
+                "verification_request_id": record.verification_request_id,
+                "track_id": record.track_id,
+                "evidence_message_id": record.evidence_message_id,
+                "verification_observation_id": record.verification_observation_id,
+            }
+
             valid, rejection_reason = self._validate_record(
                 record,
                 now_timestamp=now,
@@ -69,19 +95,50 @@ class TrackingObservationFeedbackConsumer:
             if not valid:
                 if rejection_reason is not None:
                     rejected_count += 1
+                evaluated_records.append(
+                    {
+                        **record_view,
+                        "decision": "rejected",
+                        "reason": rejection_reason,
+                    }
+                )
                 continue
 
             if record.feedback_id in self._seen_feedback_ids:
+                duplicate_count += 1
+                evaluated_records.append(
+                    {
+                        **record_view,
+                        "decision": "duplicate",
+                        "reason": "already_seen",
+                    }
+                )
                 continue
 
             self._track_seen_feedback(record.feedback_id)
             accepted.append(record.to_dict())
+            evaluated_records.append(
+                {
+                    **record_view,
+                    "decision": "accepted",
+                    "reason": None,
+                }
+            )
 
+        accepted_count = len(accepted)
         return {
             "accepted": accepted,
-            "accepted_count": len(accepted),
+            "accepted_count": accepted_count,
             "rejected_count": rejected_count,
             "error": None,
+            "evaluated_records": evaluated_records,
+            "consumer_outcome": {
+                "status": "ok",
+                "evaluated_count": len(evaluated_records),
+                "accepted_count": accepted_count,
+                "rejected_count": rejected_count,
+                "duplicate_count": duplicate_count,
+            },
         }
 
     def _load_payload(self) -> dict[str, Any] | None:

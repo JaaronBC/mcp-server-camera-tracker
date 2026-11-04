@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import os
 import socket
 import time
 from pathlib import Path
@@ -37,6 +39,7 @@ from .config import (
     GROUND_CALIBRATION_PATH,
     LATEST_TRACKING_ESTIMATE_DIAGNOSTICS_PATH,
     LATEST_TRACKING_FRAME_PATH,
+    TRACKING_FEEDBACK_CONSUMER_DECISIONS_PATH,
     MAX_GROUND_X,
     MAX_GROUND_Z,
     TRACKING_MAX_EFFECTIVE_HORIZON_SECONDS,
@@ -282,6 +285,11 @@ def _consume_tracking_observation_feedback(
             "error": "feedback_poll_failed",
         }
 
+    _append_tracking_feedback_consumer_decisions(
+        feedback_summary=feedback_summary,
+        now=now,
+    )
+
     with state.lock:
         state.latest_tracking_observation_feedback = feedback_summary
 
@@ -425,6 +433,74 @@ def _publish_tracking_estimate_diagnostics(
         now=now,
     )
     write_json_payload(diagnostics_path, payload)
+
+
+def _resolve_tracking_feedback_run_id() -> str | None:
+    value = os.getenv("PHASE16E_RUN_ID", "").strip()
+    return value if value else None
+
+
+def _append_tracking_feedback_consumer_decisions(
+    *,
+    feedback_summary: dict[str, Any],
+    now: float,
+    diagnostics_path: Path = TRACKING_FEEDBACK_CONSUMER_DECISIONS_PATH,
+) -> None:
+    evaluated_payload = feedback_summary.get("evaluated_records") if isinstance(feedback_summary, dict) else None
+    evaluated_records = [item for item in evaluated_payload if isinstance(item, dict)] if isinstance(evaluated_payload, list) else []
+
+    outcome_payload = feedback_summary.get("consumer_outcome") if isinstance(feedback_summary, dict) else None
+    consumer_outcome = outcome_payload if isinstance(outcome_payload, dict) else {}
+    poll_error = feedback_summary.get("error") if isinstance(feedback_summary, dict) else None
+    run_id = _resolve_tracking_feedback_run_id()
+
+    rows: list[dict[str, Any]] = []
+    if evaluated_records:
+        for item in evaluated_records:
+            rows.append(
+                {
+                    "schema_version": "1.0",
+                    "logged_at": float(now),
+                    "run_id": run_id,
+                    "feedback_id": item.get("feedback_id"),
+                    "verification_request_id": item.get("verification_request_id"),
+                    "track_id": item.get("track_id"),
+                    "evidence_message_id": item.get("evidence_message_id"),
+                    "verification_observation_id": item.get("verification_observation_id"),
+                    "decision": item.get("decision"),
+                    "reason": item.get("reason"),
+                    "consumer_outcome": consumer_outcome,
+                    "poll_error": poll_error,
+                }
+            )
+    elif isinstance(poll_error, str) and poll_error:
+        rows.append(
+            {
+                "schema_version": "1.0",
+                "logged_at": float(now),
+                "run_id": run_id,
+                "feedback_id": None,
+                "verification_request_id": None,
+                "track_id": None,
+                "evidence_message_id": None,
+                "verification_observation_id": None,
+                "decision": "error",
+                "reason": poll_error,
+                "consumer_outcome": consumer_outcome,
+                "poll_error": poll_error,
+            }
+        )
+
+    if not rows:
+        return
+
+    try:
+        diagnostics_path.parent.mkdir(parents=True, exist_ok=True)
+        with diagnostics_path.open("a", encoding="utf-8") as handle:
+            for row in rows:
+                handle.write(json.dumps(row, separators=(",", ":")) + "\n")
+    except OSError:
+        return
 
 
 def _initialize_tracking_runtime(

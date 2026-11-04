@@ -36,6 +36,20 @@ def _env_positive_float(name: str, default: float) -> float:
     return parsed
 
 
+def _env_path(name: str, default: Path) -> Path:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    value = raw.strip()
+    if not value:
+        return default
+    return Path(value).expanduser()
+
+
+TRACKING_FEEDBACK_CONSUMER_DECISIONS_PATH = _env_path(
+    "PHASE16E_TRACKING_FEEDBACK_CONSUMER_DECISIONS_PATH",
+    CAPTURES_DIR / "tracking_feedback_consumer_decisions.jsonl",
+)
 MAX_GROUND_Z = _env_positive_float("DASHBOARD_MAX_GROUND_Z", 20.0)
 TRACKING_MISSING_TRACK_GRACE_SECONDS = _env_positive_float(
     "TRACKING_MISSING_TRACK_GRACE_SECONDS",

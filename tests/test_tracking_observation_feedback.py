@@ -427,5 +427,128 @@ class TestTrackingObservationFeedback(unittest.TestCase):
             self.assertEqual(second_poll["accepted_count"], 0)
 
 
+    def test_poll_reports_accepted_and_rejected_decisions_for_mixed_records(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            artifact_path = Path(temp_dir) / "operator_tracking_feedback.json"
+            publisher = VerificationFeedbackPublisher(artifact_path=artifact_path)
+            consumer = TrackingObservationFeedbackConsumer(artifact_path=artifact_path)
+
+            publisher.publish_from_results(
+                [
+                    _accepted_result(request_id="req-accepted", track_id="track-accepted", message_id="msg-accepted"),
+                    _accepted_result(request_id="req-unrelated", track_id="track-unrelated", message_id="msg-unrelated"),
+                ],
+                now_timestamp=1301.0,
+            )
+
+            consumed = consumer.poll(
+                current_track_ids={"track-accepted"},
+                latest_message_id_by_track={"track-accepted": "msg-accepted"},
+                now_timestamp=1301.2,
+            )
+
+            self.assertEqual(consumed["accepted_count"], 1)
+            self.assertEqual(consumed["rejected_count"], 1)
+            self.assertIn("evaluated_records", consumed)
+            self.assertIn("consumer_outcome", consumed)
+
+            evaluated = consumed["evaluated_records"]
+            self.assertEqual(len(evaluated), 2)
+            by_track = {
+                row.get("track_id"): row
+                for row in evaluated
+                if isinstance(row, dict) and isinstance(row.get("track_id"), str)
+            }
+            self.assertEqual(by_track["track-accepted"]["decision"], "accepted")
+            self.assertEqual(by_track["track-unrelated"]["decision"], "rejected")
+            self.assertEqual(by_track["track-unrelated"]["reason"], "mismatched_track")
+
+            outcome = consumed["consumer_outcome"]
+            self.assertEqual(outcome["accepted_count"], 1)
+            self.assertEqual(outcome["rejected_count"], 1)
+            self.assertEqual(outcome["duplicate_count"], 0)
+            self.assertEqual(outcome["evaluated_count"], 2)
+
+    def test_poll_reports_duplicate_decision_on_repeat_poll(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            artifact_path = Path(temp_dir) / "operator_tracking_feedback.json"
+            publisher = VerificationFeedbackPublisher(artifact_path=artifact_path)
+            consumer = TrackingObservationFeedbackConsumer(artifact_path=artifact_path)
+
+            publisher.publish_from_results(
+                [_accepted_result(request_id="req-dup", track_id="track-dup", message_id="msg-dup")],
+                now_timestamp=1401.0,
+            )
+
+            first = consumer.poll(
+                current_track_ids={"track-dup"},
+                latest_message_id_by_track={"track-dup": "msg-dup"},
+                now_timestamp=1401.1,
+            )
+            second = consumer.poll(
+                current_track_ids={"track-dup"},
+                latest_message_id_by_track={"track-dup": "msg-dup"},
+                now_timestamp=1401.2,
+            )
+
+            self.assertEqual(first["accepted_count"], 1)
+            self.assertEqual(second["accepted_count"], 0)
+            self.assertEqual(second["rejected_count"], 0)
+            self.assertEqual(second["consumer_outcome"]["duplicate_count"], 1)
+            self.assertEqual(second["consumer_outcome"]["accepted_count"], 0)
+            self.assertEqual(second["consumer_outcome"]["evaluated_count"], 1)
+            self.assertEqual(second["evaluated_records"][0]["decision"], "duplicate")
+            self.assertEqual(second["evaluated_records"][0]["reason"], "already_seen")
+
+    def test_poll_empty_payload_reports_zero_decisions(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            artifact_path = Path(temp_dir) / "operator_tracking_feedback.json"
+            consumer = TrackingObservationFeedbackConsumer(artifact_path=artifact_path)
+
+            consumed = consumer.poll(
+                current_track_ids={"track-empty"},
+                latest_message_id_by_track={"track-empty": "msg-empty"},
+                now_timestamp=1501.0,
+            )
+
+            self.assertEqual(consumed["accepted_count"], 0)
+            self.assertEqual(consumed["rejected_count"], 0)
+            self.assertEqual(consumed["evaluated_records"], [])
+            self.assertEqual(consumed["consumer_outcome"]["status"], "ok")
+            self.assertEqual(consumed["consumer_outcome"]["evaluated_count"], 0)
+
+    def test_poll_rejects_contradictory_current_stale_feedback(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            artifact_path = Path(temp_dir) / "operator_tracking_feedback.json"
+            publisher = VerificationFeedbackPublisher(artifact_path=artifact_path)
+            consumer = TrackingObservationFeedbackConsumer(artifact_path=artifact_path)
+
+            publisher.publish_from_results(
+                [
+                    _accepted_result(
+                        request_id="req-contradictory",
+                        track_id="track-contradictory",
+                        message_id="msg-contradictory",
+                        applicability="current",
+                        stale_for_current=True,
+                    )
+                ],
+                now_timestamp=1601.0,
+            )
+
+            consumed = consumer.poll(
+                current_track_ids={"track-contradictory"},
+                latest_message_id_by_track={"track-contradictory": "msg-contradictory"},
+                now_timestamp=1601.1,
+            )
+
+            self.assertEqual(consumed["accepted_count"], 0)
+            self.assertGreaterEqual(consumed["rejected_count"], 1)
+            self.assertEqual(consumed["consumer_outcome"]["rejected_count"], 1)
+            self.assertEqual(consumed["consumer_outcome"]["accepted_count"], 0)
+            self.assertEqual(consumed["evaluated_records"][0]["decision"], "rejected")
+            self.assertEqual(consumed["evaluated_records"][0]["reason"], "stale_for_current_decisions")
+
+
 if __name__ == "__main__":
     unittest.main()

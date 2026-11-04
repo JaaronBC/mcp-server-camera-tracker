@@ -125,6 +125,7 @@ class TestPhase16ERunReliability(unittest.TestCase):
             missing = set(payload.get("missing", []))
             self.assertIn("latest_verification_queue_results.json", missing)
             self.assertIn("latest_verification_queue_submissions.json", missing)
+            self.assertIn("tracking_feedback_consumer_decisions.jsonl", missing)
 
     def test_start_timestamp_written_after_pre_cleanup(self) -> None:
         with tempfile.TemporaryDirectory(prefix="phase16e_start_ts_") as tmp:
@@ -230,6 +231,10 @@ class TestPhase16ERunReliability(unittest.TestCase):
             self.assertEqual(
                 captured_env.get("PHASE16E_VERIFICATION_SUBMISSION_DECISIONS_PATH"),
                 str((run_dir / "verification_submission_decisions.jsonl").resolve()),
+            )
+            self.assertEqual(
+                captured_env.get("PHASE16E_TRACKING_FEEDBACK_CONSUMER_DECISIONS_PATH"),
+                str((run_dir / "tracking_feedback_consumer_decisions.jsonl").resolve()),
             )
 
     def test_budget_defaults_and_zero_override(self) -> None:
