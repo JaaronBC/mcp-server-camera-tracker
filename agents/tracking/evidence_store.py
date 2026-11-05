@@ -66,6 +66,7 @@ class TrackingEvidenceStore:
         self._lock = threading.Lock()
         self._pending_frames: set[str] = set()
         self._cleanup_tick = 0
+        self._admission_capacity_evictions = 0
 
         self._frame_ids = deque(maxlen=self._max_frame_records)
         self._detection_ids = deque(maxlen=self._max_detection_records)
@@ -424,6 +425,8 @@ class TrackingEvidenceStore:
                 if isinstance(frame_id, str):
                     with self._lock:
                         self._pending_frames.discard(frame_id)
+                with self._lock:
+                    self._admission_capacity_evictions += 1
 
             _json_write(metadata_path, metadata)
             with self._lock:
@@ -465,6 +468,10 @@ class TrackingEvidenceStore:
         }
 
         try:
+            with self._lock:
+                removed_capacity += self._admission_capacity_evictions
+                self._admission_capacity_evictions = 0
+
             protected_frame_ids, lease_stats = load_active_protected_frame_ids(
                 evidence_root_dir=self._root_dir,
                 now_timestamp=now,

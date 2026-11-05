@@ -155,6 +155,7 @@ class VerificationQueueManager:
         self._submission_records_by_request_id: dict[str, VerificationSubmissionRecord] = {}
         self._submission_order: deque[str] = deque(maxlen=self._result_registry_capacity)
         self._leases_by_request_id: dict[str, dict[str, Any]] = {}
+        self._lease_fallback_status_by_request_id: dict[str, str] = {}
         self._pending_lease_release_request_ids: set[str] = set()
         self._lease_release_retry_attempts_by_request_id: dict[str, int] = {}
         self._max_lease_release_retries = 2
@@ -314,44 +315,57 @@ class VerificationQueueManager:
             max_active_leases=self._max_active_leases,
             lock_timeout_seconds=self._lease_lock_timeout_seconds,
         )
+        lease_payload: dict[str, Any] | None = None
         if not bool(lease_result.get("acquired", False)):
             status = str(lease_result.get("status", "lease_acquire_failed"))
-            self._store_submission(
-                VerificationSubmissionRecord(
-                    request_id=request.request_id,
-                    source=request.source,
-                    track_id=track_id,
-                    message_id=message_id,
-                    submitted_at=now,
-                    accepted=False,
-                    status=status,
-                    reason=status,
-                    run_id=self._run_id,
+            if status == "frame_metadata_unavailable":
+                self._lease_fallback_status_by_request_id[request.request_id] = status
+                lease_payload = {
+                    "request_id": request.request_id,
+                    "message_id": message_id,
+                    "track_id": track_id,
+                    "frame_reference": None,
+                    "created_at": now,
+                    "expires_at": now + self._lease_ttl_seconds,
+                }
+            else:
+                self._store_submission(
+                    VerificationSubmissionRecord(
+                        request_id=request.request_id,
+                        source=request.source,
+                        track_id=track_id,
+                        message_id=message_id,
+                        submitted_at=now,
+                        accepted=False,
+                        status=status,
+                        reason=status,
+                        run_id=self._run_id,
+                    )
                 )
-            )
-            self._store_record(
-                VerificationQueueRecord(
-                    request_id=request.request_id,
-                    source=request.source,
-                    track_id=track_id,
-                    evidence_message_id=message_id,
-                    status="rejected",
-                    validation_outcome="lease_acquire_failed",
-                    submitted_at=now,
-                    started_at=None,
-                    finished_at=now,
-                    current_applicability="unknown",
-                    stale_for_current_decisions=False,
-                    coordinator_valid=False,
-                    error_code=status,
-                    error="Unable to acquire evidence protection lease",
-                    run_id=self._run_id,
-                    details=self._sanitize_details(lease_result.get("details")),
+                self._store_record(
+                    VerificationQueueRecord(
+                        request_id=request.request_id,
+                        source=request.source,
+                        track_id=track_id,
+                        evidence_message_id=message_id,
+                        status="rejected",
+                        validation_outcome="lease_acquire_failed",
+                        submitted_at=now,
+                        started_at=None,
+                        finished_at=now,
+                        current_applicability="unknown",
+                        stale_for_current_decisions=False,
+                        coordinator_valid=False,
+                        error_code=status,
+                        error="Unable to acquire evidence protection lease",
+                        run_id=self._run_id,
+                        details=self._sanitize_details(lease_result.get("details")),
+                    )
                 )
-            )
-            return {"accepted": False, "status": status, "message_id": message_id, "request_id": request.request_id}
+                return {"accepted": False, "status": status, "message_id": message_id, "request_id": request.request_id}
 
-        lease_payload = lease_result.get("lease")
+        if lease_payload is None:
+            lease_payload = lease_result.get("lease")
         if not isinstance(lease_payload, dict):
             status = "lease_payload_invalid"
             self._leases_by_request_id.setdefault(request.request_id, {"request_id": request.request_id})
@@ -396,6 +410,7 @@ class VerificationQueueManager:
             or lease_payload.get("message_id") != message_id
             or lease_payload.get("track_id") != track_id
         ):
+            self._lease_fallback_status_by_request_id.pop(request.request_id, None)
             self._release_request_lease(request.request_id)
             status = "lease_association_mismatch"
             self._store_submission(
@@ -991,12 +1006,21 @@ class VerificationQueueManager:
 
     def _store_record(self, record: VerificationQueueRecord) -> None:
         request_id = record.request_id
+        fallback_status = self._lease_fallback_status_by_request_id.get(request_id)
+        if isinstance(fallback_status, str) and fallback_status:
+            details = record.details if isinstance(record.details, dict) else {}
+            enriched_details = dict(details)
+            enriched_details["evidence_lease_fallback_used"] = True
+            enriched_details["evidence_lease_fallback_status"] = fallback_status
+            record.details = enriched_details
+
         if request_id not in self._records_by_request_id and len(self._record_order) == self._result_registry_capacity:
             oldest = self._record_order[0]
             self._records_by_request_id.pop(oldest, None)
         if request_id not in self._records_by_request_id:
             self._record_order.append(request_id)
         self._records_by_request_id[request_id] = record
+        self._lease_fallback_status_by_request_id.pop(request_id, None)
 
     def _store_submission(self, record: VerificationSubmissionRecord) -> None:
         request_id = record.request_id
@@ -1121,12 +1145,22 @@ def extract_submission_decisions_from_cycle_payload(payload: dict[str, Any]) -> 
             else None
         )
         event_origin_value = event.get("event_origin")
-        event_origin = (
-            event_origin_value.strip()
-            if isinstance(event_origin_value, str)
-            and event_origin_value.strip() in {"startup_activation", "production_monitor"}
-            else None
-        )
+        event_origin: str | None
+        invalid_event_origin = False
+        if isinstance(event_origin_value, str):
+            normalized_event_origin = event_origin_value.strip()
+            if normalized_event_origin in {"startup_activation", "production_monitor"}:
+                event_origin = normalized_event_origin
+            elif normalized_event_origin:
+                event_origin = None
+                invalid_event_origin = True
+            else:
+                event_origin = "production_monitor"
+        elif event_origin_value is None:
+            event_origin = "production_monitor"
+        else:
+            event_origin = None
+            invalid_event_origin = True
 
         if not evidence_requested:
             decisions.append(
@@ -1156,7 +1190,11 @@ def extract_submission_decisions_from_cycle_payload(payload: dict[str, Any]) -> 
                     skip_reason=(
                         "startup_activation_event"
                         if event_origin == "startup_activation"
-                        else "invalid_or_missing_event_origin"
+                        else (
+                            "invalid_event_origin"
+                            if invalid_event_origin
+                            else "invalid_or_missing_event_origin"
+                        )
                     ),
                 )
             )
@@ -1222,4 +1260,20 @@ def extract_submission_decisions_from_cycle_payload(payload: dict[str, Any]) -> 
 
 def extract_track_requests_from_cycle_payload(payload: dict[str, Any]) -> Iterable[VerificationQueueRequest]:
     decisions = extract_submission_decisions_from_cycle_payload(payload)
-    return [decision.queue_request for decision in decisions if decision.queue_request is not None]
+    requests: list[VerificationQueueRequest] = []
+    for decision in decisions:
+        request = decision.queue_request
+        if request is None:
+            continue
+        requests.append(
+            VerificationQueueRequest(
+                request_id=request.request_id,
+                track_id=request.track_id,
+                message_id=request.message_id,
+                source="reasoning_cycle",
+                requested_at=request.requested_at,
+                trigger_event_id=request.trigger_event_id,
+                trigger_timestamp=request.trigger_timestamp,
+            )
+        )
+    return requests

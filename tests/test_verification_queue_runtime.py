@@ -179,6 +179,29 @@ class TestVerificationQueueRuntime(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(decision.queue_request.source, "production_monitor")
         self.assertEqual(decision.queue_request.message_id, "msg-1")
 
+
+    def test_extract_submission_decisions_rejects_invalid_nonempty_event_origin(self) -> None:
+        payload = {
+            "events": [
+                {
+                    "event_origin": "manual_override",
+                    "event_id": "evt-invalid-origin",
+                    "track_id": "track-1",
+                    "timestamp": 1000.0,
+                    "evidence_requested": True,
+                    "evidence_message_id": "msg-1",
+                }
+            ]
+        }
+
+        decisions = extract_submission_decisions_from_cycle_payload(payload)
+        self.assertEqual(len(decisions), 1)
+        decision = decisions[0]
+        self.assertIsNone(decision.event_origin)
+        self.assertFalse(decision.submission_eligibility)
+        self.assertEqual(decision.skip_reason, "invalid_event_origin")
+        self.assertIsNone(decision.queue_request)
+
     async def test_submission_boundary_records_queued_before_completion(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             evidence_root = Path(temp_dir) / "tracking_evidence"
@@ -683,6 +706,101 @@ class TestVerificationQueueRuntime(unittest.IsolatedAsyncioTestCase):
                 results = manager.get_recent_results(1)
                 self.assertEqual(results[0]["run_id"], "run-a")
             finally:
+                await manager.stop()
+
+
+    async def test_frame_metadata_fallback_diagnostics_persist_for_terminal_outcomes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            evidence_root = Path(temp_dir) / "tracking_evidence"
+            _write_validated_envelope(evidence_root, message_id="msg-fallback-success", track_id="track-1", timestamp=1000.0)
+            _write_validated_envelope(evidence_root, message_id="msg-fallback-failure", track_id="track-1", timestamp=1000.1)
+            _write_validated_envelope(evidence_root, message_id="msg-fallback-timeout", track_id="track-1", timestamp=1000.2)
+            _write_validated_envelope(evidence_root, message_id="msg-fallback-reject", track_id="track-1", timestamp=1000.3)
+
+            async def handler(tool_name, arguments):
+                message_id = str(arguments.get("message_id", ""))
+                if tool_name == "get_tracking_visual_evidence":
+                    return _FakeResult({"available": True, "track_id": "track-1"})
+
+                if tool_name == "verify_tracking_visual_evidence":
+                    if message_id == "msg-fallback-timeout":
+                        await asyncio.sleep(0.2)
+                        return _FakeResult({"available": True})
+                    if message_id == "msg-fallback-failure":
+                        return _FakeResult({"available": False, "error_code": "provider_failure", "error": "upstream"})
+                    if message_id == "msg-fallback-reject":
+                        return _FakeResult(
+                            {
+                                "available": True,
+                                "envelope": _verification_envelope(
+                                    message_id=message_id,
+                                    track_id="track-1",
+                                    timestamp=1000.5,
+                                )
+                                | {"source_evidence_refs": ["evidence://frame/not-in-evidence"]},
+                            }
+                        )
+                    if message_id == "msg-fallback-success":
+                        return _FakeResult(
+                            {
+                                "available": True,
+                                "envelope": _verification_envelope(
+                                    message_id=message_id,
+                                    track_id="track-1",
+                                    timestamp=1000.4,
+                                ),
+                            }
+                        )
+                raise RuntimeError("unexpected tool")
+
+            manager = VerificationQueueManager(evidence_root_dir=evidence_root, request_timeout_seconds=0.05)
+
+            original_acquire = verification_queue_runtime.acquire_verification_evidence_lease
+
+            def _fake_acquire(*, evidence_root_dir, request_id, message_id, track_id, now_timestamp, lease_ttl_seconds, max_protected_frames, max_active_leases, lock_timeout_seconds):
+                if str(request_id).startswith("req-fallback-"):
+                    return {"acquired": False, "status": "frame_metadata_unavailable", "details": {"error_code": "frame_metadata_unavailable"}}
+                return original_acquire(
+                    evidence_root_dir=evidence_root_dir,
+                    request_id=request_id,
+                    message_id=message_id,
+                    track_id=track_id,
+                    now_timestamp=now_timestamp,
+                    lease_ttl_seconds=lease_ttl_seconds,
+                    max_protected_frames=max_protected_frames,
+                    max_active_leases=max_active_leases,
+                    lock_timeout_seconds=lock_timeout_seconds,
+                )
+
+            verification_queue_runtime.acquire_verification_evidence_lease = _fake_acquire
+            await manager.start(session=_FakeSession(handler))
+            try:
+                manager.submit_request(VerificationQueueRequest("req-fallback-success", "track-1", "msg-fallback-success", "test", 1001.0))
+                manager.submit_request(VerificationQueueRequest("req-fallback-failure", "track-1", "msg-fallback-failure", "test", 1001.1))
+                manager.submit_request(VerificationQueueRequest("req-fallback-timeout", "track-1", "msg-fallback-timeout", "test", 1001.2))
+                manager.submit_request(VerificationQueueRequest("req-fallback-reject", "track-1", "msg-fallback-reject", "test", 1001.3))
+
+                await asyncio.wait_for(manager._queue.join(), timeout=2.0)
+                records = {item["request_id"]: item for item in manager.get_recent_results(10)}
+
+                self.assertEqual(records["req-fallback-success"]["status"], "completed")
+                self.assertEqual(records["req-fallback-failure"]["status"], "failed")
+                self.assertEqual(records["req-fallback-timeout"]["status"], "timed_out")
+                self.assertEqual(records["req-fallback-reject"]["status"], "rejected")
+
+                for request_id in (
+                    "req-fallback-success",
+                    "req-fallback-failure",
+                    "req-fallback-timeout",
+                    "req-fallback-reject",
+                ):
+                    details = records[request_id]["details"]
+                    self.assertTrue(details.get("evidence_lease_fallback_used"))
+                    self.assertEqual(details.get("evidence_lease_fallback_status"), "frame_metadata_unavailable")
+
+                self.assertEqual(manager._lease_fallback_status_by_request_id, {})
+            finally:
+                verification_queue_runtime.acquire_verification_evidence_lease = original_acquire
                 await manager.stop()
 
 

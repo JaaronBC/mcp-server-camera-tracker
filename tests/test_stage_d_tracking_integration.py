@@ -443,15 +443,16 @@ class TestStageDTrackingIntegration(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(old_record["current_applicability"], "historical")
                 self.assertTrue(old_record["stale_for_current_decisions"])
                 self.assertEqual(new_record["status"], "completed")
-                self.assertEqual(expired_record["validation_outcome"], "evidence_unavailable")
-                self.assertEqual(timeout_record["status"], "timed_out")
-                self.assertEqual(failure_record["status"], "failed")
+                self.assertEqual(expired_record["validation_outcome"], "lease_acquire_failed")
+                self.assertEqual(timeout_record["status"], "rejected")
+                self.assertEqual(timeout_record["validation_outcome"], "lease_acquire_failed")
+                self.assertEqual(failure_record["status"], "rejected")
+                self.assertEqual(failure_record["validation_outcome"], "lease_acquire_failed")
                 self.assertEqual(invalid_record["status"], "rejected")
                 self.assertEqual(invalid_record["validation_outcome"], "coordinator_validation_failed")
                 self.assertEqual(invalid_record["error_code"], "coordinator_validation_failed")
-                self.assertEqual(budget_record["status"], "failed")
-                self.assertEqual(budget_record["validation_outcome"], "provider_failure")
-                self.assertEqual(budget_record["error_code"], "budget_exhausted")
+                self.assertEqual(budget_record["status"], "rejected")
+                self.assertEqual(budget_record["validation_outcome"], "lease_acquire_failed")
 
                 publisher = VerificationFeedbackPublisher(
                     artifact_path=feedback_artifact_path,
@@ -798,6 +799,134 @@ class TestStageDTrackingIntegration(unittest.IsolatedAsyncioTestCase):
             finally:
                 await manager.stop()
                 store.shutdown()
+
+
+    async def test_provider_paths_with_valid_evidence_fixtures(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            evidence_root = root / "tracking_evidence"
+
+            coordinator = AgentCoordinator()
+            evidence_store = TrackingEvidenceStore(evidence_root)
+            packager = TrackingEvidencePackager(coordinator=coordinator, evidence_store=evidence_store)
+
+            frame = np.zeros((16, 16, 3), dtype=np.uint8)
+            frame_ref = evidence_store.register_frame(frame=frame, timestamp=2100.0, width=16, height=16)
+
+            success_packaged = packager.package_detection(
+                detection=_detection("track-provider", "det-success", 2100.0),
+                timestamp=2100.0,
+                frame_evidence=frame_ref,
+                update_payload={
+                    "detection_id": "det-success",
+                    "resolved_track_id": "track-provider",
+                    "accepted": True,
+                    "rejection_reasons": [],
+                },
+            )
+            timeout_packaged = packager.package_detection(
+                detection=_detection("track-provider", "det-timeout", 2100.1),
+                timestamp=2100.1,
+                frame_evidence=frame_ref,
+                update_payload={
+                    "detection_id": "det-timeout",
+                    "resolved_track_id": "track-provider",
+                    "accepted": True,
+                    "rejection_reasons": [],
+                },
+            )
+            failure_packaged = packager.package_detection(
+                detection=_detection("track-provider", "det-failure", 2100.2),
+                timestamp=2100.2,
+                frame_evidence=frame_ref,
+                update_payload={
+                    "detection_id": "det-failure",
+                    "resolved_track_id": "track-provider",
+                    "accepted": True,
+                    "rejection_reasons": [],
+                },
+            )
+            budget_packaged = packager.package_detection(
+                detection=_detection("track-provider", "det-budget", 2100.3),
+                timestamp=2100.3,
+                frame_evidence=frame_ref,
+                update_payload={
+                    "detection_id": "det-budget",
+                    "resolved_track_id": "track-provider",
+                    "accepted": True,
+                    "rejection_reasons": [],
+                },
+            )
+
+            self.assertTrue(success_packaged.validation.get("valid", False))
+            self.assertTrue(timeout_packaged.validation.get("valid", False))
+            self.assertTrue(failure_packaged.validation.get("valid", False))
+            self.assertTrue(budget_packaged.validation.get("valid", False))
+
+            async def handler(tool_name, arguments):
+                message_id = str(arguments.get("message_id", ""))
+                if tool_name == "get_tracking_visual_evidence":
+                    return _FakeResult({"available": True, "track_id": "track-provider"})
+
+                if tool_name == "verify_tracking_visual_evidence":
+                    if message_id == timeout_packaged.envelope.message_id:
+                        await asyncio.sleep(0.2)
+                        return _FakeResult({"available": True})
+                    if message_id == failure_packaged.envelope.message_id:
+                        return _FakeResult({"available": False, "error_code": "provider_failure", "error": "upstream"})
+                    if message_id == budget_packaged.envelope.message_id:
+                        return _FakeResult({"available": False, "error_code": "budget_exhausted", "error": "provider budget exhausted"})
+                    if message_id == success_packaged.envelope.message_id:
+                        return _FakeResult(
+                            {
+                                "available": True,
+                                "envelope": _verification_envelope(
+                                    message_id=message_id,
+                                    track_id="track-provider",
+                                    timestamp=2100.4,
+                                    source_evidence_refs=list(success_packaged.envelope.source_evidence_refs),
+                                ),
+                            }
+                        )
+                    raise RuntimeError("unexpected message id")
+
+                raise RuntimeError(f"unexpected tool: {tool_name}")
+
+            manager = VerificationQueueManager(evidence_root_dir=evidence_root, request_timeout_seconds=0.05)
+            await manager.start(session=_FakeSession(handler))
+            try:
+                manager.submit_request(
+                    VerificationQueueRequest("req-provider-success", "track-provider", success_packaged.envelope.message_id, "stage_d", 2100.5)
+                )
+                manager.submit_request(
+                    VerificationQueueRequest("req-provider-timeout", "track-provider", timeout_packaged.envelope.message_id, "stage_d", 2100.6)
+                )
+                manager.submit_request(
+                    VerificationQueueRequest("req-provider-failure", "track-provider", failure_packaged.envelope.message_id, "stage_d", 2100.7)
+                )
+                manager.submit_request(
+                    VerificationQueueRequest("req-provider-budget", "track-provider", budget_packaged.envelope.message_id, "stage_d", 2100.8)
+                )
+                await asyncio.wait_for(manager._queue.join(), timeout=4.0)
+
+                records = manager.get_recent_results(20)
+                success_record = next(item for item in records if item["request_id"] == "req-provider-success")
+                timeout_record = next(item for item in records if item["request_id"] == "req-provider-timeout")
+                failure_record = next(item for item in records if item["request_id"] == "req-provider-failure")
+                budget_record = next(item for item in records if item["request_id"] == "req-provider-budget")
+
+                self.assertEqual(success_record["status"], "completed")
+                self.assertEqual(timeout_record["status"], "timed_out")
+                self.assertEqual(timeout_record["validation_outcome"], "operator_timeout")
+                self.assertEqual(failure_record["status"], "failed")
+                self.assertEqual(failure_record["validation_outcome"], "provider_failure")
+                self.assertEqual(failure_record["error_code"], "provider_failure")
+                self.assertEqual(budget_record["status"], "failed")
+                self.assertEqual(budget_record["validation_outcome"], "provider_failure")
+                self.assertEqual(budget_record["error_code"], "budget_exhausted")
+            finally:
+                await manager.stop()
+                evidence_store.shutdown()
 
 
 if __name__ == "__main__":

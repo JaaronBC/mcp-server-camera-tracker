@@ -428,6 +428,9 @@ class TestTrackingEvidencePackaging(unittest.TestCase):
             cleanup_summary = store.cleanup(now_timestamp=now + 1.0)
             self.assertGreaterEqual(cleanup_summary["removed_capacity"], 1)
 
+            repeated_cleanup_summary = store.cleanup(now_timestamp=now + 1.1)
+            self.assertEqual(repeated_cleanup_summary["removed_capacity"], 0)
+
             frame_resolution = resolver.resolve_reference(
                 frame_one_record.frame_reference,
                 now_timestamp=now + 1.0,
