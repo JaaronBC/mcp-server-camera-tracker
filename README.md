@@ -132,7 +132,11 @@ Reasoning pipeline agents are also LLM-backed by default:
 - Observation/Behavior Agent model: `OBSERVATION_AGENT_MODEL` (default: `gpt-oss-120b`)
 - Reasoning/Decision-Support Agent model: `REASONING_AGENT_MODEL` (default: `gpt-oss-120b`)
 - Shared call timeout: `DASHBOARD_AGENT_LLM_TIMEOUT_SECONDS` (default: `8.0`)
+- Tracking Agent request timeout: `TRACKING_AGENT_REQUEST_TIMEOUT_SECONDS` (default: `1.0`)
 - Shared retry count: `DASHBOARD_AGENT_LLM_RETRY_LIMIT` (default: `1`, meaning up to 2 attempts)
+- Tracking Agent max output tokens: `TRACKING_AGENT_MAX_OUTPUT_TOKENS` (default: `384`)
+- Observation Agent max output tokens: `OBSERVATION_AGENT_MAX_OUTPUT_TOKENS` (default: `448`)
+- Reasoning Agent max output tokens: `REASONING_AGENT_MAX_OUTPUT_TOKENS` (default: `512`)
 
 Example:
 
@@ -149,6 +153,13 @@ It renders:
 Tracking-agent inputs include YOLO detections, pixel coordinates, bounding boxes, timestamps, optional relative depth field, and motion history snippets. The VLM proposes association continuity and uncertainty; the coordinator validates proposals before use and rejects conflicting overrides.
 
 The live pipeline now attaches a bounded `relative_depth` estimate (`0.0` near to `1.0` far, image-geometry based) and marks quality flags as `relative_depth_estimate:image_geometry` or `relative_depth_unavailable`.
+
+Tracking Agent runtime metrics now separate:
+
+- valid response completions (non-`vlm_*` completion outcomes),
+- timeout/truncation/invalid-JSON/other failure completions,
+- fallback usage (`updates` counted with `no_vlm_proposal_used`),
+- applied LLM contributions (`updates` counted only when non-fallback accepted updates are actually applied to active tracks).
 
 If webcam or detector input is unavailable, the radar automatically switches to clearly labeled simulated tracks so the demo remains usable.
 

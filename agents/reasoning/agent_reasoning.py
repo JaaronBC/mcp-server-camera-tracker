@@ -7,6 +7,7 @@ from typing import Any, Awaitable, Callable
 
 from openai import AsyncOpenAI
 
+from .. import latency_instrumentation
 from .. import llm_call
 from .. import provider_call_budget
 
@@ -15,12 +16,16 @@ DEFAULT_REASONING_AGENT_MODEL = "gpt-oss-120b"
 DEFAULT_LLM_TIMEOUT_SECONDS = 8.0
 DEFAULT_LLM_RETRY_LIMIT = 1
 DEFAULT_LLM_RETRY_BACKOFF_SECONDS = 0.1
+DEFAULT_REASONING_AGENT_MAX_OUTPUT_TOKENS = 512
 DEFAULT_REASONING_SYSTEM_PROMPT = (
     "You are the Reasoning/Decision-Support Agent. Synthesize observation summaries and evidence "
     "into an explainable operator-facing assessment. Do not infer hostile intent from movement alone. "
     "Return strict JSON with keys: assessment_label, summary, rationale, recommendation, "
     "supporting_observation_ids, uncertainties, limitations, alternative_interpretations, "
-    "missing_evidence, contradictory_evidence, request_more_observations."
+    "missing_evidence, contradictory_evidence, request_more_observations. "
+    "Keep assessment and rationale concise, but preserve quality and all material alternative interpretations, "
+    "limitations, missing evidence, contradictory evidence, and relevant supporting observation IDs. "
+    "Return JSON only, with no Markdown or unnecessary explanation."
 )
 
 
@@ -38,6 +43,13 @@ def _resolve_retry_limit() -> int:
 
 def _resolve_retry_backoff_seconds() -> float:
     return llm_call.resolve_retry_backoff_seconds(DEFAULT_LLM_RETRY_BACKOFF_SECONDS)
+
+
+def _resolve_reasoning_max_output_tokens() -> int | None:
+    return llm_call.resolve_max_output_tokens(
+        "REASONING_AGENT_MAX_OUTPUT_TOKENS",
+        DEFAULT_REASONING_AGENT_MAX_OUTPUT_TOKENS,
+    )
 
 
 def _classify_llm_error(error: Exception) -> str:
@@ -165,18 +177,25 @@ async def invoke_llm_json_response(
     user_payload: dict[str, Any],
     timeout_seconds: float,
 ) -> dict[str, Any]:
+    invoke_started = time.perf_counter()
+    attempt_context = latency_instrumentation.get_llm_attempt_context() or {}
+    provider_label = "openai_compatible"
     reservation = provider_call_budget.reserve_or_raise(provider_call_budget.ROLE_REASONING_TEXT)
     started = time.perf_counter()
     client = _create_openai_client()
     try:
+        max_output_tokens = _resolve_reasoning_max_output_tokens()
+        request_kwargs: dict[str, Any] = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": json.dumps(user_payload)},
+            ],
+        }
+        if max_output_tokens is not None:
+            request_kwargs["max_tokens"] = max_output_tokens
         response = await asyncio.wait_for(
-            client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": json.dumps(user_payload)},
-                ],
-            ),
+            client.chat.completions.create(**request_kwargs),
             timeout=timeout_seconds,
         )
         latency_ms = round((time.perf_counter() - started) * 1000.0, 3)
@@ -188,10 +207,26 @@ async def invoke_llm_json_response(
         )
         if not response.choices:
             raise RuntimeError("llm_empty_response")
+        if getattr(response.choices[0], "finish_reason", None) == "length":
+            raise RuntimeError("llm_output_truncated")
         content = response.choices[0].message.content or ""
         parsed = _extract_json_object(content)
         if parsed is None:
             raise RuntimeError("llm_invalid_json_response")
+        latency_instrumentation.emit_event(
+            "llm_request_completed",
+            stage="reasoning_agent_llm_request",
+            duration_ms=round((time.perf_counter() - invoke_started) * 1000.0, 3),
+            role="reasoning_agent",
+            provider=provider_label,
+            model=model,
+            timeout_seconds=timeout_seconds,
+            attempt_number=attempt_context.get("attempt_number"),
+            attempts_total=attempt_context.get("attempts_total"),
+            retry_limit=attempt_context.get("retry_limit"),
+            status="ok",
+            usage=llm_call.extract_usage_dict(response),
+        )
         return parsed
     except Exception as error:
         latency_ms = round((time.perf_counter() - started) * 1000.0, 3)
@@ -200,6 +235,21 @@ async def invoke_llm_json_response(
             outcome="error",
             latency_ms=latency_ms,
             error_code=llm_call.classify_llm_error(error),
+        )
+        latency_instrumentation.emit_event(
+            "llm_request_completed",
+            stage="reasoning_agent_llm_request",
+            duration_ms=round((time.perf_counter() - invoke_started) * 1000.0, 3),
+            role="reasoning_agent",
+            provider=provider_label,
+            model=model,
+            timeout_seconds=timeout_seconds,
+            attempt_number=attempt_context.get("attempt_number"),
+            attempts_total=attempt_context.get("attempts_total"),
+            retry_limit=attempt_context.get("retry_limit"),
+            status="error",
+            error_code=llm_call.classify_llm_error(error),
+            error=f"{type(error).__name__}:{error}",
         )
         raise
     finally:
@@ -234,6 +284,14 @@ def call_reasoning_agent_with_retry(
     last_error_code: str | None = None
     started = time.perf_counter()
     for attempt_index in range(attempts):
+        attempt_started = time.perf_counter()
+        previous_attempt_context = latency_instrumentation.set_llm_attempt_context(
+            {
+                "attempt_number": attempt_index + 1,
+                "attempts_total": attempts,
+                "retry_limit": selected_retry_limit,
+            }
+        )
         try:
             payload = asyncio.run(
                 invoke(
@@ -242,6 +300,19 @@ def call_reasoning_agent_with_retry(
                     user_payload=user_payload,
                     timeout_seconds=selected_timeout,
                 )
+            )
+            latency_instrumentation.emit_event(
+                "llm_attempt_completed",
+                stage="reasoning_agent_llm_attempt",
+                duration_ms=round((time.perf_counter() - attempt_started) * 1000.0, 3),
+                role="reasoning_agent",
+                provider="openai_compatible",
+                model=selected_model,
+                timeout_seconds=selected_timeout,
+                attempt_number=attempt_index + 1,
+                attempts_total=attempts,
+                retry_limit=selected_retry_limit,
+                status="ok",
             )
             latency_ms = round((time.perf_counter() - started) * 1000.0, 3)
             return payload, {
@@ -256,9 +327,26 @@ def call_reasoning_agent_with_retry(
         except Exception as error:
             last_error_code = classify_error(error)
             last_error = f"{type(error).__name__}:{error}"
+            latency_instrumentation.emit_event(
+                "llm_attempt_completed",
+                stage="reasoning_agent_llm_attempt",
+                duration_ms=round((time.perf_counter() - attempt_started) * 1000.0, 3),
+                role="reasoning_agent",
+                provider="openai_compatible",
+                model=selected_model,
+                timeout_seconds=selected_timeout,
+                attempt_number=attempt_index + 1,
+                attempts_total=attempts,
+                retry_limit=selected_retry_limit,
+                status="error",
+                error_code=last_error_code,
+                error=last_error,
+            )
             has_more_attempts = attempt_index < attempts - 1
             if has_more_attempts and selected_backoff > 0:
                 time.sleep(selected_backoff * (2**attempt_index))
+        finally:
+            latency_instrumentation.set_llm_attempt_context(previous_attempt_context)
 
     latency_ms = round((time.perf_counter() - started) * 1000.0, 3)
     return None, {

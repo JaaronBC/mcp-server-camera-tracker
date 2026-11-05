@@ -112,6 +112,8 @@ def apply_tracking_agent_updates_to_tracks(
     accepted = 0
     rejected = 0
     unmatched = 0
+    fallback_used = 0
+    llm_applied = 0
 
     for update in tracking_agent_observation.updates:
         track_key = update.detection_id
@@ -120,8 +122,14 @@ def apply_tracking_agent_updates_to_tracks(
             unmatched += 1
             continue
 
+        used_fallback = "no_vlm_proposal_used" in update.uncertainties
+        if used_fallback:
+            fallback_used += 1
+
         if update.accepted:
             accepted += 1
+            if not used_fallback:
+                llm_applied += 1
             if update.resolved_track_id != track_key:
                 snapshot.quality_flags.append(f"vlm_association_candidate:{update.resolved_track_id}")
 
@@ -164,6 +172,8 @@ def apply_tracking_agent_updates_to_tracks(
         "accepted": accepted,
         "rejected": rejected,
         "unmatched": unmatched,
+        "fallback_used": fallback_used,
+        "llm_applied": llm_applied,
     }
 
 
@@ -173,6 +183,16 @@ def summarize_tracking_agent_observation_metrics(
 ) -> dict[str, Any]:
     uncertainty_values = set(tracking_agent_observation.uncertainties)
     unavailable_increment = 1 if any(item.startswith("vlm_") for item in uncertainty_values) else 0
+    timeout_increment = 1 if "vlm_timeout" in uncertainty_values else 0
+    truncation_increment = 1 if "vlm_output_truncated" in uncertainty_values else 0
+    invalid_json_increment = 1 if "vlm_invalid_json_response" in uncertainty_values else 0
+    valid_response_increment = 1 if unavailable_increment == 0 else 0
+    other_failure_increment = 1 if (
+        unavailable_increment == 1
+        and timeout_increment == 0
+        and truncation_increment == 0
+        and invalid_json_increment == 0
+    ) else 0
 
     last_error = None
     for item in tracking_agent_observation.uncertainties:
@@ -186,6 +206,13 @@ def summarize_tracking_agent_observation_metrics(
         "accepted": update_summary.get("accepted", 0),
         "rejected": update_summary.get("rejected", 0),
         "unmatched": update_summary.get("unmatched", 0),
+        "fallback_used": update_summary.get("fallback_used", 0),
+        "llm_applied": update_summary.get("llm_applied", 0),
+        "valid_response_increment": valid_response_increment,
+        "timeout_increment": timeout_increment,
+        "truncation_increment": truncation_increment,
+        "invalid_json_increment": invalid_json_increment,
+        "other_failure_increment": other_failure_increment,
         "unavailable_increment": unavailable_increment,
         "last_error": last_error,
     }
@@ -306,5 +333,12 @@ def apply_tracking_agent_metric_update_to_state(
         state.tracking_agent_total_updates_accepted += metric_update["accepted"]
         state.tracking_agent_total_updates_rejected += metric_update["rejected"]
         state.tracking_agent_total_updates_unmatched += metric_update["unmatched"]
+        state.tracking_agent_fallback_usage_count += metric_update["fallback_used"]
+        state.tracking_agent_llm_applied_update_count += metric_update["llm_applied"]
+        state.tracking_agent_llm_valid_response_count += metric_update["valid_response_increment"]
+        state.tracking_agent_llm_timeout_count += metric_update["timeout_increment"]
+        state.tracking_agent_llm_truncation_count += metric_update["truncation_increment"]
+        state.tracking_agent_llm_invalid_json_count += metric_update["invalid_json_increment"]
+        state.tracking_agent_llm_other_failure_count += metric_update["other_failure_increment"]
         state.tracking_agent_unavailable_count += metric_update["unavailable_increment"]
         state.tracking_agent_last_error = metric_update["last_error"]

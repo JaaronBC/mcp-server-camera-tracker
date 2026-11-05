@@ -13,6 +13,7 @@ from mcp import ClientSession
 
 from agents.contracts import VisualVerificationEnvelope
 from agents.coordinator import AgentCoordinator
+from agents import latency_instrumentation
 from agents.observation.evidence_consumption import load_validated_envelope_by_message_id
 from agents.tracking.evidence_protection import acquire_verification_evidence_lease, release_verification_evidence_lease
 
@@ -26,6 +27,9 @@ class VerificationQueueRequest:
     requested_at: float
     trigger_event_id: str | None = None
     trigger_timestamp: float | None = None
+    correlation_id: str | None = None
+    cycle_id: str | None = None
+    enqueued_at_perf: float | None = None
 
 
 @dataclass(slots=True)
@@ -212,6 +216,21 @@ class VerificationQueueManager:
     def submit_request(self, request: VerificationQueueRequest) -> dict[str, Any]:
         self._retry_pending_lease_releases(max_passes=1)
 
+        def _emit_submission(status: str, accepted: bool, reason: str | None = None, message_id: str | None = None) -> None:
+            latency_instrumentation.emit_event(
+                "verification_queue_submission",
+                stage="verification_queue_submission",
+                duration_ms=0.0,
+                correlation_id=request.correlation_id,
+                cycle_id=request.cycle_id,
+                track_id=request.track_id,
+                request_id=request.request_id,
+                message_id=message_id,
+                accepted=accepted,
+                status=status,
+                reason=reason,
+            )
+
         if self._shutdown:
             self._store_submission(
                 VerificationSubmissionRecord(
@@ -226,6 +245,7 @@ class VerificationQueueManager:
                     run_id=self._run_id,
                 )
             )
+            _emit_submission("manager_shutdown", False, "manager_shutdown", request.message_id)
             return {"accepted": False, "status": "manager_shutdown", "request_id": request.request_id}
 
         now = time.time()
@@ -245,6 +265,7 @@ class VerificationQueueManager:
                     run_id=self._run_id,
                 )
             )
+            _emit_submission("invalid_track_id", False, "invalid_track_id", message_id)
             return {"accepted": False, "status": "invalid_track_id", "request_id": request.request_id}
 
         if not isinstance(message_id, str) or not message_id.strip():
@@ -270,15 +291,18 @@ class VerificationQueueManager:
                         details={},
                     )
                 )
+                _emit_submission("missing_or_invalid_evidence", False, "missing_or_invalid_evidence", None)
                 return {"accepted": False, "status": "missing_or_invalid_evidence"}
             message_id = resolved
 
         assert isinstance(message_id, str)
         message_id = message_id.strip()
         if not message_id:
+            _emit_submission("invalid_message_id", False, "invalid_message_id", message_id)
             return {"accepted": False, "status": "invalid_message_id"}
 
         if message_id in self._queued_message_ids or message_id in self._inflight_message_ids:
+            _emit_submission("duplicate_inflight", False, "duplicate_inflight", message_id)
             return {"accepted": False, "status": "duplicate_inflight", "message_id": message_id}
 
         if self._queue.full():
@@ -302,6 +326,7 @@ class VerificationQueueManager:
                     details={"queue_capacity": self._queue_capacity},
                 )
             )
+            _emit_submission("queue_saturated", False, "queue_saturated", message_id)
             return {"accepted": False, "status": "queue_saturated", "message_id": message_id}
 
         lease_result = acquire_verification_evidence_lease(
@@ -362,6 +387,7 @@ class VerificationQueueManager:
                         details=self._sanitize_details(lease_result.get("details")),
                     )
                 )
+                _emit_submission(status, False, status, message_id)
                 return {"accepted": False, "status": status, "message_id": message_id, "request_id": request.request_id}
 
         if lease_payload is None:
@@ -403,6 +429,7 @@ class VerificationQueueManager:
                     details={},
                 )
             )
+            _emit_submission(status, False, status, message_id)
             return {"accepted": False, "status": status, "message_id": message_id, "request_id": request.request_id}
 
         if (
@@ -426,6 +453,7 @@ class VerificationQueueManager:
                     run_id=self._run_id,
                 )
             )
+            _emit_submission(status, False, status, message_id)
             return {"accepted": False, "status": status, "message_id": message_id, "request_id": request.request_id}
 
         self._leases_by_request_id[request.request_id] = lease_payload
@@ -436,6 +464,11 @@ class VerificationQueueManager:
             message_id=message_id,
             source=request.source,
             requested_at=now,
+            trigger_event_id=request.trigger_event_id,
+            trigger_timestamp=request.trigger_timestamp,
+            correlation_id=request.correlation_id,
+            cycle_id=request.cycle_id,
+            enqueued_at_perf=latency_instrumentation.now_perf_counter(),
         )
         try:
             self._queue.put_nowait(queue_request)
@@ -454,6 +487,7 @@ class VerificationQueueManager:
                     run_id=self._run_id,
                 )
             )
+            _emit_submission("queue_enqueue_failed", False, "queue_enqueue_failed", message_id)
             return {"accepted": False, "status": "queue_enqueue_failed", "message_id": message_id, "request_id": request.request_id}
         self._queued_message_ids.add(message_id)
         self._store_submission(
@@ -469,6 +503,7 @@ class VerificationQueueManager:
                 run_id=self._run_id,
             )
         )
+        _emit_submission("queued", True, None, message_id)
         return {"accepted": True, "status": "queued", "message_id": message_id, "request_id": request.request_id}
 
     def get_recent_results(self, limit: int = 50) -> list[dict[str, Any]]:
@@ -518,7 +553,14 @@ class VerificationQueueManager:
             message_id = request.message_id or ""
             self._queued_message_ids.discard(message_id)
             self._inflight_message_ids.add(message_id)
+            queue_wait_ms = None
+            if isinstance(request.enqueued_at_perf, (int, float)):
+                queue_wait_ms = round(
+                    (latency_instrumentation.now_perf_counter() - float(request.enqueued_at_perf)) * 1000.0,
+                    3,
+                )
             started_at = time.time()
+            processing_started_perf = latency_instrumentation.now_perf_counter()
             try:
                 record = await self._execute_request(session, request, started_at)
             except asyncio.CancelledError:
@@ -566,7 +608,26 @@ class VerificationQueueManager:
                     run_id=self._run_id,
                     details={},
                 )
+            processing_duration_ms = round(
+                (latency_instrumentation.now_perf_counter() - processing_started_perf) * 1000.0,
+                3,
+            )
             self._store_record(record)
+            latency_instrumentation.emit_event(
+                "verification_queue_completion",
+                stage="verification_queue_processing",
+                duration_ms=processing_duration_ms,
+                correlation_id=request.correlation_id,
+                cycle_id=request.cycle_id,
+                track_id=request.track_id,
+                request_id=request.request_id,
+                message_id=message_id,
+                queue_wait_ms=queue_wait_ms,
+                processing_duration_ms=processing_duration_ms,
+                completion_status=record.status,
+                validation_outcome=record.validation_outcome,
+                error_code=record.error_code,
+            )
             self._completed_message_ids.add(message_id)
             self._inflight_message_ids.discard(message_id)
             self._release_request_lease(request.request_id)
@@ -1144,6 +1205,18 @@ def extract_submission_decisions_from_cycle_payload(payload: dict[str, Any]) -> 
             if isinstance(evidence_message_id_value, str) and evidence_message_id_value.strip()
             else None
         )
+        correlation_id_value = event.get("correlation_id")
+        correlation_id = (
+            correlation_id_value.strip()
+            if isinstance(correlation_id_value, str) and correlation_id_value.strip()
+            else None
+        )
+        cycle_id_value = event.get("cycle_id")
+        cycle_id = (
+            cycle_id_value.strip()
+            if isinstance(cycle_id_value, str) and cycle_id_value.strip()
+            else None
+        )
         event_origin_value = event.get("event_origin")
         event_origin: str | None
         invalid_event_origin = False
@@ -1238,6 +1311,8 @@ def extract_submission_decisions_from_cycle_payload(payload: dict[str, Any]) -> 
             request = build_request_from_track_id(track_id, source="production_monitor")
 
         request.trigger_event_id = trigger_event_id
+        request.correlation_id = correlation_id
+        request.cycle_id = cycle_id
         event_timestamp = event.get("timestamp")
         if isinstance(event_timestamp, (int, float)):
             request.trigger_timestamp = float(event_timestamp)

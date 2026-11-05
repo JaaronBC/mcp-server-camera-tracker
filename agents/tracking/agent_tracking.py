@@ -18,11 +18,13 @@ from openai import AsyncOpenAI
 
 from ..contracts import DetectionCandidate, VisualAssociationProposal
 from ..coordinator import AgentCoordinator
+from .. import latency_instrumentation
 from .. import llm_call
 from .. import provider_call_budget
 
 TRACKING_VLM_MODEL = "qwen-3.8-27b"
 DEFAULT_OPENAI_BASE_URL = "https://128.171.10.83:9443/v1"
+DEFAULT_TRACKING_AGENT_MAX_OUTPUT_TOKENS = 384
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 TRACKING_AGENT_SKILL_PATH = PROJECT_ROOT / "TrackingAgentSkill.md"
 TRACKING_AGENT_SYSTEM_PROMPT_FALLBACK = (
@@ -42,6 +44,13 @@ def load_tracking_agent_skill() -> str:
     return TRACKING_AGENT_SYSTEM_PROMPT_FALLBACK
 
 
+def _resolve_tracking_max_output_tokens() -> int | None:
+    return llm_call.resolve_max_output_tokens(
+        "TRACKING_AGENT_MAX_OUTPUT_TOKENS",
+        DEFAULT_TRACKING_AGENT_MAX_OUTPUT_TOKENS,
+    )
+
+
 @dataclass(slots=True)
 class VisualTrackingAgentResult:
     available: bool
@@ -50,6 +59,7 @@ class VisualTrackingAgentResult:
     supporting_evidence: list[str]
     latency_ms: float | None
     error: str | None = None
+    llm_correlation_id: str | None = None
 
 
 class VisualTrackingAgentProtocol(Protocol):
@@ -94,6 +104,7 @@ class LLMVisualTrackingAgent:
         request_timeout_seconds: float = 2.0,
     ) -> VisualTrackingAgentResult:
         # Implements propose associations behavior for this module.
+        request_correlation_id = latency_instrumentation.new_correlation_id("tracking-llm")
         if not detections:
             return VisualTrackingAgentResult(
                 available=True,
@@ -101,6 +112,7 @@ class LLMVisualTrackingAgent:
                 uncertainty_flags=["no_detections"],
                 supporting_evidence=[],
                 latency_ms=0.0,
+                llm_correlation_id=request_correlation_id,
             )
 
         if self._client is None:
@@ -114,6 +126,7 @@ class LLMVisualTrackingAgent:
                     supporting_evidence=[],
                     latency_ms=None,
                     error="vlm_api_key_missing",
+                    llm_correlation_id=request_correlation_id,
                 )
             self._client = AsyncOpenAI(base_url=self._openai_base_url, api_key=api_key)
 
@@ -135,7 +148,9 @@ class LLMVisualTrackingAgent:
                     "Return JSON object with keys: proposals, uncertainty_flags, supporting_evidence. "
                     "Each proposal should include detection_id, proposed_track_id, association_confidence, "
                     "occlusion_likelihood, id_switch_risk, depth_conflict_flag, position_conflict_flag, "
-                    "uncertainties, supporting_evidence.\n"
+                    "uncertainties, supporting_evidence. Preserve one proposal per detection requiring evaluation; "
+                    "do not omit detections because of output length. Keep uncertainty/supporting_evidence entries concise "
+                    "short phrases while preserving material information. Return JSON only, with no Markdown or extra explanation.\n"
                     f"Structured input:\n{json.dumps(payload)}"
                 ),
             }
@@ -153,26 +168,61 @@ class LLMVisualTrackingAgent:
                 supporting_evidence=[],
                 latency_ms=0.0,
                 error="vlm_budget_exhausted",
+                llm_correlation_id=request_correlation_id,
             )
         started = time.perf_counter()
+        latency_instrumentation.emit_event(
+            "llm_request_started",
+            stage="tracking_agent_llm_request",
+            duration_ms=0.0,
+            role="tracking_agent",
+            provider="openai_compatible",
+            model=self.model,
+            timeout_seconds=request_timeout_seconds,
+            retry_limit=0,
+            attempt_number=1,
+            attempts_total=1,
+            correlation_id=request_correlation_id,
+            detection_count=len(detections),
+            frame_reference_present=bool(frame_reference),
+        )
         try:
+            max_output_tokens = _resolve_tracking_max_output_tokens()
+            request_kwargs: dict[str, object] = {
+                "model": self.model,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": self._system_prompt,
+                    },
+                    {"role": "user", "content": user_content},
+                ],
+            }
+            if max_output_tokens is not None:
+                request_kwargs["max_tokens"] = max_output_tokens
             response = await asyncio.wait_for(
-                self._client.chat.completions.create(
-                    model=self.model,
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": self._system_prompt,
-                        },
-                        {"role": "user", "content": user_content},
-                    ],
-                ),
+                self._client.chat.completions.create(**request_kwargs),
                 timeout=request_timeout_seconds,
             )
             provider_call_budget.finalize_provider_call_attempt(
                 reservation,
                 outcome="ok",
                 latency_ms=(time.perf_counter() - started) * 1000.0,
+                usage=llm_call.extract_usage_dict(response),
+            )
+            latency_instrumentation.emit_event(
+                "llm_request_completed",
+                stage="tracking_agent_llm_request",
+                duration_ms=round((time.perf_counter() - started) * 1000.0, 3),
+                role="tracking_agent",
+                provider="openai_compatible",
+                model=self.model,
+                timeout_seconds=request_timeout_seconds,
+                retry_limit=0,
+                attempt_number=1,
+                attempts_total=1,
+                correlation_id=request_correlation_id,
+                status="ok",
                 usage=llm_call.extract_usage_dict(response),
             )
         except asyncio.TimeoutError:
@@ -182,6 +232,21 @@ class LLMVisualTrackingAgent:
                 latency_ms=(time.perf_counter() - started) * 1000.0,
                 error_code="timeout",
             )
+            latency_instrumentation.emit_event(
+                "llm_request_completed",
+                stage="tracking_agent_llm_request",
+                duration_ms=round((time.perf_counter() - started) * 1000.0, 3),
+                role="tracking_agent",
+                provider="openai_compatible",
+                model=self.model,
+                timeout_seconds=request_timeout_seconds,
+                retry_limit=0,
+                attempt_number=1,
+                attempts_total=1,
+                correlation_id=request_correlation_id,
+                status="error",
+                error_code="timeout",
+            )
             return VisualTrackingAgentResult(
                 available=False,
                 proposals=[],
@@ -189,12 +254,28 @@ class LLMVisualTrackingAgent:
                 supporting_evidence=[],
                 latency_ms=(time.perf_counter() - started) * 1000.0,
                 error="vlm_timeout",
+                llm_correlation_id=request_correlation_id,
             )
         except Exception:
             provider_call_budget.finalize_provider_call_attempt(
                 reservation,
                 outcome="error",
                 latency_ms=(time.perf_counter() - started) * 1000.0,
+                error_code="runtime_error",
+            )
+            latency_instrumentation.emit_event(
+                "llm_request_completed",
+                stage="tracking_agent_llm_request",
+                duration_ms=round((time.perf_counter() - started) * 1000.0, 3),
+                role="tracking_agent",
+                provider="openai_compatible",
+                model=self.model,
+                timeout_seconds=request_timeout_seconds,
+                retry_limit=0,
+                attempt_number=1,
+                attempts_total=1,
+                correlation_id=request_correlation_id,
+                status="error",
                 error_code="runtime_error",
             )
             return VisualTrackingAgentResult(
@@ -204,6 +285,7 @@ class LLMVisualTrackingAgent:
                 supporting_evidence=[],
                 latency_ms=(time.perf_counter() - started) * 1000.0,
                 error="vlm_unavailable",
+                llm_correlation_id=request_correlation_id,
             )
 
         latency_ms = (time.perf_counter() - started) * 1000.0
@@ -215,9 +297,20 @@ class LLMVisualTrackingAgent:
                 supporting_evidence=[],
                 latency_ms=latency_ms,
                 error="vlm_empty_response",
+                llm_correlation_id=request_correlation_id,
             )
 
         content = response.choices[0].message.content or ""
+        if getattr(response.choices[0], "finish_reason", None) == "length":
+            return VisualTrackingAgentResult(
+                available=False,
+                proposals=[],
+                uncertainty_flags=["vlm_output_truncated"],
+                supporting_evidence=[],
+                latency_ms=latency_ms,
+                error="vlm_output_truncated",
+                llm_correlation_id=request_correlation_id,
+            )
         parsed = _extract_json_object(content)
         if parsed is None:
             return VisualTrackingAgentResult(
@@ -227,24 +320,32 @@ class LLMVisualTrackingAgent:
                 supporting_evidence=[],
                 latency_ms=latency_ms,
                 error="vlm_invalid_json_response",
+                llm_correlation_id=request_correlation_id,
             )
 
         raw_proposals = parsed.get("proposals")
-        normalized_proposals: list[VisualAssociationProposal] = []
-        if isinstance(raw_proposals, list):
-            for item in raw_proposals:
-                if isinstance(item, dict):
-                    normalized = _normalize_proposal(item)
-                    if normalized is not None:
-                        normalized_proposals.append(normalized)
-
         uncertainty_flags = parsed.get("uncertainty_flags")
-        if not isinstance(uncertainty_flags, list):
-            uncertainty_flags = []
-
         supporting_evidence = parsed.get("supporting_evidence")
-        if not isinstance(supporting_evidence, list):
-            supporting_evidence = []
+        if (
+            not isinstance(raw_proposals, list)
+            or not isinstance(uncertainty_flags, list)
+            or not isinstance(supporting_evidence, list)
+        ):
+            return VisualTrackingAgentResult(
+                available=False,
+                proposals=[],
+                uncertainty_flags=["vlm_invalid_schema_response"],
+                supporting_evidence=[],
+                latency_ms=latency_ms,
+                error="vlm_invalid_schema_response",
+                llm_correlation_id=request_correlation_id,
+            )
+        normalized_proposals: list[VisualAssociationProposal] = []
+        for item in raw_proposals:
+            if isinstance(item, dict):
+                normalized = _normalize_proposal(item)
+                if normalized is not None:
+                    normalized_proposals.append(normalized)
 
         return VisualTrackingAgentResult(
             available=True,
@@ -252,6 +353,7 @@ class LLMVisualTrackingAgent:
             uncertainty_flags=[str(value) for value in uncertainty_flags],
             supporting_evidence=[str(value) for value in supporting_evidence],
             latency_ms=latency_ms,
+            llm_correlation_id=request_correlation_id,
         )
 
 
@@ -302,9 +404,11 @@ class AsyncVisualTrackingRuntime:
             if (now - self._last_started_at) < self._min_invoke_interval_seconds and not event_reasons:
                 return False
             self._last_started_at = now
+            observation_id = latency_instrumentation.new_correlation_id("tracking-observation")
             self._pending_future = self._executor.submit(
                 self._run_once,
                 now,
+                observation_id,
                 frame_reference,
                 detections,
                 event_reasons or [],
@@ -332,6 +436,7 @@ class AsyncVisualTrackingRuntime:
     def _run_once(
         self,
         now: float,
+        observation_id: str,
         frame_reference: str | None,
         detections: list[DetectionCandidate],
         event_reasons: list[str],
@@ -358,6 +463,8 @@ class AsyncVisualTrackingRuntime:
             vlm_model=self._agent.model,
             frame_reference=frame_reference,
             proposal_latency_ms=result.latency_ms,
+            observation_id=observation_id,
+            llm_correlation_id=result.llm_correlation_id,
             additional_uncertainties=uncertainties,
         )
 

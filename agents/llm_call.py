@@ -54,10 +54,31 @@ def resolve_retry_backoff_seconds(default_value: float) -> float:
     return backoff_seconds
 
 
+def resolve_max_output_tokens(env_name: str, default_value: int | None = None) -> int | None:
+    value = os.getenv(env_name)
+    if value is None:
+        return default_value if isinstance(default_value, int) and default_value > 0 else None
+
+    raw = value.strip()
+    if not raw:
+        return default_value if isinstance(default_value, int) and default_value > 0 else None
+
+    try:
+        max_tokens = int(raw)
+    except ValueError:
+        return default_value if isinstance(default_value, int) and default_value > 0 else None
+
+    if max_tokens <= 0:
+        return default_value if isinstance(default_value, int) and default_value > 0 else None
+    return max_tokens
+
+
 def classify_llm_error(error: Exception) -> str:
     text = f"{type(error).__name__}:{error}".lower()
     if "budget_exhausted" in text or "provider_call_budget_exhausted" in text:
         return "budget_exhausted"
+    if "llm_output_truncated" in text or "output_truncated" in text:
+        return "output_truncated"
     if "timeout" in text:
         return "timeout"
     if "api_key" in text or "unauthorized" in text or "authentication" in text:

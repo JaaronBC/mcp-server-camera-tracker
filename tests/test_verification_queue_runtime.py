@@ -179,6 +179,29 @@ class TestVerificationQueueRuntime(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(decision.queue_request.source, "production_monitor")
         self.assertEqual(decision.queue_request.message_id, "msg-1")
 
+    def test_extract_submission_decisions_propagates_correlation_fields(self) -> None:
+        payload = {
+            "events": [
+                {
+                    "event_origin": "production_monitor",
+                    "event_id": "evt-1",
+                    "track_id": "track-1",
+                    "timestamp": 1000.0,
+                    "evidence_requested": True,
+                    "evidence_message_id": "msg-1",
+                    "correlation_id": "corr-track-1",
+                    "cycle_id": "cycle-xyz",
+                }
+            ]
+        }
+
+        decisions = extract_submission_decisions_from_cycle_payload(payload)
+        self.assertEqual(len(decisions), 1)
+        decision = decisions[0]
+        self.assertIsNotNone(decision.queue_request)
+        self.assertEqual(decision.queue_request.correlation_id, "corr-track-1")
+        self.assertEqual(decision.queue_request.cycle_id, "cycle-xyz")
+
 
     def test_extract_submission_decisions_rejects_invalid_nonempty_event_origin(self) -> None:
         payload = {

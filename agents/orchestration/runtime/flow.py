@@ -217,6 +217,16 @@ async def monitor_movement(
                                         "evidence_requested": decision.evidence_requested,
                                         "evidence_message_id": decision.evidence_message_id,
                                         "queue_request_id": queue_request_id,
+                                        "correlation_id": (
+                                            queue_request.correlation_id
+                                            if queue_request is not None
+                                            else None
+                                        ),
+                                        "cycle_id": (
+                                            queue_request.cycle_id
+                                            if queue_request is not None
+                                            else None
+                                        ),
                                         "submission_eligibility": decision.submission_eligibility,
                                         "skip_reason": skip_reason,
                                         "submission_attempted": submission_attempted,

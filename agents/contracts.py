@@ -229,6 +229,8 @@ class TrackingAgentObservation:
     frame_reference: str | None
     updates: list[VisualAssociationUpdate]
     uncertainties: list[str] = field(default_factory=list)
+    observation_id: str | None = None
+    llm_correlation_id: str | None = None
 
     def to_dict(self) -> dict:
         # Performs to dict logic.
@@ -240,6 +242,8 @@ class TrackingAgentObservation:
             "frame_reference": self.frame_reference,
             "updates": [update.to_dict() for update in self.updates],
             "uncertainties": self.uncertainties,
+            "observation_id": self.observation_id,
+            "llm_correlation_id": self.llm_correlation_id,
         }
 
 

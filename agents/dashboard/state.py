@@ -39,6 +39,13 @@ class SharedDashboardState:
         self.tracking_agent_total_updates_accepted = 0
         self.tracking_agent_total_updates_rejected = 0
         self.tracking_agent_total_updates_unmatched = 0
+        self.tracking_agent_llm_valid_response_count = 0
+        self.tracking_agent_llm_timeout_count = 0
+        self.tracking_agent_llm_truncation_count = 0
+        self.tracking_agent_llm_invalid_json_count = 0
+        self.tracking_agent_llm_other_failure_count = 0
+        self.tracking_agent_fallback_usage_count = 0
+        self.tracking_agent_llm_applied_update_count = 0
         self.tracking_agent_last_latency_ms: float | None = None
         self.tracking_agent_last_error: str | None = None
         self.tracking_evidence_store: TrackingEvidenceStore | None = None

@@ -155,12 +155,18 @@ def _format_assessment_summary(
     return summary_line, limits_line, color
 
 
-def draw_placeholder_webcam_panel(width: int, height: int, message: str):
+def draw_placeholder_webcam_panel(
+    width: int,
+    height: int,
+    message: str,
+    source_label: str = "Webcam",
+):
     panel = cv2.UMat(height, width, cv2.CV_8UC3).get()
     panel[:] = (22, 22, 22)
+    source = source_label.strip() if isinstance(source_label, str) and source_label.strip() else "Webcam"
     cv2.putText(
         panel,
-        "Webcam feed unavailable",
+        f"{source} feed unavailable",
         (20, 60),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.9,

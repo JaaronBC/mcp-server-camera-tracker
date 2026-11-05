@@ -43,6 +43,7 @@ from .config import (
     TRACKING_FEEDBACK_CONSUMER_DECISIONS_PATH,
     MAX_GROUND_X,
     MAX_GROUND_Z,
+    TRACKING_AGENT_REQUEST_TIMEOUT_SECONDS,
     TRACKING_MAX_EFFECTIVE_HORIZON_SECONDS,
     RADAR_TRAIL_LENGTH,
     TRACKING_MISSING_TRACK_GRACE_SECONDS,
@@ -123,7 +124,7 @@ def _apply_tracking_agent_runtime_cycle(
         detections=tracking_candidates,
         event_reasons=selected_event_reasons,
         encode_frame=encode_frame_as_data_url,
-        request_timeout_seconds=1.0,
+        request_timeout_seconds=TRACKING_AGENT_REQUEST_TIMEOUT_SECONDS,
     )
     if did_submit:
         with state.lock:

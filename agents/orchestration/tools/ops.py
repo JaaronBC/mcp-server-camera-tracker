@@ -8,6 +8,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from ... import latency_instrumentation
 from ...reasoning.tools import _shared as dashboard_reasoning
 from ...registry import mcp
 
@@ -359,13 +360,31 @@ def _evaluate_track_for_cycle(
     track_id: str,
     *,
     request_evidence_on_uncertainty: bool,
+    correlation_id: str | None = None,
+    cycle_id: str | None = None,
 ) -> dict[str, Any]:
-    started = time.perf_counter()
-    result = dashboard_reasoning.simulate_reasoning_assessment(
-        track_id,
-        request_evidence_on_uncertainty=request_evidence_on_uncertainty,
+    context_previous = latency_instrumentation.set_context(
+        correlation_id=correlation_id,
+        cycle_id=cycle_id,
+        track_id=track_id,
     )
-    latency_ms = (time.perf_counter() - started) * 1000.0
+    started = time.perf_counter()
+    try:
+        result = dashboard_reasoning.simulate_reasoning_assessment(
+            track_id,
+            request_evidence_on_uncertainty=request_evidence_on_uncertainty,
+            correlation_id=correlation_id,
+            cycle_id=cycle_id,
+        )
+    finally:
+        latency_ms = (time.perf_counter() - started) * 1000.0
+        latency_instrumentation.emit_event(
+            "track_processing_completed",
+            stage="track_processing",
+            duration_ms=round(latency_ms, 3),
+            track_id=track_id,
+        )
+        latency_instrumentation.restore_context(context_previous)
 
     available = bool(result.get("available"))
     status = "ok" if available else "error"
@@ -491,6 +510,8 @@ def _build_reasoning_cycle_event(
     handoff_quality: str,
     cycle_error_code: Any,
     event_origin: str,
+    correlation_id: str | None = None,
+    cycle_correlation_id: str | None = None,
 ) -> dict[str, Any]:
     return {
         "event_type": "reasoning_cycle",
@@ -574,6 +595,8 @@ def _build_reasoning_cycle_event(
         "cycle_error_code": cycle_error_code,
         "evidence_trace": _extract_evidence_trace(result.get("summary")),
         "error": result.get("error"),
+        "correlation_id": correlation_id,
+        "cycle_correlation_id": cycle_correlation_id,
     }
 
 
@@ -594,9 +617,29 @@ def _attach_evidence_followup_links(
 
 
 def _persist_event_for_cycle(event: dict[str, Any]) -> str | None:
+    publish_started = time.perf_counter()
     try:
         _append_event(event)
+        latency_instrumentation.emit_event(
+            "final_assessment_published",
+            stage="final_assessment_publication",
+            duration_ms=round((time.perf_counter() - publish_started) * 1000.0, 3),
+            track_id=event.get("track_id"),
+            cycle_id=event.get("cycle_id"),
+            correlation_id=event.get("correlation_id"),
+            publication_status="ok",
+        )
     except OSError as error:
+        latency_instrumentation.emit_event(
+            "final_assessment_published",
+            stage="final_assessment_publication",
+            duration_ms=round((time.perf_counter() - publish_started) * 1000.0, 3),
+            track_id=event.get("track_id"),
+            cycle_id=event.get("cycle_id"),
+            correlation_id=event.get("correlation_id"),
+            publication_status="error",
+            error=f"{type(error).__name__}:{error}",
+        )
         return f"{type(error).__name__}:{error}"
     return None
 
@@ -639,8 +682,37 @@ def run_reasoning_cycle_and_log(
 ) -> dict[str, Any]:
     # Runs reasoning cycle and log workflow steps and returns status outcomes.
     """Run a bounded reasoning cycle for current tracks and append structured events."""
+    cycle_started_perf = time.perf_counter()
     cycle_context = _initialize_reasoning_cycle(max_tracks)
+    cycle_correlation_id = latency_instrumentation.new_correlation_id("cycle")
+    latency_instrumentation.emit_event(
+        "reasoning_cycle_started",
+        stage="orchestration_cycle",
+        duration_ms=0.0,
+        cycle_id=cycle_context.get("cycle_id") if isinstance(cycle_context, dict) else None,
+        correlation_id=cycle_correlation_id,
+        request_evidence_on_uncertainty=request_evidence_on_uncertainty,
+        max_tracks=max_tracks,
+    )
     if not bool(cycle_context.get("available")):
+        unavailable_reason = cycle_context.get("response", {}).get("error") if isinstance(cycle_context, dict) else "cycle_unavailable"
+        cycle_status = "skipped"
+        if unavailable_reason in {"radar_state_stale"}:
+            cycle_status = "failed"
+        latency_instrumentation.emit_event(
+            "reasoning_cycle_completed",
+            stage="orchestration_cycle",
+            duration_ms=round((time.perf_counter() - cycle_started_perf) * 1000.0, 3),
+            cycle_id=cycle_context.get("cycle_id") if isinstance(cycle_context, dict) else None,
+            correlation_id=cycle_correlation_id,
+            cycle_status=cycle_status,
+            completed_tracks=0,
+            failed_tracks=0,
+            skipped_tracks=0,
+            timed_out_tracks=0,
+            stale_radar_tracks=1 if unavailable_reason == "radar_state_stale" else 0,
+            unavailable_reason=unavailable_reason,
+        )
         return cycle_context["response"]
 
     cycle_started_at = cycle_context["cycle_started_at"]
@@ -655,13 +727,19 @@ def run_reasoning_cycle_and_log(
     events: list[dict[str, Any]] = []
     success_count = 0
     error_count = 0
+    timed_out_track_count = 0
+    skipped_track_count = 0
+    stale_radar_track_count = 0
     event_log_error_count = 0
     event_log_last_error: str | None = None
 
     for index, track_id in enumerate(track_ids, start=1):
+        track_correlation_id = latency_instrumentation.new_correlation_id("track")
         track_evaluation = _evaluate_track_for_cycle(
             track_id,
             request_evidence_on_uncertainty=request_evidence_on_uncertainty,
+            correlation_id=track_correlation_id,
+            cycle_id=cycle_id,
         )
         result = track_evaluation["result"]
         latency_ms = track_evaluation["latency_ms"]
@@ -686,6 +764,12 @@ def run_reasoning_cycle_and_log(
         conflicts = track_evaluation["conflicts"]
         limitations = track_evaluation["limitations"]
         cycle_error_code = track_evaluation["cycle_error_code"]
+        if observation_error_code == "timeout" or reasoning_error_code == "timeout":
+            timed_out_track_count += 1
+        if cycle_error_code in {"radar_state_unavailable", "radar_state_stale"}:
+            skipped_track_count += 1
+        if cycle_error_code == "radar_state_stale":
+            stale_radar_track_count += 1
 
         event = _build_reasoning_cycle_event(
             cycle_id=cycle_id,
@@ -709,6 +793,8 @@ def run_reasoning_cycle_and_log(
             handoff_quality=handoff_quality,
             cycle_error_code=cycle_error_code,
             event_origin=normalized_event_origin,
+            correlation_id=track_correlation_id,
+            cycle_correlation_id=cycle_correlation_id,
         )
 
         _attach_evidence_followup_links(event, result.get("evidence_request"))
@@ -718,6 +804,27 @@ def run_reasoning_cycle_and_log(
             event_log_error_count += 1
             event_log_last_error = persistence_error
         events.append(event)
+
+    cycle_status = "completed"
+    if error_count > 0 and success_count == 0:
+        cycle_status = "failed"
+    if timed_out_track_count > 0:
+        cycle_status = "timed_out"
+    if len(track_ids) == 0:
+        cycle_status = "skipped"
+    latency_instrumentation.emit_event(
+        "reasoning_cycle_completed",
+        stage="orchestration_cycle",
+        duration_ms=round((time.perf_counter() - cycle_started_perf) * 1000.0, 3),
+        cycle_id=cycle_id,
+        correlation_id=cycle_correlation_id,
+        cycle_status=cycle_status,
+        completed_tracks=success_count,
+        failed_tracks=error_count,
+        skipped_tracks=skipped_track_count,
+        timed_out_tracks=timed_out_track_count,
+        stale_radar_tracks=stale_radar_track_count,
+    )
 
     return _build_reasoning_cycle_response(
         cycle_id=cycle_id,

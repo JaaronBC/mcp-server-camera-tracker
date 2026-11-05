@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from ... import latency_instrumentation
 from ...contracts import GroundPoint, TrackingObservationRecord
 from ...coordinator import AgentCoordinator
 from ...observation import agent_observation as observation_agent_module
@@ -333,6 +334,14 @@ def _prepare_track_analysis(track_id: str) -> dict[str, Any]:
 
     radar_state = _load_radar_state()
     if radar_state is None:
+        latency_instrumentation.emit_event(
+            "observation_received",
+            stage="observation_received",
+            duration_ms=0.0,
+            track_id=track_id,
+            observation_status="unavailable",
+            reason="radar_state_unavailable",
+        )
         return {
             "available": False,
             "error": "radar_state_unavailable",
@@ -342,6 +351,15 @@ def _prepare_track_analysis(track_id: str) -> dict[str, Any]:
     max_age_seconds = _resolve_radar_state_max_age_seconds()
     age_seconds = _radar_state_age_seconds(now_timestamp=now)
     if isinstance(age_seconds, (int, float)) and age_seconds > max_age_seconds:
+        latency_instrumentation.emit_event(
+            "observation_received",
+            stage="observation_received",
+            duration_ms=0.0,
+            track_id=track_id,
+            observation_status="stale",
+            radar_state_age_seconds=round(float(age_seconds), 3),
+            radar_state_max_age_seconds=max_age_seconds,
+        )
         return {
             "available": False,
             "error": "radar_state_stale",
@@ -350,6 +368,16 @@ def _prepare_track_analysis(track_id: str) -> dict[str, Any]:
         }
 
     ingested_count = _ingest_latest_tracks(radar_state)
+    latency_instrumentation.emit_event(
+        "observation_received",
+        stage="observation_received",
+        duration_ms=0.0,
+        track_id=track_id,
+        observation_status="ok",
+        ingested_tracks=ingested_count,
+        radar_state_age_seconds=(round(float(age_seconds), 3) if isinstance(age_seconds, (int, float)) else None),
+        radar_state_max_age_seconds=max_age_seconds,
+    )
     return {
         "available": True,
         "radar_state": radar_state,
@@ -428,84 +456,103 @@ def simulate_observation_summary(track_id: str) -> dict[str, Any]:
 def simulate_reasoning_assessment(
     track_id: str,
     request_evidence_on_uncertainty: bool = True,
+    correlation_id: str | None = None,
+    cycle_id: str | None = None,
 ) -> dict[str, Any]:
     # Builds full observation+reasoning assessment output for one track with bounded evidence requests.
     """Build an observation summary and reasoning assessment for one track from latest radar state."""
-    prepared = _prepare_track_analysis(track_id)
-    if not bool(prepared.get("available")):
-        return _build_unavailable_track_response(track_id, prepared)
-
-    radar_state = prepared["radar_state"]
-    ingested_count = prepared["ingested_count"]
-    now = prepared["now"]
-    base_summary, history_records, supporting_ids, llm_inputs = _build_observation_llm_input(
-        track_id,
-        created_at=now,
-        radar_state=radar_state,
+    previous_context = latency_instrumentation.set_context(
+        correlation_id=correlation_id,
+        cycle_id=cycle_id,
+        track_id=track_id,
     )
-
-    observation_payload, observation_meta = _call_observation_agent_with_retry(llm_inputs[0])
-    if observation_payload is None:
-        summary = _fallback_observation_summary(base_summary)
-    else:
-        summary = _validate_observation_llm_payload(
-            observation_payload,
-            fallback_summary=base_summary,
-            valid_observation_ids=set(supporting_ids),
-        )
-
-    _attach_llm_meta(summary, observation_payload, observation_meta)
-
-    handoff_validation = _default_handoff_validation()
     try:
-        reasoning_input, handoff_validation = _build_reasoning_handoff_payload(
-            track_id=track_id,
-            created_at=now,
-            summary=summary,
-            history_records=[record.to_dict() for record in history_records],
-        )
-        reasoning_payload, reasoning_meta = _call_reasoning_agent_with_retry(reasoning_input)
-    except ValueError as error:
-        reasoning_payload = None
-        reasoning_meta = _skipped_reasoning_meta(error)
-        handoff_validation = _handoff_validation_error(error)
+        prepared = _prepare_track_analysis(track_id)
+        if not bool(prepared.get("available")):
+            return _build_unavailable_track_response(track_id, prepared)
 
-    if reasoning_payload is None:
-        assessment, request_more_observations = _fallback_reasoning_assessment(
+        radar_state = prepared["radar_state"]
+        ingested_count = prepared["ingested_count"]
+        now = prepared["now"]
+        evidence_preparation_started = time.perf_counter()
+        base_summary, history_records, supporting_ids, llm_inputs = _build_observation_llm_input(
             track_id,
             created_at=now,
-            summary=summary,
+            radar_state=radar_state,
         )
-    else:
-        assessment, request_more_observations = _validate_reasoning_llm_payload(
-            reasoning_payload,
+        latency_instrumentation.emit_event(
+            "evidence_prepared",
+            stage="evidence_prepared",
+            duration_ms=latency_instrumentation.duration_ms(evidence_preparation_started),
             track_id=track_id,
-            created_at=now,
-            valid_observation_ids=set(summary.get("supporting_observation_ids", [])),
+            supporting_observation_count=len(supporting_ids),
+            history_record_count=len(history_records),
         )
 
-    _attach_llm_meta(assessment, reasoning_payload, reasoning_meta)
+        observation_payload, observation_meta = _call_observation_agent_with_retry(llm_inputs[0])
+        if observation_payload is None:
+            summary = _fallback_observation_summary(base_summary)
+        else:
+            summary = _validate_observation_llm_payload(
+                observation_payload,
+                fallback_summary=base_summary,
+                valid_observation_ids=set(supporting_ids),
+            )
 
-    evidence_request = None
-    if request_evidence_on_uncertainty and request_more_observations:
-        request = _COORDINATOR.request_evidence(
-            track_id=track_id,
-            reason="llm_requested_more_observations",
-            requested_at=now,
-        )
-        if request is not None:
-            evidence_request = request.to_dict()
+        _attach_llm_meta(summary, observation_payload, observation_meta)
 
-    return {
-        "available": True,
-        "track_id": track_id,
-        "ingested_tracks": ingested_count,
-        "summary": summary,
-        "assessment": assessment,
-        "evidence_request": evidence_request,
-        "agents": {
-            "observation": observation_meta,
-            "reasoning": reasoning_meta,
-        },
-        "handoff_validation": handoff_validation,
-    }
+        handoff_validation = _default_handoff_validation()
+        try:
+            reasoning_input, handoff_validation = _build_reasoning_handoff_payload(
+                track_id=track_id,
+                created_at=now,
+                summary=summary,
+                history_records=[record.to_dict() for record in history_records],
+            )
+            reasoning_payload, reasoning_meta = _call_reasoning_agent_with_retry(reasoning_input)
+        except ValueError as error:
+            reasoning_payload = None
+            reasoning_meta = _skipped_reasoning_meta(error)
+            handoff_validation = _handoff_validation_error(error)
+
+        if reasoning_payload is None:
+            assessment, request_more_observations = _fallback_reasoning_assessment(
+                track_id,
+                created_at=now,
+                summary=summary,
+            )
+        else:
+            assessment, request_more_observations = _validate_reasoning_llm_payload(
+                reasoning_payload,
+                track_id=track_id,
+                created_at=now,
+                valid_observation_ids=set(summary.get("supporting_observation_ids", [])),
+            )
+
+        _attach_llm_meta(assessment, reasoning_payload, reasoning_meta)
+
+        evidence_request = None
+        if request_evidence_on_uncertainty and request_more_observations:
+            request = _COORDINATOR.request_evidence(
+                track_id=track_id,
+                reason="llm_requested_more_observations",
+                requested_at=now,
+            )
+            if request is not None:
+                evidence_request = request.to_dict()
+
+        return {
+            "available": True,
+            "track_id": track_id,
+            "ingested_tracks": ingested_count,
+            "summary": summary,
+            "assessment": assessment,
+            "evidence_request": evidence_request,
+            "agents": {
+                "observation": observation_meta,
+                "reasoning": reasoning_meta,
+            },
+            "handoff_validation": handoff_validation,
+        }
+    finally:
+        latency_instrumentation.restore_context(previous_context)
