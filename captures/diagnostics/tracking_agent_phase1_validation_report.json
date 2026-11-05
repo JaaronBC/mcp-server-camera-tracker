@@ -1,0 +1,798 @@
+{
+  "meta": {
+    "started_at": 1793879253.338231,
+    "ended_at": 1793879256.1257448,
+    "duration_seconds": 2.788,
+    "read_only": true,
+    "production_settings_changed": false,
+    "dashboard_state_mutation": false,
+    "total_requests_expected": 1
+  },
+  "config": {
+    "resolved_base_url": "https://128.171.10.83:9443/v1",
+    "resolved_model": "qwen-3.8-27b",
+    "scenario": "yolo-id-swap",
+    "timeout_seconds": 10.0,
+    "max_output_tokens_override": 768,
+    "reasoning_effort_requested": "none",
+    "reasoning_effort_applied_in_request": "none",
+    "observation_verification_mode": "live",
+    "observation_model": "qwen-3.8-27b",
+    "observation_timeout_seconds": 6.0,
+    "observation_max_output_tokens": 768,
+    "observation_reasoning_effort": "none",
+    "production_timeout_default_unchanged": true,
+    "production_output_default_unchanged": true,
+    "retry_limit": 0
+  },
+  "input_summary": {
+    "event_reasons": [
+      "possible_id_switch",
+      "overlapping_tracks",
+      "occlusion_risk"
+    ],
+    "detection_count": 2,
+    "detection_ids": [
+      "det-amb-1",
+      "det-amb-2"
+    ],
+    "input_yolo_track_assignments": {
+      "det-amb-1": "track-B",
+      "det-amb-2": "track-A"
+    },
+    "expected_correct_associations": {
+      "det-amb-1": "track-A",
+      "det-amb-2": "track-B"
+    },
+    "scenario_leakage_audit": {
+      "forbidden_tokens_checked": [
+        "expected_identity",
+        "ground_truth",
+        "canonical_track_id",
+        "expected_track"
+      ],
+      "leaked_tokens_found": [],
+      "leakage_detected": false
+    },
+    "independent_track_history_evidence": [
+      {
+        "track_id": "track-A",
+        "history_window_seconds": 1.8,
+        "history_sample_count": 3,
+        "recent_ground_path": [
+          {
+            "sample_age_s": 1.4,
+            "ground_x": 0.7,
+            "ground_z": 4.5
+          },
+          {
+            "sample_age_s": 0.9,
+            "ground_x": 0.95,
+            "ground_z": 4.2
+          },
+          {
+            "sample_age_s": 0.3,
+            "ground_x": 1.2,
+            "ground_z": 4.0
+          }
+        ],
+        "recent_relative_depth": {
+          "median": 0.52,
+          "range": [
+            0.5,
+            0.54
+          ]
+        },
+        "evidence_timestamp": 1793879253.074955,
+        "source": "independent_track_memory"
+      },
+      {
+        "track_id": "track-B",
+        "history_window_seconds": 1.8,
+        "history_sample_count": 3,
+        "recent_ground_path": [
+          {
+            "sample_age_s": 1.5,
+            "ground_x": 2.2,
+            "ground_z": 4.6
+          },
+          {
+            "sample_age_s": 0.95,
+            "ground_x": 2.0,
+            "ground_z": 4.3
+          },
+          {
+            "sample_age_s": 0.35,
+            "ground_x": 1.85,
+            "ground_z": 4.1
+          }
+        ],
+        "recent_relative_depth": {
+          "median": 0.49,
+          "range": [
+            0.47,
+            0.51
+          ]
+        },
+        "evidence_timestamp": 1793879253.074955,
+        "source": "independent_track_memory"
+      }
+    ],
+    "independent_history_consistency_audit": {
+      "evidence_present": true,
+      "evidence_entry_count": 2,
+      "references_detection_ids": false,
+      "referenced_detection_ids": [],
+      "forbidden_tokens_checked": [
+        "expected_identity",
+        "ground_truth",
+        "canonical_track_id",
+        "expected_track",
+        "expected_correct_associations"
+      ],
+      "forbidden_tokens_found": [],
+      "leakage_detected": false
+    },
+    "structured_input_audit": {
+      "structured_payload_parsed": true,
+      "structured_payload_parse_error": null,
+      "includes_expected_correct_associations_key": false,
+      "includes_independent_track_history_evidence": true,
+      "independent_history_consistency_audit": {
+        "evidence_present": true,
+        "evidence_entry_count": 2,
+        "references_detection_ids": false,
+        "referenced_detection_ids": [],
+        "forbidden_tokens_checked": [
+          "expected_identity",
+          "ground_truth",
+          "canonical_track_id",
+          "expected_track",
+          "expected_correct_associations"
+        ],
+        "forbidden_tokens_found": [],
+        "leakage_detected": false
+      }
+    },
+    "frame_reference_included": true,
+    "visual_evidence_limitation": "Synthetic frame only approximates detection geometry; historical motion/depth identity evidence is provided as structured metadata, not visually demonstrated in pixels."
+  },
+  "result": {
+    "available": true,
+    "error": null,
+    "uncertainty_flags": [
+      "overlapping_tracks",
+      "ambiguous_id_switch",
+      "schema_complete_response"
+    ],
+    "proposal_count": 2,
+    "valid_json": true,
+    "json_parsed": true,
+    "schema_complete": true,
+    "schema_incomplete": false,
+    "timeout": false,
+    "truncation": false,
+    "finish_reason": "stop",
+    "token_usage": {
+      "prompt_tokens": 1830,
+      "completion_tokens": 359,
+      "total_tokens": 2189
+    },
+    "token_usage_details": {
+      "completion_tokens_details": {
+        "accepted_prediction_tokens": null,
+        "audio_tokens": null,
+        "reasoning_tokens": 0,
+        "rejected_prediction_tokens": null,
+        "text_tokens": null
+      }
+    },
+    "response_text": "{\n  \"proposals\": [\n    {\n      \"detection_id\": \"det-amb-1\",\n      \"proposed_track_id\": \"track-B\",\n      \"association_confidence\": 0.45,\n      \"occlusion_likelihood\": 0.65,\n      \"id_switch_risk\": 0.75,\n      \"depth_conflict_flag\": false,\n      \"position_conflict_flag\": true,\n      \"uncertainties\": [\n        \"crossing_targets\",\n        \"motion_trend_mismatch\"\n      ],\n      \"supporting_evidence\": [\n        \"depth_consistency\",\n        \"appearance_match\"\n      ]\n    },\n    {\n      \"detection_id\": \"det-amb-2\",\n      \"proposed_track_id\": \"track-A\",\n      \"association_confidence\": 0.45,\n      \"occlusion_likelihood\": 0.65,\n      \"id_switch_risk\": 0.75,\n      \"depth_conflict_flag\": false,\n      \"position_conflict_flag\": true,\n      \"uncertainties\": [\n        \"crossing_targets\",\n        \"motion_trend_mismatch\"\n      ],\n      \"supporting_evidence\": [\n        \"depth_consistency\",\n        \"appearance_match\"\n      ]\n    }\n  ],\n  \"uncertainty_flags\": [\n    \"overlapping_tracks\",\n    \"ambiguous_id_switch\"\n  ],\n  \"supporting_evidence\": [\n    \"occlusion_risk_present\",\n    \"conflicting_motion_depth_correlation\"\n  ]\n}",
+    "response_text_char_length": 1116,
+    "response_text_sha256": "acbb303d845f893abc2b06e125bca0d14a9cdc88bcbba701f15a6af42ff49ba2",
+    "response_text_head": "{\n  \"proposals\": [\n    {\n      \"detection_id\": \"det-amb-1\",\n      \"proposed_track_id\": \"track-B\",\n      \"association_confidence\": 0.45,\n      \"occlusion_likelihood\": 0.65,\n      \"id_switch_risk\": 0.75,\n      \"depth_conflict_flag\": false,\n      \"position_conflict_flag\": true,\n      \"uncertainties\": [",
+    "response_text_tail": "    ],\n      \"supporting_evidence\": [\n        \"depth_consistency\",\n        \"appearance_match\"\n      ]\n    }\n  ],\n  \"uncertainty_flags\": [\n    \"overlapping_tracks\",\n    \"ambiguous_id_switch\"\n  ],\n  \"supporting_evidence\": [\n    \"occlusion_risk_present\",\n    \"conflicting_motion_depth_correlation\"\n  ]\n}",
+    "response_text_logged_without_local_truncation": true,
+    "response_object_keys": [
+      "choices",
+      "created",
+      "id",
+      "metadata",
+      "model",
+      "moderation",
+      "object",
+      "service_tier",
+      "system_fingerprint",
+      "usage"
+    ],
+    "message_object_keys": [
+      "annotations",
+      "audio",
+      "content",
+      "function_call",
+      "provider_specific_fields",
+      "refusal",
+      "role",
+      "tool_calls"
+    ],
+    "wall_latency_ms": 2787.519,
+    "agent_reported_latency_ms": 2785.9951249993173,
+    "fallback_or_error_classification": "success",
+    "observation_fallback_updates": 0,
+    "observation_evidence_backed_updates": 2,
+    "observation_accepted_updates": 2,
+    "observation_rejected_updates": 0,
+    "observation_rejection_reasons_by_detection": {}
+  },
+  "scenario_evaluation": {
+    "scenario": "yolo-id-swap",
+    "outcome": "preserved_swapped_ids",
+    "per_detection": {
+      "det-amb-1": {
+        "input_yolo_track_id": "track-B",
+        "expected_track_id": "track-A",
+        "proposed_track_id": "track-B",
+        "outcome": "preserved_swapped_yolo_identity",
+        "uncertainties": [
+          "crossing_targets",
+          "motion_trend_mismatch"
+        ]
+      },
+      "det-amb-2": {
+        "input_yolo_track_id": "track-A",
+        "expected_track_id": "track-B",
+        "proposed_track_id": "track-A",
+        "outcome": "preserved_swapped_yolo_identity",
+        "uncertainties": [
+          "crossing_targets",
+          "motion_trend_mismatch"
+        ]
+      }
+    }
+  },
+  "tracking_observation_collaboration": {
+    "enabled": true,
+    "mode": "live",
+    "observation_model": "qwen-3.8-27b",
+    "observation_timeout_seconds": 6.0,
+    "observation_max_output_tokens": 768,
+    "observation_reasoning_effort": "none",
+    "per_detection": {
+      "det-amb-1": {
+        "tracking_proposal": {
+          "detection_id": "det-amb-1",
+          "proposed_track_id": "track-B",
+          "association_confidence": 0.45,
+          "occlusion_likelihood": 0.65,
+          "id_switch_risk": 0.75,
+          "depth_conflict_flag": false,
+          "position_conflict_flag": true,
+          "uncertainties": [
+            "crossing_targets",
+            "motion_trend_mismatch"
+          ],
+          "supporting_evidence": [
+            "depth_consistency",
+            "appearance_match"
+          ]
+        },
+        "observation_request_payload": {
+          "task": "independent_tracking_association_verification",
+          "requirements": {
+            "do_not_invent_measurements": true,
+            "assess_motion_depth_visual_consistency": true,
+            "report_supported_contradicted_or_inconclusive": true
+          },
+          "event_context": {
+            "scenario": "yolo-id-swap",
+            "event_reasons": [
+              "possible_id_switch",
+              "overlapping_tracks",
+              "occlusion_risk"
+            ]
+          },
+          "tracking_proposal": {
+            "detection_id": "det-amb-1",
+            "proposed_track_id": "track-B",
+            "association_confidence": 0.45,
+            "occlusion_likelihood": 0.65,
+            "id_switch_risk": 0.75,
+            "depth_conflict_flag": false,
+            "position_conflict_flag": true,
+            "uncertainties": [
+              "crossing_targets",
+              "motion_trend_mismatch"
+            ],
+            "supporting_evidence": [
+              "depth_consistency",
+              "appearance_match"
+            ]
+          },
+          "detection_measurements": {
+            "detection_id": "det-amb-1",
+            "timestamp": 1793879253.274955,
+            "yolo_track_id": "track-B",
+            "label": "person",
+            "detection_confidence": 0.81,
+            "pixel_bbox": {
+              "x1": 42.0,
+              "y1": 44.0,
+              "x2": 136.0,
+              "y2": 162.0
+            },
+            "pixel_center_x": 89.0,
+            "pixel_center_y": 162.0,
+            "relative_depth": 0.52,
+            "ground_x": 1.4,
+            "ground_z": 3.8,
+            "ground_coordinate_unit": "relative_units",
+            "position_kind": "relative_ground_estimate",
+            "motion_history": [
+              {
+                "history_index": 0,
+                "ground_x": 0.7,
+                "ground_z": 4.5
+              },
+              {
+                "history_index": 1,
+                "ground_x": 0.95,
+                "ground_z": 4.2
+              },
+              {
+                "history_index": 2,
+                "ground_x": 1.2,
+                "ground_z": 4.0
+              }
+            ]
+          },
+          "independent_history": {
+            "all_tracks": [
+              {
+                "track_id": "track-A",
+                "history_window_seconds": 1.8,
+                "history_sample_count": 3,
+                "recent_ground_path": [
+                  {
+                    "sample_age_s": 1.4,
+                    "ground_x": 0.7,
+                    "ground_z": 4.5
+                  },
+                  {
+                    "sample_age_s": 0.9,
+                    "ground_x": 0.95,
+                    "ground_z": 4.2
+                  },
+                  {
+                    "sample_age_s": 0.3,
+                    "ground_x": 1.2,
+                    "ground_z": 4.0
+                  }
+                ],
+                "recent_relative_depth": {
+                  "median": 0.52,
+                  "range": [
+                    0.5,
+                    0.54
+                  ]
+                },
+                "evidence_timestamp": 1793879253.074955,
+                "source": "independent_track_memory"
+              },
+              {
+                "track_id": "track-B",
+                "history_window_seconds": 1.8,
+                "history_sample_count": 3,
+                "recent_ground_path": [
+                  {
+                    "sample_age_s": 1.5,
+                    "ground_x": 2.2,
+                    "ground_z": 4.6
+                  },
+                  {
+                    "sample_age_s": 0.95,
+                    "ground_x": 2.0,
+                    "ground_z": 4.3
+                  },
+                  {
+                    "sample_age_s": 0.35,
+                    "ground_x": 1.85,
+                    "ground_z": 4.1
+                  }
+                ],
+                "recent_relative_depth": {
+                  "median": 0.49,
+                  "range": [
+                    0.47,
+                    0.51
+                  ]
+                },
+                "evidence_timestamp": 1793879253.074955,
+                "source": "independent_track_memory"
+              }
+            ],
+            "for_proposed_track": {
+              "track_id": "track-B",
+              "history_window_seconds": 1.8,
+              "history_sample_count": 3,
+              "recent_ground_path": [
+                {
+                  "sample_age_s": 1.5,
+                  "ground_x": 2.2,
+                  "ground_z": 4.6
+                },
+                {
+                  "sample_age_s": 0.95,
+                  "ground_x": 2.0,
+                  "ground_z": 4.3
+                },
+                {
+                  "sample_age_s": 0.35,
+                  "ground_x": 1.85,
+                  "ground_z": 4.1
+                }
+              ],
+              "recent_relative_depth": {
+                "median": 0.49,
+                "range": [
+                  0.47,
+                  0.51
+                ]
+              },
+              "evidence_timestamp": 1793879253.074955,
+              "source": "independent_track_memory"
+            }
+          }
+        },
+        "observation_agent_verdict": {
+          "verification_status": "inconclusive",
+          "visibility_status": "partial",
+          "identity_consistency": "unknown",
+          "possible_id_switch": true,
+          "confidence": 0.4,
+          "uncertainty": [],
+          "limitations": [
+            "The visual content is abstract (geometric shapes) and not a camera capture.",
+            "No visual features (person appearance, clothing, body pose) are available to confirm identity consistency.",
+            "Depth and ground-plane coordinates cannot be visually verified against the image content.",
+            "Cannot distinguish between 'track-A' and 'track-B' visually."
+          ],
+          "supporting_evidence_refs": [
+            "tracking_proposal.supporting_evidence: depth_consistency (based on data 0.52 vs 0.49)"
+          ],
+          "contradicting_evidence_refs": [
+            "tracking_proposal.position_conflict_flag: true (Data shows ground_x 1.4 for detection vs 1.85 for track-B history)",
+            "tracking_proposal.motion_history (Data suggests moving right, but track-B history suggests moving left)"
+          ],
+          "recommended_follow_up": "Discard the visual verification task as it is malformed (incorrect image attached). Rely on kinematic data: the large discrepancy in ground_x (1.4 vs 1.85) and opposing motion trends (detection moving right, track-B moving left) strongly suggest the detection 'det-amb-1' does not belong to 'track-B' and may actually belong to 'track-A' (history ends at 1.2, consistent with detection at 1.4 moving right).",
+          "visual_content_inspected": true
+        },
+        "observation_agent_invocation": {
+          "status": "ok",
+          "mode": "live",
+          "latency_ms": 4403.598,
+          "error": null
+        },
+        "deterministic_audit": {
+          "audit_flags": [],
+          "measurement_checks": {
+            "depth_consistency_claimed": true,
+            "depth_conflict_flag": false,
+            "detection_relative_depth": 0.52,
+            "history_depth_median": 0.49,
+            "depth_delta": 0.030000000000000027,
+            "depth_measurement_consistent": true,
+            "motion_distance_to_history_endpoint": 0.6576473218982953,
+            "motion_measurement_consistent": false
+          },
+          "schema_checks": {
+            "proposal_has_required_identity_fields": true
+          }
+        },
+        "coordinator_decision": {
+          "detection_id": "det-amb-1",
+          "resolved_track_id": "track-B",
+          "accepted": true,
+          "rejection_reasons": [],
+          "uncertainties": [
+            "crossing_targets",
+            "motion_trend_mismatch"
+          ],
+          "supporting_evidence": [
+            "depth_consistency",
+            "appearance_match"
+          ]
+        },
+        "observation_verification_status": "inconclusive"
+      },
+      "det-amb-2": {
+        "tracking_proposal": {
+          "detection_id": "det-amb-2",
+          "proposed_track_id": "track-A",
+          "association_confidence": 0.45,
+          "occlusion_likelihood": 0.65,
+          "id_switch_risk": 0.75,
+          "depth_conflict_flag": false,
+          "position_conflict_flag": true,
+          "uncertainties": [
+            "crossing_targets",
+            "motion_trend_mismatch"
+          ],
+          "supporting_evidence": [
+            "depth_consistency",
+            "appearance_match"
+          ]
+        },
+        "observation_request_payload": {
+          "task": "independent_tracking_association_verification",
+          "requirements": {
+            "do_not_invent_measurements": true,
+            "assess_motion_depth_visual_consistency": true,
+            "report_supported_contradicted_or_inconclusive": true
+          },
+          "event_context": {
+            "scenario": "yolo-id-swap",
+            "event_reasons": [
+              "possible_id_switch",
+              "overlapping_tracks",
+              "occlusion_risk"
+            ]
+          },
+          "tracking_proposal": {
+            "detection_id": "det-amb-2",
+            "proposed_track_id": "track-A",
+            "association_confidence": 0.45,
+            "occlusion_likelihood": 0.65,
+            "id_switch_risk": 0.75,
+            "depth_conflict_flag": false,
+            "position_conflict_flag": true,
+            "uncertainties": [
+              "crossing_targets",
+              "motion_trend_mismatch"
+            ],
+            "supporting_evidence": [
+              "depth_consistency",
+              "appearance_match"
+            ]
+          },
+          "detection_measurements": {
+            "detection_id": "det-amb-2",
+            "timestamp": 1793879253.274955,
+            "yolo_track_id": "track-A",
+            "label": "person",
+            "detection_confidence": 0.79,
+            "pixel_bbox": {
+              "x1": 114.0,
+              "y1": 40.0,
+              "x2": 214.0,
+              "y2": 156.0
+            },
+            "pixel_center_x": 164.0,
+            "pixel_center_y": 156.0,
+            "relative_depth": 0.49,
+            "ground_x": 1.7,
+            "ground_z": 3.9,
+            "ground_coordinate_unit": "relative_units",
+            "position_kind": "relative_ground_estimate",
+            "motion_history": [
+              {
+                "history_index": 0,
+                "ground_x": 2.2,
+                "ground_z": 4.6
+              },
+              {
+                "history_index": 1,
+                "ground_x": 2.0,
+                "ground_z": 4.3
+              },
+              {
+                "history_index": 2,
+                "ground_x": 1.85,
+                "ground_z": 4.1
+              }
+            ]
+          },
+          "independent_history": {
+            "all_tracks": [
+              {
+                "track_id": "track-A",
+                "history_window_seconds": 1.8,
+                "history_sample_count": 3,
+                "recent_ground_path": [
+                  {
+                    "sample_age_s": 1.4,
+                    "ground_x": 0.7,
+                    "ground_z": 4.5
+                  },
+                  {
+                    "sample_age_s": 0.9,
+                    "ground_x": 0.95,
+                    "ground_z": 4.2
+                  },
+                  {
+                    "sample_age_s": 0.3,
+                    "ground_x": 1.2,
+                    "ground_z": 4.0
+                  }
+                ],
+                "recent_relative_depth": {
+                  "median": 0.52,
+                  "range": [
+                    0.5,
+                    0.54
+                  ]
+                },
+                "evidence_timestamp": 1793879253.074955,
+                "source": "independent_track_memory"
+              },
+              {
+                "track_id": "track-B",
+                "history_window_seconds": 1.8,
+                "history_sample_count": 3,
+                "recent_ground_path": [
+                  {
+                    "sample_age_s": 1.5,
+                    "ground_x": 2.2,
+                    "ground_z": 4.6
+                  },
+                  {
+                    "sample_age_s": 0.95,
+                    "ground_x": 2.0,
+                    "ground_z": 4.3
+                  },
+                  {
+                    "sample_age_s": 0.35,
+                    "ground_x": 1.85,
+                    "ground_z": 4.1
+                  }
+                ],
+                "recent_relative_depth": {
+                  "median": 0.49,
+                  "range": [
+                    0.47,
+                    0.51
+                  ]
+                },
+                "evidence_timestamp": 1793879253.074955,
+                "source": "independent_track_memory"
+              }
+            ],
+            "for_proposed_track": {
+              "track_id": "track-A",
+              "history_window_seconds": 1.8,
+              "history_sample_count": 3,
+              "recent_ground_path": [
+                {
+                  "sample_age_s": 1.4,
+                  "ground_x": 0.7,
+                  "ground_z": 4.5
+                },
+                {
+                  "sample_age_s": 0.9,
+                  "ground_x": 0.95,
+                  "ground_z": 4.2
+                },
+                {
+                  "sample_age_s": 0.3,
+                  "ground_x": 1.2,
+                  "ground_z": 4.0
+                }
+              ],
+              "recent_relative_depth": {
+                "median": 0.52,
+                "range": [
+                  0.5,
+                  0.54
+                ]
+              },
+              "evidence_timestamp": 1793879253.074955,
+              "source": "independent_track_memory"
+            }
+          }
+        },
+        "observation_agent_verdict": {
+          "verification_status": "contradicted",
+          "visibility_status": "not_visible",
+          "identity_consistency": "contradicted",
+          "possible_id_switch": true,
+          "confidence": 0.85,
+          "uncertainty": [],
+          "limitations": [],
+          "supporting_evidence_refs": [],
+          "contradicting_evidence_refs": [
+            "motion_trend_mismatch: The detection measurement history (moving towards x=1.7) matches the spatial trajectory of track-B (x=1.85 -> 1.7) rather than track-A (x=1.2 -> 1.7), suggesting the detection is associated with the wrong track.",
+            "depth_conflict: The detection's relative depth (0.49) aligns with track-B's depth range (0.47-0.51) but contradicts track-A's range (0.50-0.54)."
+          ],
+          "recommended_follow_up": "Re-evaluate the data association between detection det-amb-2 and track-B, as the geometric and temporal data aligns more closely with track-B's state. Investigate the tracking logic for track-A regarding ID swaps.",
+          "visual_content_inspected": true
+        },
+        "observation_agent_invocation": {
+          "status": "ok",
+          "mode": "live",
+          "latency_ms": 3045.425,
+          "error": null
+        },
+        "deterministic_audit": {
+          "audit_flags": [],
+          "measurement_checks": {
+            "depth_consistency_claimed": true,
+            "depth_conflict_flag": false,
+            "detection_relative_depth": 0.49,
+            "history_depth_median": 0.52,
+            "depth_delta": 0.030000000000000027,
+            "depth_measurement_consistent": true,
+            "motion_distance_to_history_endpoint": 0.6576473218982953,
+            "motion_measurement_consistent": false
+          },
+          "schema_checks": {
+            "proposal_has_required_identity_fields": true
+          }
+        },
+        "coordinator_decision": {
+          "detection_id": "det-amb-2",
+          "resolved_track_id": "track-A",
+          "accepted": true,
+          "rejection_reasons": [],
+          "uncertainties": [
+            "crossing_targets",
+            "motion_trend_mismatch"
+          ],
+          "supporting_evidence": [
+            "depth_consistency",
+            "appearance_match"
+          ]
+        },
+        "observation_verification_status": "contradicted"
+      }
+    },
+    "summary": {
+      "proposal_count": 2,
+      "observation_invocation_status_counts": {
+        "ok": 2
+      },
+      "observation_verification_status_counts": {
+        "inconclusive": 1,
+        "contradicted": 1
+      },
+      "depth_conflict_vs_depth_consistency_contradictions": 0
+    }
+  },
+  "instruction_compression": {
+    "applied": true,
+    "compression_scope": "diagnostic_request_only",
+    "system_prompt_unchanged": true,
+    "original_structure": {
+      "chars_total": 2053,
+      "has_structured_input": true,
+      "structured_input_chars": 1421,
+      "includes_required_response_keys": true,
+      "includes_required_proposal_fields": true
+    },
+    "compressed_structure": {
+      "chars_total": 2865,
+      "has_structured_input": true,
+      "structured_input_chars": 2124,
+      "includes_required_response_keys": true,
+      "includes_required_proposal_fields": true
+    },
+    "removed_items_summary": [
+      "Removed duplicated long-form wording while preserving required response keys/fields.",
+      "Added strict concision caps for evidence/uncertainty list verbosity.",
+      "Retained explicit occlusion, identity ambiguity, and insufficient-evidence signaling requirements."
+    ]
+  },
+  "local_schema_checks": {
+    "checks": {
+      "has_structured_input_marker": true,
+      "includes_required_response_keys": true,
+      "includes_required_proposal_fields": true,
+      "all_passed": true
+    },
+    "compressed_structure": {
+      "chars_total": 777,
+      "has_structured_input": true,
+      "structured_input_chars": 36,
+      "includes_required_response_keys": true,
+      "includes_required_proposal_fields": true
+    }
+  }
+}

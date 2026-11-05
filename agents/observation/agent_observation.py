@@ -688,26 +688,33 @@ async def invoke_visual_verification_llm_response(
     user_payload: dict[str, Any],
     image_data_url: str,
     timeout_seconds: float,
+    max_output_tokens: int | None = None,
+    reasoning_effort: str | None = None,
 ) -> dict[str, Any]:
     reservation = provider_call_budget.reserve_or_raise(provider_call_budget.ROLE_OBSERVATION_VISUAL)
     started = time.perf_counter()
     client: AsyncOpenAI | None = None
     try:
         client = _create_openai_client()
+        request_kwargs: dict[str, Any] = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": json.dumps(user_payload)},
+                        {"type": "image_url", "image_url": {"url": image_data_url}},
+                    ],
+                },
+            ],
+        }
+        if isinstance(max_output_tokens, int) and max_output_tokens > 0:
+            request_kwargs["max_tokens"] = max_output_tokens
+        if isinstance(reasoning_effort, str) and reasoning_effort.strip():
+            request_kwargs["reasoning_effort"] = reasoning_effort.strip()
         response = await asyncio.wait_for(
-            client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": json.dumps(user_payload)},
-                            {"type": "image_url", "image_url": {"url": image_data_url}},
-                        ],
-                    },
-                ],
-            ),
+            client.chat.completions.create(**request_kwargs),
             timeout=timeout_seconds,
         )
         latency_ms = round((time.perf_counter() - started) * 1000.0, 3)

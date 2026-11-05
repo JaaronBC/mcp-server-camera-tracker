@@ -4,10 +4,11 @@ from __future__ import annotations
 import asyncio
 import time
 import unittest
+from types import SimpleNamespace
 
 from agents.contracts import BoundingBox, DetectionCandidate, VisualAssociationProposal
 from agents.coordinator import AgentCoordinator
-from agents.tracking.agent_tracking import AsyncVisualTrackingRuntime, VisualTrackingAgentResult
+from agents.tracking.agent_tracking import AsyncVisualTrackingRuntime, LLMVisualTrackingAgent, VisualTrackingAgentResult
 
 
 class FakeVisualTrackingAgent:
@@ -48,6 +49,17 @@ class SequenceVisualTrackingAgent:
         value = self._results[self._index]
         self._index += 1
         return value
+
+
+class _SlowCompletions:
+    async def create(self, **kwargs):
+        await asyncio.sleep(0.05)
+        return SimpleNamespace(choices=[])
+
+
+class _SlowClient:
+    def __init__(self) -> None:
+        self.chat = SimpleNamespace(completions=_SlowCompletions())
 
 
 def make_detection(relative_depth: float | None = None) -> DetectionCandidate:
@@ -344,6 +356,114 @@ class TestVisualTrackingRuntime(unittest.TestCase):
         self.assertIsNotNone(observation)
         self.assertIsNone(runtime.poll_latest_observation())
         runtime.shutdown()
+
+    def test_success_observation_includes_ids(self) -> None:
+        proposal = VisualAssociationProposal(
+            detection_id="det-1",
+            proposed_track_id="vlm-track-2",
+            association_confidence=0.86,
+            occlusion_likelihood=0.1,
+            id_switch_risk=0.2,
+            depth_conflict_flag=False,
+            position_conflict_flag=False,
+            uncertainties=[],
+            supporting_evidence=["appearance_match"],
+        )
+        agent = FakeVisualTrackingAgent(
+            VisualTrackingAgentResult(
+                available=True,
+                proposals=[proposal],
+                uncertainty_flags=[],
+                supporting_evidence=["appearance_match"],
+                latency_ms=8.4,
+                llm_correlation_id="corr-success",
+            )
+        )
+        runtime = AsyncVisualTrackingRuntime(AgentCoordinator(), agent)
+        detection = make_detection()
+        runtime.submit_if_needed(
+            now=time.time(),
+            frame_reference=None,
+            detections=[detection],
+            event_reasons=["id_check"],
+        )
+
+        observation = None
+        deadline = time.time() + 1.0
+        while observation is None and time.time() < deadline:
+            observation = runtime.poll_latest_observation()
+            time.sleep(0.01)
+
+        runtime.shutdown()
+        self.assertIsNotNone(observation)
+        assert observation is not None
+        self.assertEqual(observation.llm_correlation_id, "corr-success")
+        self.assertIsInstance(observation.observation_id, str)
+        self.assertTrue(bool(observation.observation_id))
+
+    def test_failed_observation_includes_ids(self) -> None:
+        agent = FakeVisualTrackingAgent(
+            VisualTrackingAgentResult(
+                available=False,
+                proposals=[],
+                uncertainty_flags=["vlm_unavailable"],
+                supporting_evidence=[],
+                latency_ms=None,
+                error="vlm_unavailable",
+                llm_correlation_id="corr-fail",
+            )
+        )
+        runtime = AsyncVisualTrackingRuntime(AgentCoordinator(), agent)
+        detection = make_detection()
+        runtime.submit_if_needed(
+            now=time.time(),
+            frame_reference=None,
+            detections=[detection],
+            event_reasons=["error_check"],
+        )
+
+        observation = None
+        deadline = time.time() + 1.0
+        while observation is None and time.time() < deadline:
+            observation = runtime.poll_latest_observation()
+            time.sleep(0.01)
+
+        runtime.shutdown()
+        self.assertIsNotNone(observation)
+        assert observation is not None
+        self.assertEqual(observation.llm_correlation_id, "corr-fail")
+        self.assertIn("vlm_unavailable", observation.uncertainties)
+        self.assertIsInstance(observation.observation_id, str)
+        self.assertTrue(bool(observation.observation_id))
+
+    def test_timeout_observation_includes_ids(self) -> None:
+        runtime = AsyncVisualTrackingRuntime(
+            AgentCoordinator(),
+            LLMVisualTrackingAgent(client=_SlowClient()),
+        )
+        detection = make_detection()
+        runtime.submit_if_needed(
+            now=time.time(),
+            frame_reference=None,
+            detections=[detection],
+            event_reasons=["timeout_check"],
+            request_timeout_seconds=0.001,
+        )
+
+        observation = None
+        deadline = time.time() + 1.0
+        while observation is None and time.time() < deadline:
+            observation = runtime.poll_latest_observation()
+            time.sleep(0.01)
+
+        runtime.shutdown()
+        self.assertIsNotNone(observation)
+        assert observation is not None
+        self.assertIn("vlm_timeout", observation.uncertainties)
+        self.assertIsInstance(observation.llm_correlation_id, str)
+        self.assertTrue(bool(observation.llm_correlation_id))
+        self.assertIsInstance(observation.observation_id, str)
+        self.assertTrue(bool(observation.observation_id))
 
 
 if __name__ == "__main__":

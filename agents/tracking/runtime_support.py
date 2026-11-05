@@ -183,16 +183,23 @@ def summarize_tracking_agent_observation_metrics(
 ) -> dict[str, Any]:
     uncertainty_values = set(tracking_agent_observation.uncertainties)
     unavailable_increment = 1 if any(item.startswith("vlm_") for item in uncertainty_values) else 0
-    timeout_increment = 1 if "vlm_timeout" in uncertainty_values else 0
-    truncation_increment = 1 if "vlm_output_truncated" in uncertainty_values else 0
-    invalid_json_increment = 1 if "vlm_invalid_json_response" in uncertainty_values else 0
+    timeout_increment = 0
+    truncation_increment = 0
+    invalid_json_increment = 0
+    other_failure_increment = 0
+    if unavailable_increment == 1:
+        if "vlm_timeout" in uncertainty_values:
+            timeout_increment = 1
+        elif "vlm_output_truncated" in uncertainty_values:
+            truncation_increment = 1
+        elif "vlm_invalid_json_response" in uncertainty_values:
+            invalid_json_increment = 1
+        else:
+            other_failure_increment = 1
+
     valid_response_increment = 1 if unavailable_increment == 0 else 0
-    other_failure_increment = 1 if (
-        unavailable_increment == 1
-        and timeout_increment == 0
-        and truncation_increment == 0
-        and invalid_json_increment == 0
-    ) else 0
+    schema_complete_increment = 1 if "schema_complete_response" in uncertainty_values else 0
+    schema_incomplete_increment = 1 if "schema_incomplete_response" in uncertainty_values else 0
 
     last_error = None
     for item in tracking_agent_observation.uncertainties:
@@ -209,6 +216,8 @@ def summarize_tracking_agent_observation_metrics(
         "fallback_used": update_summary.get("fallback_used", 0),
         "llm_applied": update_summary.get("llm_applied", 0),
         "valid_response_increment": valid_response_increment,
+        "schema_complete_increment": schema_complete_increment,
+        "schema_incomplete_increment": schema_incomplete_increment,
         "timeout_increment": timeout_increment,
         "truncation_increment": truncation_increment,
         "invalid_json_increment": invalid_json_increment,
@@ -336,6 +345,8 @@ def apply_tracking_agent_metric_update_to_state(
         state.tracking_agent_fallback_usage_count += metric_update["fallback_used"]
         state.tracking_agent_llm_applied_update_count += metric_update["llm_applied"]
         state.tracking_agent_llm_valid_response_count += metric_update["valid_response_increment"]
+        state.tracking_agent_schema_complete_count += metric_update["schema_complete_increment"]
+        state.tracking_agent_schema_incomplete_count += metric_update["schema_incomplete_increment"]
         state.tracking_agent_llm_timeout_count += metric_update["timeout_increment"]
         state.tracking_agent_llm_truncation_count += metric_update["truncation_increment"]
         state.tracking_agent_llm_invalid_json_count += metric_update["invalid_json_increment"]

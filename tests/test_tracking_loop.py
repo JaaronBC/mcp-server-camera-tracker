@@ -44,11 +44,12 @@ class FakeRuntime:
 class TestTrackingLoopVideoInput(unittest.TestCase):
     def test_video_frames_are_shown_and_tracked(self) -> None:
         frame = np.zeros((24, 32, 3), dtype=np.uint8)
+        annotated_frame = np.full((24, 32, 3), 11, dtype=np.uint8)
         capture = FakeCapture([frame])
         state = SharedDashboardState()
         result = SimpleNamespace(
             boxes=SimpleNamespace(id=None),
-            plot=lambda: frame.copy(),
+            plot=lambda: annotated_frame.copy(),
         )
 
         with (
@@ -65,7 +66,7 @@ class TestTrackingLoopVideoInput(unittest.TestCase):
 
             def track_frame(**kwargs):
                 self.assertEqual(kwargs["source"].shape, frame.shape)
-                self.assertTrue(np.array_equal(state.latest_annotated_frame, frame))
+                self.assertIsNone(state.latest_annotated_frame)
                 return [result]
 
             model.track.side_effect = track_frame
@@ -77,8 +78,47 @@ class TestTrackingLoopVideoInput(unittest.TestCase):
         yolo.assert_called_once()
         model.track.assert_called_once()
         self.assertTrue(capture.released)
-        self.assertIsNotNone(state.latest_annotated_frame)
+        self.assertTrue(np.array_equal(state.latest_annotated_frame, annotated_frame))
         self.assertIsNone(state.input_error)
+        self.assertEqual(state.camera_status, "stopped")
+
+    def test_raw_frame_does_not_overwrite_existing_annotated_frame_during_inference(self) -> None:
+        existing_annotated = np.full((24, 32, 3), 101, dtype=np.uint8)
+        raw_frame = np.full((24, 32, 3), 7, dtype=np.uint8)
+        next_annotated = np.full((24, 32, 3), 202, dtype=np.uint8)
+        capture = FakeCapture([raw_frame])
+        state = SharedDashboardState()
+        state.latest_annotated_frame = existing_annotated.copy()
+        result = SimpleNamespace(
+            boxes=SimpleNamespace(id=None),
+            plot=lambda: next_annotated.copy(),
+        )
+
+        with (
+            patch("agents.dashboard.tracking_loop.cv2.VideoCapture", return_value=capture),
+            patch("agents.dashboard.tracking_loop.YOLO") as yolo,
+            patch("agents.dashboard.tracking_loop.load_ground_plane_calibration", return_value=None),
+            patch("agents.dashboard.tracking_loop.socket.socket"),
+            patch("agents.dashboard.tracking_loop.LLMVisualTrackingAgent") as tracking_agent,
+            patch("agents.dashboard.tracking_loop.AsyncVisualTrackingRuntime", FakeRuntime),
+            patch("agents.dashboard.tracking_loop.publish_tracking_frame_message"),
+        ):
+            model = yolo.return_value
+            model.names = {}
+
+            def track_frame(**kwargs):
+                self.assertEqual(kwargs["source"].shape, raw_frame.shape)
+                self.assertTrue(np.array_equal(state.latest_annotated_frame, existing_annotated))
+                self.assertFalse(np.array_equal(state.latest_annotated_frame, raw_frame))
+                return [result]
+
+            model.track.side_effect = track_frame
+            tracking_agent.return_value.model = "test-agent"
+
+            run_live_tracking_loop(state, "sample.mp4")
+
+        self.assertTrue(np.array_equal(state.latest_annotated_frame, next_annotated))
+        self.assertTrue(capture.released)
         self.assertEqual(state.camera_status, "stopped")
 
     def test_unavailable_webcam_is_reported_without_initializing_yolo(self) -> None:

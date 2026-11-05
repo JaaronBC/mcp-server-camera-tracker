@@ -681,7 +681,6 @@ def run_live_tracking_loop(
                 state.camera_status = "connected"
                 state.detector_status = "running"
                 state.input_error = None
-                state.latest_annotated_frame = frame.copy() if hasattr(frame, "copy") else frame
                 state.frame_height, state.frame_width = frame.shape[:2]
                 state.last_live_frame_time = now
 

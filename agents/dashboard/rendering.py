@@ -163,10 +163,9 @@ def draw_placeholder_webcam_panel(
 ):
     panel = cv2.UMat(height, width, cv2.CV_8UC3).get()
     panel[:] = (22, 22, 22)
-    source = source_label.strip() if isinstance(source_label, str) and source_label.strip() else "Webcam"
     cv2.putText(
         panel,
-        f"{source} feed unavailable",
+        f"{source_label} feed unavailable",
         (20, 60),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.9,

@@ -40,6 +40,8 @@ class SharedDashboardState:
         self.tracking_agent_total_updates_rejected = 0
         self.tracking_agent_total_updates_unmatched = 0
         self.tracking_agent_llm_valid_response_count = 0
+        self.tracking_agent_schema_complete_count = 0
+        self.tracking_agent_schema_incomplete_count = 0
         self.tracking_agent_llm_timeout_count = 0
         self.tracking_agent_llm_truncation_count = 0
         self.tracking_agent_llm_invalid_json_count = 0

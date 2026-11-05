@@ -5,6 +5,7 @@ import asyncio
 import base64
 import json
 import os
+import re
 import time
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -33,6 +34,37 @@ TRACKING_AGENT_SYSTEM_PROMPT_FALLBACK = (
     "association proposals with calibrated uncertainty and explicit conflict flags. "
     "Never invent measurements or unsupported identities, and always return strict JSON only."
 )
+
+_PROVIDER_ERROR_CODE_ALLOWED_PATTERN = re.compile(r"[^a-z0-9._:-]+")
+
+
+def _sanitize_provider_error_code(raw_code: object) -> str | None:
+    if not isinstance(raw_code, str):
+        return None
+    normalized = raw_code.strip().lower()
+    if not normalized:
+        return None
+    normalized = _PROVIDER_ERROR_CODE_ALLOWED_PATTERN.sub("_", normalized)
+    normalized = normalized.strip("_")
+    if not normalized:
+        return None
+    return normalized[:64]
+
+
+def _extract_exception_telemetry_fields(error: Exception) -> dict[str, object]:
+    fields: dict[str, object] = {
+        "sdk_exception_class": type(error).__name__,
+    }
+
+    status_code = getattr(error, "status_code", None)
+    if isinstance(status_code, int):
+        fields["http_status_code"] = status_code
+
+    provider_error_code = _sanitize_provider_error_code(getattr(error, "code", None))
+    if provider_error_code is not None:
+        fields["provider_error_code"] = provider_error_code
+
+    return fields
 
 
 def load_tracking_agent_skill() -> str:
@@ -256,13 +288,17 @@ class LLMVisualTrackingAgent:
                 error="vlm_timeout",
                 llm_correlation_id=request_correlation_id,
             )
-        except Exception:
+        except Exception as error:
             provider_call_budget.finalize_provider_call_attempt(
                 reservation,
                 outcome="error",
                 latency_ms=(time.perf_counter() - started) * 1000.0,
                 error_code="runtime_error",
             )
+            try:
+                exception_fields = _extract_exception_telemetry_fields(error)
+            except Exception:
+                exception_fields = {}
             latency_instrumentation.emit_event(
                 "llm_request_completed",
                 stage="tracking_agent_llm_request",
@@ -277,6 +313,7 @@ class LLMVisualTrackingAgent:
                 correlation_id=request_correlation_id,
                 status="error",
                 error_code="runtime_error",
+                **exception_fields,
             )
             return VisualTrackingAgentResult(
                 available=False,
@@ -326,20 +363,18 @@ class LLMVisualTrackingAgent:
         raw_proposals = parsed.get("proposals")
         uncertainty_flags = parsed.get("uncertainty_flags")
         supporting_evidence = parsed.get("supporting_evidence")
-        if (
-            not isinstance(raw_proposals, list)
-            or not isinstance(uncertainty_flags, list)
-            or not isinstance(supporting_evidence, list)
-        ):
-            return VisualTrackingAgentResult(
-                available=False,
-                proposals=[],
-                uncertainty_flags=["vlm_invalid_schema_response"],
-                supporting_evidence=[],
-                latency_ms=latency_ms,
-                error="vlm_invalid_schema_response",
-                llm_correlation_id=request_correlation_id,
-            )
+
+        schema_complete = (
+            isinstance(raw_proposals, list)
+            and isinstance(uncertainty_flags, list)
+            and isinstance(supporting_evidence, list)
+        )
+        if not isinstance(raw_proposals, list):
+            raw_proposals = []
+        if not isinstance(uncertainty_flags, list):
+            uncertainty_flags = []
+        if not isinstance(supporting_evidence, list):
+            supporting_evidence = []
         normalized_proposals: list[VisualAssociationProposal] = []
         for item in raw_proposals:
             if isinstance(item, dict):
@@ -347,10 +382,16 @@ class LLMVisualTrackingAgent:
                 if normalized is not None:
                     normalized_proposals.append(normalized)
 
+        normalized_uncertainty_flags = [str(value) for value in uncertainty_flags]
+        if schema_complete:
+            normalized_uncertainty_flags.append("schema_complete_response")
+        else:
+            normalized_uncertainty_flags.append("schema_incomplete_response")
+
         return VisualTrackingAgentResult(
             available=True,
             proposals=normalized_proposals,
-            uncertainty_flags=[str(value) for value in uncertainty_flags],
+            uncertainty_flags=normalized_uncertainty_flags,
             supporting_evidence=[str(value) for value in supporting_evidence],
             latency_ms=latency_ms,
             llm_correlation_id=request_correlation_id,

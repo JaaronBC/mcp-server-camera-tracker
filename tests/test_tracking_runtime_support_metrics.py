@@ -46,6 +46,8 @@ class TestTrackingRuntimeSupportMetrics(unittest.TestCase):
         self.assertEqual(summary["invalid_json_increment"], 0)
         self.assertEqual(summary["other_failure_increment"], 0)
         self.assertEqual(summary["valid_response_increment"], 0)
+        self.assertEqual(summary["schema_complete_increment"], 0)
+        self.assertEqual(summary["schema_incomplete_increment"], 0)
         self.assertEqual(summary["unavailable_increment"], 1)
         self.assertEqual(summary["last_error"], "vlm_timeout")
 
@@ -61,6 +63,8 @@ class TestTrackingRuntimeSupportMetrics(unittest.TestCase):
         self.assertEqual(summary["invalid_json_increment"], 0)
         self.assertEqual(summary["other_failure_increment"], 0)
         self.assertEqual(summary["valid_response_increment"], 0)
+        self.assertEqual(summary["schema_complete_increment"], 0)
+        self.assertEqual(summary["schema_incomplete_increment"], 0)
         self.assertEqual(summary["unavailable_increment"], 1)
 
     def test_invalid_json_observation_updates_invalid_json_metrics(self) -> None:
@@ -75,6 +79,8 @@ class TestTrackingRuntimeSupportMetrics(unittest.TestCase):
         self.assertEqual(summary["invalid_json_increment"], 1)
         self.assertEqual(summary["other_failure_increment"], 0)
         self.assertEqual(summary["valid_response_increment"], 0)
+        self.assertEqual(summary["schema_complete_increment"], 0)
+        self.assertEqual(summary["schema_incomplete_increment"], 0)
         self.assertEqual(summary["unavailable_increment"], 1)
 
     def test_other_failure_observation_updates_other_failure_metrics(self) -> None:
@@ -89,23 +95,52 @@ class TestTrackingRuntimeSupportMetrics(unittest.TestCase):
         self.assertEqual(summary["invalid_json_increment"], 0)
         self.assertEqual(summary["other_failure_increment"], 1)
         self.assertEqual(summary["valid_response_increment"], 0)
+        self.assertEqual(summary["schema_complete_increment"], 0)
+        self.assertEqual(summary["schema_incomplete_increment"], 0)
         self.assertEqual(summary["unavailable_increment"], 1)
         self.assertEqual(summary["last_error"], "vlm_api_key_missing")
 
     def test_valid_response_increments_valid_counter(self) -> None:
-        observation = self._build_observation([])
+        observation = self._build_observation(["schema_complete_response"])
         summary = summarize_tracking_agent_observation_metrics(
             observation,
             {"accepted": 1, "rejected": 0, "unmatched": 0, "fallback_used": 0, "llm_applied": 1},
         )
 
         self.assertEqual(summary["valid_response_increment"], 1)
+        self.assertEqual(summary["schema_complete_increment"], 1)
+        self.assertEqual(summary["schema_incomplete_increment"], 0)
         self.assertEqual(summary["timeout_increment"], 0)
         self.assertEqual(summary["truncation_increment"], 0)
         self.assertEqual(summary["invalid_json_increment"], 0)
         self.assertEqual(summary["other_failure_increment"], 0)
         self.assertEqual(summary["unavailable_increment"], 0)
         self.assertIsNone(summary["last_error"])
+
+    def test_multiple_failure_flags_increment_only_one_failure_category(self) -> None:
+        observation = self._build_observation([
+            "vlm_timeout",
+            "vlm_output_truncated",
+            "vlm_invalid_json_response",
+        ])
+        summary = summarize_tracking_agent_observation_metrics(
+            observation,
+            {"accepted": 0, "rejected": 1, "unmatched": 0, "fallback_used": 1, "llm_applied": 0},
+        )
+
+        self.assertEqual(summary["unavailable_increment"], 1)
+        self.assertEqual(summary["timeout_increment"], 1)
+        self.assertEqual(summary["truncation_increment"], 0)
+        self.assertEqual(summary["invalid_json_increment"], 0)
+        self.assertEqual(summary["other_failure_increment"], 0)
+
+        failure_total = (
+            summary["timeout_increment"]
+            + summary["truncation_increment"]
+            + summary["invalid_json_increment"]
+            + summary["other_failure_increment"]
+        )
+        self.assertEqual(failure_total, 1)
 
     def test_apply_updates_counts_fallback_and_actual_llm_applied(self) -> None:
         tracks = {
@@ -183,6 +218,8 @@ class TestTrackingRuntimeSupportMetrics(unittest.TestCase):
             tracking_agent_fallback_usage_count=0,
             tracking_agent_llm_applied_update_count=0,
             tracking_agent_llm_valid_response_count=0,
+            tracking_agent_schema_complete_count=0,
+            tracking_agent_schema_incomplete_count=0,
             tracking_agent_llm_timeout_count=0,
             tracking_agent_llm_truncation_count=0,
             tracking_agent_llm_invalid_json_count=0,
@@ -211,6 +248,8 @@ class TestTrackingRuntimeSupportMetrics(unittest.TestCase):
                 "fallback_used": 1,
                 "llm_applied": 1,
                 "valid_response_increment": 0,
+                "schema_complete_increment": 0,
+                "schema_incomplete_increment": 1,
                 "timeout_increment": 1,
                 "truncation_increment": 0,
                 "invalid_json_increment": 0,
@@ -228,6 +267,8 @@ class TestTrackingRuntimeSupportMetrics(unittest.TestCase):
         self.assertEqual(state.tracking_agent_fallback_usage_count, 1)
         self.assertEqual(state.tracking_agent_llm_applied_update_count, 1)
         self.assertEqual(state.tracking_agent_llm_valid_response_count, 0)
+        self.assertEqual(state.tracking_agent_schema_complete_count, 0)
+        self.assertEqual(state.tracking_agent_schema_incomplete_count, 1)
         self.assertEqual(state.tracking_agent_llm_timeout_count, 1)
         self.assertEqual(state.tracking_agent_llm_truncation_count, 0)
         self.assertEqual(state.tracking_agent_llm_invalid_json_count, 0)

@@ -355,6 +355,128 @@ class TestObservationVisualVerification(unittest.TestCase):
                     )
                 )
 
+    def test_visual_invoke_default_omits_optional_request_args(self) -> None:
+        captured_kwargs: dict = {}
+
+        class _Completions:
+            async def create(self, **kwargs):
+                captured_kwargs.update(kwargs)
+
+                class _Message:
+                    content = json.dumps(
+                        {
+                            "verification_status": "supported",
+                            "visibility_status": "visible",
+                            "identity_consistency": "consistent",
+                            "possible_id_switch": False,
+                            "confidence": 0.91,
+                            "uncertainty": [],
+                            "limitations": [],
+                            "supporting_evidence_refs": [],
+                            "contradicting_evidence_refs": [],
+                            "recommended_follow_up": None,
+                            "visual_content_inspected": True,
+                        }
+                    )
+
+                class _Choice:
+                    message = _Message()
+
+                class _Response:
+                    choices = [_Choice()]
+
+                return _Response()
+
+        class _Chat:
+            def __init__(self) -> None:
+                self.completions = _Completions()
+
+        class _Client:
+            def __init__(self) -> None:
+                self.chat = _Chat()
+
+            def close(self):
+                return None
+
+        from unittest.mock import patch
+
+        with patch("agents.observation.agent_observation._create_openai_client", return_value=_Client()):
+            payload = asyncio.run(
+                invoke_visual_verification_llm_response(
+                    model="qwen-3.8-27b",
+                    system_prompt="prompt",
+                    user_payload={"message_id": "msg-1"},
+                    image_data_url="data:image/jpeg;base64,abc",
+                    timeout_seconds=0.05,
+                )
+            )
+
+        self.assertEqual(payload["verification_status"], "supported")
+        self.assertNotIn("max_tokens", captured_kwargs)
+        self.assertNotIn("reasoning_effort", captured_kwargs)
+
+    def test_visual_invoke_forwards_optional_request_args(self) -> None:
+        captured_kwargs: dict = {}
+
+        class _Completions:
+            async def create(self, **kwargs):
+                captured_kwargs.update(kwargs)
+
+                class _Message:
+                    content = json.dumps(
+                        {
+                            "verification_status": "supported",
+                            "visibility_status": "visible",
+                            "identity_consistency": "consistent",
+                            "possible_id_switch": False,
+                            "confidence": 0.91,
+                            "uncertainty": [],
+                            "limitations": [],
+                            "supporting_evidence_refs": [],
+                            "contradicting_evidence_refs": [],
+                            "recommended_follow_up": None,
+                            "visual_content_inspected": True,
+                        }
+                    )
+
+                class _Choice:
+                    message = _Message()
+
+                class _Response:
+                    choices = [_Choice()]
+
+                return _Response()
+
+        class _Chat:
+            def __init__(self) -> None:
+                self.completions = _Completions()
+
+        class _Client:
+            def __init__(self) -> None:
+                self.chat = _Chat()
+
+            def close(self):
+                return None
+
+        from unittest.mock import patch
+
+        with patch("agents.observation.agent_observation._create_openai_client", return_value=_Client()):
+            payload = asyncio.run(
+                invoke_visual_verification_llm_response(
+                    model="qwen-3.8-27b",
+                    system_prompt="prompt",
+                    user_payload={"message_id": "msg-1"},
+                    image_data_url="data:image/jpeg;base64,abc",
+                    timeout_seconds=0.05,
+                    max_output_tokens=768,
+                    reasoning_effort="none",
+                )
+            )
+
+        self.assertEqual(payload["verification_status"], "supported")
+        self.assertEqual(captured_kwargs.get("max_tokens"), 768)
+        self.assertEqual(captured_kwargs.get("reasoning_effort"), "none")
+
 
 if __name__ == "__main__":
     unittest.main()
