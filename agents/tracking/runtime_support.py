@@ -45,6 +45,18 @@ def build_tracking_detection_id(track_key: str) -> str:
     return track_key
 
 
+def build_tracking_detection_reference(
+    *,
+    frame_timestamp: float,
+    detection_index: int,
+    detection_id: str,
+    yolo_track_id: str | None,
+) -> str:
+    yolo_segment = yolo_track_id if isinstance(yolo_track_id, str) and yolo_track_id.strip() else "none"
+    frame_microseconds = int(float(frame_timestamp) * 1_000_000)
+    return f"fdet-{frame_microseconds}-{int(detection_index)}-{detection_id}-{yolo_segment}"
+
+
 def normalize_position_metadata(
     position_kind: str,
     ground_coordinate_unit: str,
@@ -311,6 +323,7 @@ def commit_live_tracking_frame_state(
     tracks: dict[str, RadarTrackSnapshot],
     tracking_agent_observation: TrackingAgentObservation | None,
     trail_length: int,
+    display_identity_by_track: dict[str, dict[str, Any]] | None = None,
 ) -> None:
     with state.lock:
         state.latest_annotated_frame = annotated_frame
@@ -321,6 +334,11 @@ def commit_live_tracking_frame_state(
         state.detector_status = "running"
 
         state.active_tracks = tracks
+        state.latest_tracking_display_identity_by_track = (
+            dict(display_identity_by_track)
+            if isinstance(display_identity_by_track, dict)
+            else {}
+        )
         if tracking_agent_observation is not None:
             state.latest_tracking_agent_observation = tracking_agent_observation.to_dict()
         for track_key, snapshot in tracks.items():

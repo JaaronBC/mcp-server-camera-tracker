@@ -192,6 +192,7 @@ def draw_radar_panel(
     tracks: dict[str, RadarTrackSnapshot],
     trails: dict[str, deque[tuple[float, float]]],
     now: float,
+    display_identity_by_track: dict[str, dict] | None = None,
 ):
     panel = cv2.UMat(height, width, cv2.CV_8UC3).get()
     panel[:] = (15, 18, 22)
@@ -249,9 +250,13 @@ def draw_radar_panel(
                 status_label = "fresh"
 
             cv2.circle(panel, marker_point, 6, marker_color, -1)
+            display_track_label = _resolve_track_display_label(
+                track_id,
+                display_identity_by_track,
+            )
             cv2.putText(
                 panel,
-                f"{track_id} {status_label}",
+                f"{display_track_label} {status_label}",
                 (marker_point[0] + 8, marker_point[1] - 8),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.42,
@@ -281,7 +286,26 @@ def _read_dashboard_state_snapshot(state: SharedDashboardState) -> dict:
             },
             "last_obs_time": state.last_observation_time,
             "selected_track_id": state.selected_track_id,
+            "tracking_stable_identity_visualization_enabled": (
+                state.tracking_stable_identity_visualization_enabled
+            ),
+            "display_identity_by_track": dict(state.latest_tracking_display_identity_by_track),
         }
+
+
+def _resolve_track_display_label(
+    track_id: str,
+    display_identity_by_track: dict[str, dict] | None,
+) -> str:
+    if not isinstance(display_identity_by_track, dict):
+        return track_id
+    metadata = display_identity_by_track.get(track_id)
+    if not isinstance(metadata, dict):
+        return track_id
+    display_label = metadata.get("display_label")
+    if not isinstance(display_label, str) or not display_label.strip():
+        return track_id
+    return display_label.strip()
 
 
 def _resolve_assessment_display(
@@ -455,9 +479,15 @@ def _render_selected_track_details(
     radar_panel,
     panel_height: int,
     selected: RadarTrackSnapshot,
+    display_identity_by_track: dict[str, dict] | None,
 ) -> None:
+    selected_display_label = _resolve_track_display_label(
+        selected.track_id,
+        display_identity_by_track,
+    )
     detail_lines = [
-        f"Selected: {selected.track_id}",
+        f"Selected: {selected_display_label}",
+        f"ByteTrack: {selected.track_id}",
         f"timestamp: {selected.timestamp:.3f}",
         (
             "pixel: n/a"
@@ -533,6 +563,10 @@ def render_dashboard(state: SharedDashboardState) -> None:
         trails = snapshot["trails"]
         last_obs_time = snapshot["last_obs_time"]
         selected_track_id = snapshot["selected_track_id"]
+        stable_identity_visualization_enabled = snapshot[
+            "tracking_stable_identity_visualization_enabled"
+        ]
+        display_identity_by_track = snapshot["display_identity_by_track"]
 
         now = time.time()
         (
@@ -564,7 +598,18 @@ def render_dashboard(state: SharedDashboardState) -> None:
             input_error,
         )
 
-        radar_panel = draw_radar_panel(panel_width, panel_height, tracks, trails, now)
+        radar_panel = draw_radar_panel(
+            panel_width,
+            panel_height,
+            tracks,
+            trails,
+            now,
+            display_identity_by_track=(
+                display_identity_by_track
+                if stable_identity_visualization_enabled
+                else None
+            ),
+        )
         cv2.putText(
             radar_panel,
             "Ground-Plane Radar (relative units)",
@@ -601,7 +646,16 @@ def render_dashboard(state: SharedDashboardState) -> None:
                 selected_track_id = sorted(tracks.keys())[0]
 
             selected = tracks[selected_track_id]
-            _render_selected_track_details(radar_panel, panel_height, selected)
+            _render_selected_track_details(
+                radar_panel,
+                panel_height,
+                selected,
+                (
+                    display_identity_by_track
+                    if stable_identity_visualization_enabled
+                    else None
+                ),
+            )
 
         body = cv2.hconcat([webcam_panel, radar_panel])
         dashboard = cv2.vconcat([header, body])

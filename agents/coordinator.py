@@ -247,6 +247,23 @@ class AgentCoordinator:
         if proposal.position_conflict_flag and detection.position_kind == "calibrated_ground_plane":
             rejection_reasons.append("ground_position_conflict_with_calibrated_mapping")
 
+        if (
+            isinstance(proposal.detection_reference, str)
+            and isinstance(detection.detection_reference, str)
+            and proposal.detection_reference.strip()
+            and detection.detection_reference.strip()
+            and proposal.detection_reference != detection.detection_reference
+        ):
+            rejection_reasons.append("identity_detection_reference_mismatch")
+
+        identity_resolution_status = (
+            proposal.identity_resolution_status.strip()
+            if isinstance(proposal.identity_resolution_status, str)
+            else None
+        )
+        if isinstance(identity_resolution_status, str) and identity_resolution_status.startswith("unresolved_"):
+            rejection_reasons.append(identity_resolution_status)
+
         if not supporting_evidence:
             uncertainties.append("no_supporting_evidence")
 
@@ -265,6 +282,13 @@ class AgentCoordinator:
             rejection_reasons=rejection_reasons,
             uncertainties=uncertainties,
             supporting_evidence=supporting_evidence,
+            detection_reference=proposal.detection_reference,
+            proposed_app_identity_id=proposal.proposed_app_identity_id,
+            rejected_app_identity_ids=list(proposal.rejected_app_identity_ids),
+            identity_evidence_refs=list(proposal.identity_evidence_refs),
+            identity_snapshot_generation=proposal.identity_snapshot_generation,
+            identity_snapshot_version=proposal.identity_snapshot_version,
+            identity_resolution_status=proposal.identity_resolution_status,
         )
 
     def build_tracking_agent_observation(
@@ -338,6 +362,29 @@ class AgentCoordinator:
             if not self._is_nonempty_str(reason):
                 errors.append("invalid_claim_reason")
                 break
+
+        identity_claim = tracking_claims.identity_claim
+        if identity_claim is not None:
+            if not isinstance(identity_claim, dict):
+                errors.append("invalid_identity_claim_payload")
+                return
+
+            claim_id = identity_claim.get("claim_id")
+            detection_reference = identity_claim.get("detection_reference")
+            proposed_app_identity_id = identity_claim.get("proposed_app_identity_id")
+            claim_status = identity_claim.get("claim_status")
+            claim_usable = identity_claim.get("claim_usable")
+
+            if not self._is_nonempty_str(claim_id):
+                errors.append("invalid_identity_claim_id")
+            if not self._is_nonempty_str(detection_reference):
+                errors.append("invalid_identity_claim_detection_reference")
+            if proposed_app_identity_id is not None and not self._is_nonempty_str(proposed_app_identity_id):
+                errors.append("invalid_identity_claim_proposed_app_identity_id")
+            if claim_status is not None and not self._is_nonempty_str(claim_status):
+                errors.append("invalid_identity_claim_status")
+            if claim_usable is not None and not isinstance(claim_usable, bool):
+                errors.append("invalid_identity_claim_usable_flag")
 
     def validate_tracking_evidence_envelope(
         self,
@@ -529,6 +576,47 @@ class AgentCoordinator:
                 errors.append("contradicting_refs_not_subset_of_source_refs")
             if support_set & contradict_set:
                 errors.append("overlapping_supporting_and_contradicting_refs")
+
+            claim_payload = referenced_evidence.tracking_claims.identity_claim
+            if envelope.identity_claim_id is not None:
+                if not isinstance(claim_payload, dict):
+                    errors.append("identity_claim_missing_in_referenced_tracking_evidence")
+                else:
+                    if claim_payload.get("claim_id") != envelope.identity_claim_id:
+                        errors.append("identity_claim_id_mismatch")
+
+                    claim_detection_reference = claim_payload.get("detection_reference")
+                    if (
+                        isinstance(envelope.referenced_detection_reference, str)
+                        and envelope.referenced_detection_reference.strip()
+                        and claim_detection_reference != envelope.referenced_detection_reference
+                    ):
+                        errors.append("identity_claim_detection_reference_mismatch")
+
+                    claim_proposed_identity = claim_payload.get("proposed_app_identity_id")
+                    if (
+                        isinstance(envelope.referenced_proposed_app_identity_id, str)
+                        and envelope.referenced_proposed_app_identity_id.strip()
+                        and claim_proposed_identity != envelope.referenced_proposed_app_identity_id
+                    ):
+                        errors.append("identity_claim_proposed_identity_mismatch")
+
+                    claim_generation = claim_payload.get("identity_snapshot_generation")
+                    claim_version = claim_payload.get("identity_snapshot_version")
+                    if (
+                        envelope.referenced_identity_snapshot_generation is not None
+                        and claim_generation != envelope.referenced_identity_snapshot_generation
+                    ):
+                        errors.append("identity_claim_snapshot_generation_mismatch")
+                    if (
+                        envelope.referenced_identity_snapshot_version is not None
+                        and claim_version != envelope.referenced_identity_snapshot_version
+                    ):
+                        errors.append("identity_claim_snapshot_version_mismatch")
+
+                    claim_usable = claim_payload.get("claim_usable")
+                    if claim_usable is False:
+                        errors.append("identity_claim_marked_unusable")
 
         if now_timestamp is not None and max_verification_age_seconds is not None:
             if not self._is_number(now_timestamp):

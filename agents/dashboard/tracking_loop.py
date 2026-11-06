@@ -9,6 +9,7 @@ from typing import Any
 
 import cv2
 from ultralytics import YOLO
+from ultralytics.utils.plotting import Annotator, colors
 
 from agents.dashboard.config import CAPTURES_DIR
 from agents.tracking.calibration import GroundPlaneCalibration, load_ground_plane_calibration
@@ -29,11 +30,13 @@ from agents.tracking.runtime_support import (
     collect_tracking_runtime_observation_update,
     submit_tracking_runtime_candidates,
 )
+from agents.tracking.identity_registry import PersistentIdentityRegistry
 from agents.tracking.state_publisher import (
     build_tracking_frame_message,
     publish_tracking_frame_message,
     write_json_payload,
 )
+from .identity_reassociation_consumer import IdentityReassociationIntentConsumer
 
 from .config import (
     GROUND_CALIBRATION_PATH,
@@ -49,6 +52,19 @@ from .config import (
     TRACKING_MISSING_TRACK_GRACE_SECONDS,
     UDP_TRACKING_HOST,
     UDP_TRACKING_PORT,
+    IDENTITY_REGISTRY_ENABLED,
+    IDENTITY_REGISTRY_HISTORY_LIMIT,
+    IDENTITY_REGISTRY_TEMPORARY_LOSS_SECONDS,
+    IDENTITY_REGISTRY_RETIREMENT_SECONDS,
+    IDENTITY_REGISTRY_MAX_RETIRED,
+    IDENTITY_SNAPSHOT_BRIDGE_ENABLED,
+    TRACKING_IDENTITY_REASSOCIATION_ENABLED,
+    TRACKING_IDENTITY_REASSOCIATION_MAX_INTENTS_PER_POLL,
+    TRACKING_IDENTITY_REASSOCIATION_MAX_ACK_ENTRIES,
+    TRACKING_IDENTITY_REASSOCIATION_POLL_INTERVAL_SECONDS,
+    LATEST_TRACKING_IDENTITY_REASSOCIATION_INTENTS_PATH,
+    LATEST_TRACKING_IDENTITY_REASSOCIATION_ACK_LEDGER_PATH,
+    TRACKING_STABLE_IDENTITY_VISUALIZATION_ENABLED,
 )
 from .state import SharedDashboardState
 
@@ -153,12 +169,25 @@ def _publish_tracking_outputs(
     result,
     now: float,
     tracks,
+    tracking_candidates,
     tracking_agent_observation,
     trail_length: int,
     detections_for_file: list[dict],
     udp_socket,
+    stable_identity_visualization_enabled: bool,
+    display_identity_by_track: dict[str, dict[str, Any]] | None = None,
 ) -> None:
-    annotated = result.plot()
+    if stable_identity_visualization_enabled:
+        annotated = result.plot(labels=False)
+    else:
+        annotated = result.plot()
+    _apply_stable_identity_webcam_overlays(
+        frame=annotated,
+        tracking_candidates=tracking_candidates,
+        stable_identity_visualization_enabled=stable_identity_visualization_enabled,
+        display_identity_by_track=display_identity_by_track,
+        result_names=getattr(result, "names", None),
+    )
     commit_live_tracking_frame_state(
         state=state,
         now=now,
@@ -166,6 +195,7 @@ def _publish_tracking_outputs(
         tracks=tracks,
         tracking_agent_observation=tracking_agent_observation,
         trail_length=trail_length,
+        display_identity_by_track=display_identity_by_track,
     )
 
     publish_tracking_frame_message(
@@ -176,6 +206,240 @@ def _publish_tracking_outputs(
         udp_host=UDP_TRACKING_HOST,
         udp_port=UDP_TRACKING_PORT,
     )
+
+
+def _build_stable_identity_display_map(
+    *,
+    registry: PersistentIdentityRegistry | None,
+    tracking_candidates,
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    if registry is None:
+        return {}, {
+            "enabled": True,
+            "available": False,
+            "reason": "registry_unavailable",
+            "mapped_count": 0,
+            "conflict_count": 0,
+            "fallback_count": len(tracking_candidates),
+        }
+
+    visible_tracks = set()
+    for candidate in tracking_candidates:
+        track_id = getattr(candidate, "yolo_track_id", None)
+        if isinstance(track_id, str) and track_id.strip():
+            visible_tracks.add(track_id.strip())
+
+    display_map: dict[str, dict[str, Any]] = {}
+    provisional_count = 0
+    non_visible_status_count = 0
+
+    for track_id in sorted(visible_tracks):
+        app_identity_id = registry.get_identity_for_yolo_track(track_id)
+        if not isinstance(app_identity_id, str) or not app_identity_id:
+            continue
+
+        record = registry.get_record(app_identity_id)
+        if record is None:
+            continue
+        if record.status != "visible":
+            non_visible_status_count += 1
+            continue
+
+        provisional = bool(record.provisional)
+        if provisional:
+            provisional_count += 1
+        display_label = f"{app_identity_id} (P)" if provisional else app_identity_id
+        display_map[track_id] = {
+            "display_label": display_label,
+            "app_identity_id": app_identity_id,
+            "status": record.status,
+            "provisional": provisional,
+        }
+
+    owners: dict[str, str] = {}
+    conflicting_app_ids: set[str] = set()
+    for yolo_track_id, metadata in display_map.items():
+        app_identity_id = metadata.get("app_identity_id")
+        if not isinstance(app_identity_id, str) or not app_identity_id:
+            continue
+        prior_owner = owners.get(app_identity_id)
+        if prior_owner is None:
+            owners[app_identity_id] = yolo_track_id
+            continue
+        if prior_owner != yolo_track_id:
+            conflicting_app_ids.add(app_identity_id)
+
+    if conflicting_app_ids:
+        for yolo_track_id in list(display_map.keys()):
+            app_identity_id = display_map[yolo_track_id].get("app_identity_id")
+            if app_identity_id in conflicting_app_ids:
+                display_map.pop(yolo_track_id, None)
+
+    summary = {
+        "enabled": True,
+        "available": True,
+        "mapped_count": len(display_map),
+        "visible_track_count": len(visible_tracks),
+        "provisional_count": provisional_count,
+        "conflict_count": len(conflicting_app_ids),
+        "non_visible_status_count": non_visible_status_count,
+        "fallback_count": max(0, len(visible_tracks) - len(display_map)),
+    }
+    return display_map, summary
+
+
+def _update_stable_identity_display_mapping_if_enabled(
+    *,
+    state: SharedDashboardState,
+    tracking_candidates,
+) -> dict[str, dict[str, Any]]:
+    with state.lock:
+        enabled = bool(state.tracking_stable_identity_visualization_enabled)
+        registry_enabled = bool(state.tracking_identity_registry_enabled)
+        registry = state.tracking_identity_registry
+
+    if not enabled:
+        with state.lock:
+            state.latest_tracking_display_identity_by_track = {}
+            state.latest_tracking_display_identity_summary = {
+                "enabled": False,
+                "available": False,
+                "reason": "feature_disabled",
+            }
+        return {}
+
+    if not registry_enabled:
+        with state.lock:
+            state.latest_tracking_display_identity_by_track = {}
+            state.latest_tracking_display_identity_summary = {
+                "enabled": True,
+                "available": False,
+                "reason": "identity_registry_disabled",
+            }
+        return {}
+
+    display_map, summary = _build_stable_identity_display_map(
+        registry=registry,
+        tracking_candidates=tracking_candidates,
+    )
+    with state.lock:
+        state.latest_tracking_display_identity_by_track = display_map
+        state.latest_tracking_display_identity_summary = summary
+    return display_map
+
+
+def _apply_stable_identity_webcam_overlays(
+    *,
+    frame,
+    tracking_candidates,
+    stable_identity_visualization_enabled: bool,
+    display_identity_by_track: dict[str, dict[str, Any]] | None,
+    result_names: dict[int, str] | None = None,
+) -> None:
+    if not stable_identity_visualization_enabled:
+        return
+
+    annotator = Annotator(frame, line_width=None, font_size=None, pil=False)
+    class_index_by_name: dict[str, int] = {}
+    if isinstance(result_names, dict):
+        for class_index, class_name in result_names.items():
+            if isinstance(class_index, int) and isinstance(class_name, str):
+                class_index_by_name[class_name] = class_index
+
+    for candidate in tracking_candidates:
+        track_id = getattr(candidate, "yolo_track_id", None)
+        if not isinstance(track_id, str):
+            continue
+        metadata = (
+            display_identity_by_track.get(track_id)
+            if isinstance(display_identity_by_track, dict)
+            else None
+        )
+
+        display_label: str
+        if isinstance(metadata, dict):
+            mapped_label = metadata.get("display_label")
+            display_label = (
+                mapped_label
+                if isinstance(mapped_label, str) and mapped_label
+                else track_id
+            )
+        else:
+            display_label = track_id
+
+        class_name_raw = getattr(candidate, "label", None)
+        class_name = class_name_raw.strip() if isinstance(class_name_raw, str) and class_name_raw.strip() else "object"
+        class_index = class_index_by_name.get(class_name, 0)
+
+        confidence_value = getattr(candidate, "detection_confidence", None)
+        confidence_text = (
+            f"{float(confidence_value):.2f}"
+            if isinstance(confidence_value, (int, float))
+            else None
+        )
+
+        has_mapped_identity = isinstance(metadata, dict)
+        identity_label = display_label if has_mapped_identity else f"id:{track_id}"
+
+        label_parts = [class_name, identity_label]
+        if isinstance(confidence_text, str):
+            label_parts.append(confidence_text)
+        rendered_label = " ".join(label_parts)
+
+        pixel_bbox = getattr(candidate, "pixel_bbox", None)
+        if pixel_bbox is None:
+            continue
+
+        frame_height, frame_width = frame.shape[:2]
+        x1 = int(max(0.0, float(pixel_bbox.x1)))
+        y1 = int(max(0.0, float(pixel_bbox.y1)))
+        x1 = min(max(0, x1), max(0, frame_width - 1))
+        y_text = max(2, y1 - 2)
+        y_text = min(y_text, max(0, frame_height - 1))
+
+        label_color = colors(class_index, True)
+        annotator.text(
+            (x1, y_text),
+            rendered_label,
+            txt_color=(255, 255, 255),
+            anchor="bottom",
+            box_color=label_color,
+        )
+
+
+def _update_identity_registry_if_enabled(
+    *,
+    state: SharedDashboardState,
+    now: float,
+    tracking_candidates,
+) -> None:
+    with state.lock:
+        registry_enabled = bool(state.tracking_identity_registry_enabled)
+        registry = state.tracking_identity_registry
+
+    if not registry_enabled or registry is None:
+        return
+
+    try:
+        summary = registry.process_detections(
+            now=now,
+            detections=tracking_candidates,
+        )
+    except Exception:
+        summary = {
+            "enabled": True,
+            "error": "identity_registry_update_failed",
+        }
+
+    with state.lock:
+        state.latest_tracking_identity_registry_summary = summary
+        if isinstance(summary, dict):
+            generation = summary.get("generation")
+            if isinstance(generation, int):
+                state.tracking_identity_registry_generation = generation
+            version = summary.get("version")
+            if isinstance(version, int):
+                state.tracking_identity_registry_version = version
 
 
 def _package_tracking_evidence_if_enabled(
@@ -221,6 +485,38 @@ def _package_tracking_evidence_if_enabled(
         if bool(packaged.validation.get("valid", False)):
             with state.lock:
                 state.latest_tracking_evidence_message_by_track[packaged.envelope.track_id] = packaged.envelope.message_id
+
+
+def _consume_identity_reassociation_if_enabled(
+    *,
+    state: SharedDashboardState,
+    now: float,
+    tracking_candidates,
+) -> None:
+    with state.lock:
+        consumer = state.tracking_identity_reassociation_consumer
+        enabled = bool(state.tracking_identity_reassociation_enabled)
+        registry = state.tracking_identity_registry
+
+    if not enabled or consumer is None:
+        return
+
+    try:
+        summary = consumer.poll_and_apply(
+            registry=registry,
+            tracking_candidates=tracking_candidates,
+            now_timestamp=now,
+        )
+    except Exception:
+        summary = {
+            "enabled": True,
+            "skipped": True,
+            "reason": "reassociation_consumer_failed",
+            "error": "reassociation_consumer_failed",
+        }
+
+    with state.lock:
+        state.latest_tracking_identity_reassociation_summary = summary
 
 
 def _consume_tracking_observation_feedback(
@@ -606,12 +902,46 @@ def _initialize_tracking_runtime(
                 max(0.1, TRACKING_MAX_EFFECTIVE_HORIZON_SECONDS),
             ),
         )
+        identity_registry = None
+        if IDENTITY_REGISTRY_ENABLED:
+            identity_registry = PersistentIdentityRegistry(
+                max_history_per_identity=IDENTITY_REGISTRY_HISTORY_LIMIT,
+                temporary_loss_seconds=IDENTITY_REGISTRY_TEMPORARY_LOSS_SECONDS,
+                retirement_seconds=IDENTITY_REGISTRY_RETIREMENT_SECONDS,
+                max_retired_records=IDENTITY_REGISTRY_MAX_RETIRED,
+            )
+        identity_reassociation_consumer = IdentityReassociationIntentConsumer(
+            intents_path=LATEST_TRACKING_IDENTITY_REASSOCIATION_INTENTS_PATH,
+            ack_ledger_path=LATEST_TRACKING_IDENTITY_REASSOCIATION_ACK_LEDGER_PATH,
+            evidence_root_dir=CAPTURES_DIR / "tracking_evidence",
+            enabled=TRACKING_IDENTITY_REASSOCIATION_ENABLED,
+            max_intents_per_poll=TRACKING_IDENTITY_REASSOCIATION_MAX_INTENTS_PER_POLL,
+            max_ack_entries=TRACKING_IDENTITY_REASSOCIATION_MAX_ACK_ENTRIES,
+            min_poll_interval_seconds=TRACKING_IDENTITY_REASSOCIATION_POLL_INTERVAL_SECONDS,
+        )
         with state.lock:
             state.tracking_agent_model = tracking_agent.model
             state.tracking_evidence_store = evidence_store
             state.tracking_evidence_packager = evidence_packager
             state.tracking_feedback_consumer = feedback_consumer
             state.tracking_estimate_engine = estimate_engine
+            state.tracking_identity_registry_enabled = IDENTITY_REGISTRY_ENABLED
+            state.tracking_identity_registry = identity_registry
+            state.tracking_identity_registry_generation = 0
+            state.tracking_identity_registry_version = 0
+            state.latest_tracking_identity_registry_summary = None
+            state.tracking_identity_snapshot_bridge_enabled = IDENTITY_SNAPSHOT_BRIDGE_ENABLED
+            state.latest_tracking_identity_snapshot_metadata = None
+            state.latest_tracking_identity_snapshot_source_version = None
+            state.latest_tracking_identity_snapshot_published_at = 0.0
+            state.tracking_identity_reassociation_enabled = TRACKING_IDENTITY_REASSOCIATION_ENABLED
+            state.tracking_identity_reassociation_consumer = identity_reassociation_consumer
+            state.latest_tracking_identity_reassociation_summary = None
+            state.tracking_stable_identity_visualization_enabled = (
+                TRACKING_STABLE_IDENTITY_VISUALIZATION_ENABLED
+            )
+            state.latest_tracking_display_identity_by_track = {}
+            state.latest_tracking_display_identity_summary = None
             state.tracking_missing_track_grace_seconds = min(
                 10.0,
                 max(0.1, TRACKING_MISSING_TRACK_GRACE_SECONDS),
@@ -708,6 +1038,23 @@ def run_live_tracking_loop(
                 max_ground_z=MAX_GROUND_Z,
             )
 
+            _consume_identity_reassociation_if_enabled(
+                state=state,
+                now=now,
+                tracking_candidates=tracking_candidates,
+            )
+
+            _update_identity_registry_if_enabled(
+                state=state,
+                now=now,
+                tracking_candidates=tracking_candidates,
+            )
+
+            display_identity_by_track = _update_stable_identity_display_mapping_if_enabled(
+                state=state,
+                tracking_candidates=tracking_candidates,
+            )
+
             tracking_agent_observation = _apply_tracking_agent_runtime_cycle(
                 state=state,
                 tracking_runtime=tracking_runtime,
@@ -748,10 +1095,15 @@ def run_live_tracking_loop(
                 result=result,
                 now=now,
                 tracks=tracks,
+                tracking_candidates=tracking_candidates,
                 tracking_agent_observation=tracking_agent_observation,
                 trail_length=RADAR_TRAIL_LENGTH,
                 detections_for_file=detections_for_file,
                 udp_socket=udp_socket,
+                stable_identity_visualization_enabled=bool(
+                    TRACKING_STABLE_IDENTITY_VISUALIZATION_ENABLED
+                ),
+                display_identity_by_track=display_identity_by_track,
             )
     except Exception as error:
         with state.lock:
@@ -772,6 +1124,21 @@ def run_live_tracking_loop(
             state.latest_tracking_lost_evidence_message_by_track = {}
             state.latest_tracking_lost_track_expires_at_by_track = {}
             state.latest_tracking_estimate_proposals = None
+            state.tracking_identity_registry_enabled = False
+            state.tracking_identity_registry = None
+            state.tracking_identity_registry_generation = 0
+            state.tracking_identity_registry_version = 0
+            state.latest_tracking_identity_registry_summary = None
+            state.tracking_identity_snapshot_bridge_enabled = False
+            state.latest_tracking_identity_snapshot_metadata = None
+            state.latest_tracking_identity_snapshot_source_version = None
+            state.latest_tracking_identity_snapshot_published_at = 0.0
+            state.tracking_identity_reassociation_enabled = False
+            state.tracking_identity_reassociation_consumer = None
+            state.latest_tracking_identity_reassociation_summary = None
+            state.tracking_stable_identity_visualization_enabled = False
+            state.latest_tracking_display_identity_by_track = {}
+            state.latest_tracking_display_identity_summary = None
         if evidence_store is not None:
             evidence_store.shutdown()
         try:

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import tempfile
 import unittest
 
 from agents.contracts import BoundingBox, DetectionCandidate
@@ -9,6 +11,30 @@ from tools import tracking_agent_phase1_validation as phase1
 
 
 class TestTrackingAgentPhase1ObservationCollaboration(unittest.TestCase):
+    def _budget_env_for_temp_dir(
+        self,
+        temp_dir: str,
+        *,
+        total_limit: str,
+        tracking_limit: str,
+        observation_visual_limit: str,
+        observation_text_limit: str = "0",
+        reasoning_text_limit: str = "0",
+    ) -> dict[str, str]:
+        budget_root = os.path.join(temp_dir, "budget")
+        os.makedirs(budget_root, exist_ok=True)
+        return {
+            "PROVIDER_CALL_BUDGET_ENABLED": "1",
+            "PROVIDER_CALL_BUDGET_TOTAL_LIMIT": total_limit,
+            "PROVIDER_CALL_BUDGET_TRACKING_VLM_LIMIT": tracking_limit,
+            "PROVIDER_CALL_BUDGET_OBSERVATION_VISUAL_LIMIT": observation_visual_limit,
+            "PROVIDER_CALL_BUDGET_OBSERVATION_TEXT_LIMIT": observation_text_limit,
+            "PROVIDER_CALL_BUDGET_REASONING_TEXT_LIMIT": reasoning_text_limit,
+            "PROVIDER_CALL_BUDGET_STATE_PATH": os.path.join(budget_root, "provider_call_budget_state.json"),
+            "PROVIDER_CALL_BUDGET_LOCK_PATH": os.path.join(budget_root, "provider_call_budget_state.lock"),
+            "PROVIDER_CALL_BUDGET_LOG_PATH": os.path.join(budget_root, "provider_call_budget_events.jsonl"),
+        }
+
     def _make_detection(self) -> DetectionCandidate:
         return DetectionCandidate(
             detection_id="det-amb-1",
@@ -111,6 +137,641 @@ class TestTrackingAgentPhase1ObservationCollaboration(unittest.TestCase):
             "visual_content_inspected": True,
         }
 
+    def _inconclusive_verdict(self) -> dict:
+        return {
+            "verification_status": "inconclusive",
+            "visibility_status": "partial",
+            "identity_consistency": "unknown",
+            "possible_id_switch": True,
+            "confidence": 0.39,
+            "uncertainty": [],
+            "limitations": ["crossing"],
+            "supporting_evidence_refs": [],
+            "contradicting_evidence_refs": [],
+            "recommended_follow_up": "collect_more_context",
+            "visual_content_inspected": True,
+        }
+
+    def test_occlusion_then_reappearance_continuity_can_be_corrected_without_fabrication(self) -> None:
+        detection = self._make_detection_candidate(
+            detection_id="det-or1",
+            yolo_track_id="track-B",
+            relative_depth=0.5,
+            ground_x=1.05,
+            ground_z=3.98,
+        )
+        scenario_metadata = self._scenario_metadata_with_tracks(
+            phase1.SCENARIO_YOLO_ID_SWAP,
+            [
+                self._history_record(track_id="track-A", depth_median=0.5, last_ground_x=1.0, last_ground_z=4.0),
+                self._history_record(track_id="track-B", depth_median=0.45, last_ground_x=2.0, last_ground_z=4.4),
+            ],
+        )
+        scenario_metadata["expected_correct_associations"] = {"det-or1": "track-A"}
+        proposals = {
+            "det-or1": {
+                "detection_id": "det-or1",
+                "proposed_track_id": "track-B",
+                "association_confidence": 0.52,
+                "occlusion_likelihood": 0.86,
+                "id_switch_risk": 0.82,
+                "depth_conflict_flag": False,
+                "position_conflict_flag": True,
+                "uncertainties": ["occlusion_reappearance", "possible_id_switch"],
+                "supporting_evidence": ["appearance_match"],
+                "alternative_track_candidates": [{"track_id": "track-A", "association_confidence": 0.83}],
+            }
+        }
+        updates = [
+            {
+                "detection_id": "det-or1",
+                "resolved_track_id": "track-B",
+                "accepted": True,
+                "rejection_reasons": [],
+                "uncertainties": ["possible_id_switch"],
+                "supporting_evidence": ["appearance_match"],
+            }
+        ]
+
+        async def _tracking_reconsideration_invoker(**_kwargs):
+            return {
+                "declined": False,
+                "revisions": [
+                    {
+                        "detection_id": "det-or1",
+                        "proposed_track_id": "track-A",
+                        "association_confidence": 0.84,
+                        "depth_conflict_flag": False,
+                        "position_conflict_flag": False,
+                        "uncertainties": ["occlusion_reappearance"],
+                        "supporting_evidence": ["history_motion_depth_alignment"],
+                    }
+                ],
+            }
+
+        async def _observation_invoker(**kwargs):
+            proposed_track_id = kwargs["user_payload"]["tracking_proposal"]["proposed_track_id"]
+            if proposed_track_id == "track-A":
+                return {
+                    "verification_status": "supported",
+                    "visibility_status": "partial",
+                    "identity_consistency": "consistent",
+                    "possible_id_switch": False,
+                    "confidence": 0.88,
+                    "uncertainty": ["brief_occlusion"],
+                    "limitations": ["single_frame_view"],
+                    "supporting_evidence_refs": ["evidence://reappearance_match"],
+                    "contradicting_evidence_refs": [],
+                    "recommended_follow_up": "monitor_next_frame",
+                    "visual_content_inspected": True,
+                }
+            return {
+                "verification_status": "inconclusive",
+                "visibility_status": "partial",
+                "identity_consistency": "unknown",
+                "possible_id_switch": True,
+                "confidence": 0.41,
+                "uncertainty": ["occlusion_reappearance"],
+                "limitations": ["crossing"],
+                "supporting_evidence_refs": [],
+                "contradicting_evidence_refs": [],
+                "recommended_follow_up": "run_reconsideration",
+                "visual_content_inspected": True,
+            }
+
+        result = asyncio.run(
+            phase1._run_observation_collaboration_diagnostic(
+                detections=[detection],
+                proposal_by_detection=proposals,
+                updates=updates,
+                scenario_metadata=scenario_metadata,
+                event_reasons=["occlusion_reappearance", "possible_id_switch"],
+                frame_reference="data:image/jpeg;base64,abc",
+                mode=phase1.OBSERVATION_VERIFICATION_MODE_MOCK,
+                observation_model="qwen-3.8-27b",
+                observation_timeout_seconds=6.0,
+                invoker=_observation_invoker,
+                reconsideration_invoker=_tracking_reconsideration_invoker,
+                tracking_reconsideration_mode=phase1.TRACKING_RECONSIDERATION_MODE_LIVE,
+            )
+        )
+
+        det = result["per_detection"]["det-or1"]
+        status = det["diagnostic_tracking_evaluation"]
+        self.assertEqual(det["identity_origin"], "revised_tracking")
+        self.assertTrue(det["tracking_reconsideration"]["considered"])
+        self.assertTrue(det["tracking_reconsideration"]["revised"])
+        self.assertEqual(status["initial_expected_identity_status"], "mismatched_expected_identity")
+        self.assertEqual(status["final_expected_identity_status"], "matched_expected_identity")
+        self.assertTrue(status["reconsideration_proposed_track_id_changed"])
+        self.assertTrue(status["incorrect_initial_corrected_after_feedback"])
+        self.assertEqual(det["diagnostic_adjudication_final"]["classification"], "accepted")
+        self.assertEqual(
+            det["tracking_reconsideration"]["observation_agent_verdict_round2"]["visibility_status"],
+            "partial",
+        )
+        self.assertEqual(
+            det["tracking_reconsideration"]["observation_request_payload_round2"]["detection_measurements"]["detection_id"],
+            "det-or1",
+        )
+        self.assertEqual(
+            det["tracking_reconsideration"]["revised_tracking_proposal"]["proposed_track_id"],
+            "track-A",
+        )
+        self.assertEqual(
+            det["tracking_reconsideration"]["observation_request_payload_round2"]["independent_history"]["for_proposed_track"]["track_id"],
+            "track-A",
+        )
+        self.assertFalse(det["tracking_reconsideration"]["live_state_mutation"])
+        self.assertFalse(det["diagnostic_alternative_identity_recovery"]["live_state_mutation"])
+        self.assertIn("deterministic_validation", det["evidence_provenance"])
+        self.assertIn("observation_llm_verdict", det["evidence_provenance"])
+
+    def test_reappearance_ambiguous_identity_remains_unresolved(self) -> None:
+        detection = self._make_detection_candidate(
+            detection_id="det-ra1",
+            yolo_track_id="track-A",
+            relative_depth=0.52,
+            ground_x=1.45,
+            ground_z=3.85,
+        )
+        scenario_metadata = self._scenario_metadata_with_tracks(
+            phase1.SCENARIO_YOLO_ID_SWAP,
+            [
+                self._history_record(track_id="track-A", depth_median=0.5, last_ground_x=1.0, last_ground_z=4.0),
+                self._history_record(track_id="track-B", depth_median=0.51, last_ground_x=1.6, last_ground_z=3.9),
+            ],
+        )
+        scenario_metadata["expected_correct_associations"] = {"det-ra1": "track-A"}
+        proposals = {
+            "det-ra1": {
+                "detection_id": "det-ra1",
+                "proposed_track_id": "track-A",
+                "association_confidence": 0.63,
+                "occlusion_likelihood": 0.77,
+                "id_switch_risk": 0.69,
+                "depth_conflict_flag": False,
+                "position_conflict_flag": True,
+                "uncertainties": ["occlusion_reappearance", "identity_ambiguous"],
+                "supporting_evidence": ["partial_motion_match"],
+                "alternative_track_candidates": [{"track_id": "track-B", "association_confidence": 0.61}],
+            }
+        }
+        updates = [
+            {
+                "detection_id": "det-ra1",
+                "resolved_track_id": "track-A",
+                "accepted": True,
+                "rejection_reasons": [],
+                "uncertainties": ["identity_ambiguous"],
+                "supporting_evidence": ["partial_motion_match"],
+            }
+        ]
+
+        async def _ambiguous_invoker(**_kwargs):
+            return {
+                "verification_status": "inconclusive",
+                "visibility_status": "partial",
+                "identity_consistency": "unknown",
+                "possible_id_switch": True,
+                "confidence": 0.34,
+                "uncertainty": ["reappearance_overlap", "identity_ambiguous"],
+                "limitations": ["insufficient_distinctive_features"],
+                "supporting_evidence_refs": [],
+                "contradicting_evidence_refs": [],
+                "recommended_follow_up": "collect_additional_frames",
+                "visual_content_inspected": True,
+            }
+
+        result = asyncio.run(
+            phase1._run_observation_collaboration_diagnostic(
+                detections=[detection],
+                proposal_by_detection=proposals,
+                updates=updates,
+                scenario_metadata=scenario_metadata,
+                event_reasons=["occlusion_reappearance", "identity_ambiguous"],
+                frame_reference="data:image/jpeg;base64,abc",
+                mode=phase1.OBSERVATION_VERIFICATION_MODE_MOCK,
+                observation_model="qwen-3.8-27b",
+                observation_timeout_seconds=6.0,
+                invoker=_ambiguous_invoker,
+                tracking_reconsideration_mode=phase1.TRACKING_RECONSIDERATION_MODE_OFF,
+            )
+        )
+
+        det = result["per_detection"]["det-ra1"]
+        self.assertEqual(det["observation_agent_verdict"]["identity_consistency"], "unknown")
+        self.assertEqual(det["observation_agent_verdict"]["verification_status"], "inconclusive")
+        self.assertEqual(det["diagnostic_adjudication_final"]["classification"], "unresolved")
+        self.assertIn("observation_inconclusive", det["diagnostic_adjudication_final"]["reason_codes"])
+        self.assertTrue(det["tracking_reconsideration"]["considered"])
+        self.assertFalse(det["tracking_reconsideration"]["revised"])
+        self.assertTrue(det["deterministic_audit"]["measurement_checks"]["motion_measurement_consistent"])
+        self.assertEqual(
+            det["observation_verification_dimensions"]["overall_observation_verification"]["status"],
+            phase1.VERIFICATION_DIMENSION_UNSUPPORTED,
+        )
+
+    def test_left_fov_with_no_current_detection_preserves_history_and_invents_nothing(self) -> None:
+        history_records = [
+            self._history_record(track_id="track-left", depth_median=0.49, last_ground_x=2.6, last_ground_z=5.2)
+        ]
+        scenario_metadata = self._scenario_metadata_with_tracks(
+            phase1.SCENARIO_BASELINE,
+            history_records,
+        )
+        scenario_metadata["expected_correct_associations"] = {}
+        history_snapshot = json.loads(json.dumps(scenario_metadata[phase1.INDEPENDENT_TRACK_HISTORY_KEY]))
+        invocation_count = 0
+
+        async def _must_not_invoke(**_kwargs):
+            nonlocal invocation_count
+            invocation_count += 1
+            return self._inconclusive_verdict()
+
+        result = asyncio.run(
+            phase1._run_observation_collaboration_diagnostic(
+                detections=[],
+                proposal_by_detection={},
+                updates=[],
+                scenario_metadata=scenario_metadata,
+                event_reasons=["track_left_fov"],
+                frame_reference="data:image/jpeg;base64,abc",
+                mode=phase1.OBSERVATION_VERIFICATION_MODE_MOCK,
+                observation_model="qwen-3.8-27b",
+                observation_timeout_seconds=6.0,
+                invoker=_must_not_invoke,
+                tracking_reconsideration_mode=phase1.TRACKING_RECONSIDERATION_MODE_OFF,
+            )
+        )
+
+        self.assertEqual(invocation_count, 0)
+        self.assertEqual(result["per_detection"], {})
+        self.assertEqual(result["summary"]["proposal_count"], 0)
+        self.assertEqual(result["summary"]["observation_invocation_status_counts"], {})
+        self.assertEqual(
+            result["summary"]["diagnostic_final_adjudication_counts"],
+            {"accepted": 0, "rejected": 0, "unresolved": 0},
+        )
+        self.assertEqual(
+            scenario_metadata[phase1.INDEPENDENT_TRACK_HISTORY_KEY],
+            history_snapshot,
+        )
+
+    def test_observation_schema_error_reports_missing_keys_and_response_key_inventory(self) -> None:
+        async def _invalid_schema_invoker(**_kwargs):
+            return {
+                "verification_status": "supported",
+                "visibility_status": "visible",
+                "identity_consistency": "consistent",
+                "possible_id_switch": False,
+                "confidence": 0.91,
+                "uncertainty": [],
+                "limitations": [],
+                "supporting_evidence_refs": ["evidence://motion"],
+                "contradicting_evidence_refs": [],
+                "recommended_follow_up": None,
+            }
+
+        result = asyncio.run(
+            phase1._invoke_observation_agent_verdict(
+                mode=phase1.OBSERVATION_VERIFICATION_MODE_LIVE,
+                observation_model="qwen-3.8-27b",
+                observation_system_prompt=phase1.DEFAULT_OBSERVATION_VISUAL_SYSTEM_PROMPT,
+                user_payload={"task": "schema-check"},
+                frame_reference="data:image/jpeg;base64,abc",
+                timeout_seconds=6.0,
+                invoker=_invalid_schema_invoker,
+            )
+        )
+
+        invocation = result["invocation"]
+        self.assertEqual(invocation["status"], "error")
+        self.assertEqual(invocation["error"], "observation_response_schema_invalid")
+        self.assertIn("visual_content_inspected", invocation["missing_keys"])
+        self.assertIn("verification_status", invocation["response_top_level_keys"])
+        self.assertNotIn("visual_content_inspected", invocation["response_top_level_keys"])
+        self.assertIsNone(result["verdict"])
+
+    def test_diagnostic_tracking_status_correct_initial_with_unchanged_reconsideration(self) -> None:
+        detection = self._make_detection_candidate(
+            detection_id="det-cu1",
+            yolo_track_id="track-B",
+            relative_depth=0.5,
+            ground_x=1.0,
+            ground_z=4.0,
+        )
+        scenario_metadata = self._scenario_metadata_with_tracks(
+            phase1.SCENARIO_YOLO_ID_SWAP,
+            [
+                self._history_record(track_id="track-A", depth_median=0.5, last_ground_x=1.0, last_ground_z=4.0),
+                self._history_record(track_id="track-B", depth_median=0.45, last_ground_x=2.0, last_ground_z=4.4),
+            ],
+        )
+        scenario_metadata["expected_correct_associations"] = {"det-cu1": "track-A"}
+        proposals = {
+            "det-cu1": {
+                "detection_id": "det-cu1",
+                "proposed_track_id": "track-A",
+                "association_confidence": 0.82,
+                "occlusion_likelihood": 0.35,
+                "id_switch_risk": 0.62,
+                "depth_conflict_flag": False,
+                "position_conflict_flag": False,
+                "uncertainties": ["crossing_targets"],
+                "supporting_evidence": ["motion_continuity", "depth_consistency"],
+            }
+        }
+        updates = [
+            {
+                "detection_id": "det-cu1",
+                "resolved_track_id": "track-A",
+                "accepted": True,
+                "rejection_reasons": [],
+                "uncertainties": ["crossing_targets"],
+                "supporting_evidence": ["motion_continuity", "depth_consistency"],
+            }
+        ]
+
+        async def _tracking_reconsideration_invoker(**_kwargs):
+            return {
+                "declined": False,
+                "revisions": [
+                    {
+                        "detection_id": "det-cu1",
+                        "proposed_track_id": "track-A",
+                        "association_confidence": 0.84,
+                        "depth_conflict_flag": False,
+                        "position_conflict_flag": False,
+                        "uncertainties": ["crossing_targets", "yolo_identity_mismatch"],
+                        "supporting_evidence": ["history_motion_depth_alignment"],
+                    }
+                ],
+            }
+
+        async def _observation_invoker(**kwargs):
+            proposal = kwargs["user_payload"]["tracking_proposal"]
+            if proposal["association_confidence"] >= 0.84:
+                return self._supported_verdict()
+            return self._inconclusive_verdict()
+
+        result = asyncio.run(
+            phase1._run_observation_collaboration_diagnostic(
+                detections=[detection],
+                proposal_by_detection=proposals,
+                updates=updates,
+                scenario_metadata=scenario_metadata,
+                event_reasons=["crossing_targets"],
+                frame_reference="data:image/jpeg;base64,abc",
+                mode=phase1.OBSERVATION_VERIFICATION_MODE_MOCK,
+                observation_model="qwen-3.8-27b",
+                observation_timeout_seconds=6.0,
+                invoker=_observation_invoker,
+                reconsideration_invoker=_tracking_reconsideration_invoker,
+            )
+        )
+
+        det = result["per_detection"]["det-cu1"]
+        status = det["diagnostic_tracking_evaluation"]
+        self.assertTrue(det["tracking_reconsideration"]["revised"])
+        self.assertEqual(det["identity_origin"], "revised_tracking")
+        self.assertEqual(status["initial_expected_identity_status"], "matched_expected_identity")
+        self.assertEqual(status["final_expected_identity_status"], "matched_expected_identity")
+        self.assertFalse(status["reconsideration_proposed_track_id_changed"])
+        self.assertFalse(status["incorrect_initial_corrected_after_feedback"])
+        self.assertTrue(status["observation_independently_supported_final_association"])
+
+    def test_diagnostic_tracking_status_incorrect_initial_corrected_after_feedback(self) -> None:
+        detections = [
+            self._make_detection_candidate(detection_id="det-cf1", yolo_track_id="track-B", relative_depth=0.5, ground_x=1.0, ground_z=4.0),
+            self._make_detection_candidate(detection_id="det-cf2", yolo_track_id="track-A", relative_depth=0.45, ground_x=2.0, ground_z=4.4),
+        ]
+        scenario_metadata = self._scenario_metadata_with_tracks(
+            phase1.SCENARIO_YOLO_ID_SWAP,
+            [
+                self._history_record(track_id="track-A", depth_median=0.5, last_ground_x=1.0, last_ground_z=4.0),
+                self._history_record(track_id="track-B", depth_median=0.45, last_ground_x=2.0, last_ground_z=4.4),
+            ],
+        )
+        scenario_metadata["expected_correct_associations"] = {
+            "det-cf1": "track-A",
+            "det-cf2": "track-B",
+        }
+        proposals = {
+            "det-cf1": {"detection_id": "det-cf1", "proposed_track_id": "track-B", "association_confidence": 0.51, "occlusion_likelihood": 0.5, "id_switch_risk": 0.84, "depth_conflict_flag": False, "position_conflict_flag": True, "uncertainties": ["crossing_targets"], "supporting_evidence": ["appearance_match"], "alternative_track_candidates": [{"track_id": "track-A", "association_confidence": 0.82}]},
+            "det-cf2": {"detection_id": "det-cf2", "proposed_track_id": "track-A", "association_confidence": 0.5, "occlusion_likelihood": 0.5, "id_switch_risk": 0.83, "depth_conflict_flag": False, "position_conflict_flag": True, "uncertainties": ["crossing_targets"], "supporting_evidence": ["appearance_match"], "alternative_track_candidates": [{"track_id": "track-B", "association_confidence": 0.81}]},
+        }
+        updates = [
+            {"detection_id": "det-cf1", "resolved_track_id": "track-B", "accepted": True, "rejection_reasons": [], "uncertainties": [], "supporting_evidence": ["appearance_match"]},
+            {"detection_id": "det-cf2", "resolved_track_id": "track-A", "accepted": True, "rejection_reasons": [], "uncertainties": [], "supporting_evidence": ["appearance_match"]},
+        ]
+
+        async def _tracking_reconsideration_invoker(**_kwargs):
+            return {
+                "declined": False,
+                "revisions": [
+                    {"detection_id": "det-cf1", "proposed_track_id": "track-A", "association_confidence": 0.83, "depth_conflict_flag": False, "position_conflict_flag": False, "uncertainties": [], "supporting_evidence": ["history_motion_depth_alignment"]},
+                    {"detection_id": "det-cf2", "proposed_track_id": "track-B", "association_confidence": 0.82, "depth_conflict_flag": False, "position_conflict_flag": False, "uncertainties": [], "supporting_evidence": ["history_motion_depth_alignment"]},
+                ],
+            }
+
+        async def _observation_invoker(**kwargs):
+            proposal = kwargs["user_payload"]["tracking_proposal"]
+            if proposal["association_confidence"] >= 0.8:
+                return self._supported_verdict()
+            return {
+                "verification_status": "contradicted",
+                "visibility_status": "visible",
+                "identity_consistency": "inconsistent",
+                "possible_id_switch": True,
+                "confidence": 0.88,
+                "uncertainty": [],
+                "limitations": ["crossing"],
+                "supporting_evidence_refs": [],
+                "contradicting_evidence_refs": ["evidence://motion"],
+                "recommended_follow_up": "run_reconsideration",
+                "visual_content_inspected": True,
+            }
+
+        result = asyncio.run(
+            phase1._run_observation_collaboration_diagnostic(
+                detections=detections,
+                proposal_by_detection=proposals,
+                updates=updates,
+                scenario_metadata=scenario_metadata,
+                event_reasons=["crossing_targets", "possible_id_switch"],
+                frame_reference="data:image/jpeg;base64,abc",
+                mode=phase1.OBSERVATION_VERIFICATION_MODE_MOCK,
+                observation_model="qwen-3.8-27b",
+                observation_timeout_seconds=6.0,
+                invoker=_observation_invoker,
+                reconsideration_invoker=_tracking_reconsideration_invoker,
+            )
+        )
+
+        self.assertEqual(result["summary"]["diagnostic_final_adjudication_counts"]["accepted"], 2)
+        self.assertEqual(result["summary"]["conflicting_final_assigned_track_ids"], [])
+        self.assertEqual(
+            result["summary"]["diagnostic_tracking_evaluation"]["incorrect_initial_corrected_after_feedback_count"],
+            2,
+        )
+        self.assertEqual(
+            result["summary"]["diagnostic_tracking_evaluation"]["reconsideration_track_id_changed_count"],
+            2,
+        )
+        self.assertEqual(
+            result["summary"]["diagnostic_tracking_evaluation"]["deterministic_recovery_contributed_count"],
+            0,
+        )
+
+        for detection_id in ("det-cf1", "det-cf2"):
+            payload = result["per_detection"][detection_id]
+            status = payload["diagnostic_tracking_evaluation"]
+            self.assertEqual(status["initial_expected_identity_status"], "mismatched_expected_identity")
+            self.assertEqual(status["final_expected_identity_status"], "matched_expected_identity")
+            self.assertTrue(status["reconsideration_proposed_track_id_changed"])
+            self.assertTrue(status["incorrect_initial_corrected_after_feedback"])
+            self.assertTrue(status["observation_independently_supported_final_association"])
+            self.assertFalse(status["deterministic_recovery_contributed"])
+            self.assertFalse(payload["tracking_reconsideration"]["live_state_mutation"])
+            self.assertFalse(payload["diagnostic_alternative_identity_recovery"]["live_state_mutation"])
+
+    def test_diagnostic_tracking_status_incorrect_identity_remains_incorrect(self) -> None:
+        detection = self._make_detection_candidate(
+            detection_id="det-ii1",
+            yolo_track_id="track-B",
+            relative_depth=0.5,
+            ground_x=1.0,
+            ground_z=4.0,
+        )
+        scenario_metadata = self._scenario_metadata_with_tracks(
+            phase1.SCENARIO_YOLO_ID_SWAP,
+            [
+                self._history_record(track_id="track-A", depth_median=0.5, last_ground_x=1.0, last_ground_z=4.0),
+                self._history_record(track_id="track-B", depth_median=0.45, last_ground_x=2.0, last_ground_z=4.4),
+            ],
+        )
+        scenario_metadata["expected_correct_associations"] = {"det-ii1": "track-A"}
+        proposals = {
+            "det-ii1": {
+                "detection_id": "det-ii1",
+                "proposed_track_id": "track-B",
+                "association_confidence": 0.53,
+                "occlusion_likelihood": 0.5,
+                "id_switch_risk": 0.82,
+                "depth_conflict_flag": False,
+                "position_conflict_flag": True,
+                "uncertainties": ["crossing_targets"],
+                "supporting_evidence": ["appearance_match"],
+                "alternative_track_candidates": [{"track_id": "track-A", "association_confidence": 0.81}],
+            }
+        }
+        updates = [
+            {
+                "detection_id": "det-ii1",
+                "resolved_track_id": "track-B",
+                "accepted": True,
+                "rejection_reasons": [],
+                "uncertainties": ["crossing_targets"],
+                "supporting_evidence": ["appearance_match"],
+            }
+        ]
+
+        async def _tracking_reconsideration_invoker(**_kwargs):
+            return {
+                "declined": False,
+                "revisions": [
+                    {
+                        "detection_id": "det-ii1",
+                        "proposed_track_id": "track-B",
+                        "association_confidence": 0.58,
+                        "depth_conflict_flag": False,
+                        "position_conflict_flag": True,
+                        "uncertainties": ["crossing_targets", "yolo_identity_mismatch"],
+                        "supporting_evidence": ["appearance_match"],
+                    }
+                ],
+            }
+
+        async def _observation_invoker(**_kwargs):
+            return self._inconclusive_verdict()
+
+        result = asyncio.run(
+            phase1._run_observation_collaboration_diagnostic(
+                detections=[detection],
+                proposal_by_detection=proposals,
+                updates=updates,
+                scenario_metadata=scenario_metadata,
+                event_reasons=["crossing_targets", "possible_id_switch"],
+                frame_reference="data:image/jpeg;base64,abc",
+                mode=phase1.OBSERVATION_VERIFICATION_MODE_MOCK,
+                observation_model="qwen-3.8-27b",
+                observation_timeout_seconds=6.0,
+                invoker=_observation_invoker,
+                reconsideration_invoker=_tracking_reconsideration_invoker,
+            )
+        )
+
+        status = result["per_detection"]["det-ii1"]["diagnostic_tracking_evaluation"]
+        self.assertEqual(status["initial_expected_identity_status"], "mismatched_expected_identity")
+        self.assertEqual(status["final_expected_identity_status"], "mismatched_expected_identity")
+        self.assertFalse(status["incorrect_initial_corrected_after_feedback"])
+        self.assertFalse(status["observation_independently_supported_final_association"])
+
+    def test_diagnostic_tracking_status_inconclusive_observation_not_independent_support(self) -> None:
+        detection = self._make_detection()
+        scenario_metadata = self._make_scenario_metadata()
+        scenario_metadata["expected_correct_associations"] = {"det-amb-1": "track-A"}
+        proposals = {
+            "det-amb-1": {
+                "detection_id": "det-amb-1",
+                "proposed_track_id": "track-A",
+                "association_confidence": 0.78,
+                "occlusion_likelihood": 0.55,
+                "id_switch_risk": 0.6,
+                "depth_conflict_flag": False,
+                "position_conflict_flag": False,
+                "uncertainties": ["crossing_targets"],
+                "supporting_evidence": ["motion_continuity", "depth_consistency"],
+            }
+        }
+        updates = [
+            {
+                "detection_id": "det-amb-1",
+                "resolved_track_id": "track-A",
+                "accepted": True,
+                "rejection_reasons": [],
+                "uncertainties": ["crossing_targets"],
+                "supporting_evidence": ["motion_continuity", "depth_consistency"],
+            }
+        ]
+
+        async def _observation_invoker(**_kwargs):
+            return self._inconclusive_verdict()
+
+        result = asyncio.run(
+            phase1._run_observation_collaboration_diagnostic(
+                detections=[detection],
+                proposal_by_detection=proposals,
+                updates=updates,
+                scenario_metadata=scenario_metadata,
+                event_reasons=["crossing_targets", "possible_id_switch"],
+                frame_reference="data:image/jpeg;base64,abc",
+                mode=phase1.OBSERVATION_VERIFICATION_MODE_MOCK,
+                observation_model="qwen-3.8-27b",
+                observation_timeout_seconds=6.0,
+                invoker=_observation_invoker,
+                tracking_reconsideration_mode=phase1.TRACKING_RECONSIDERATION_MODE_OFF,
+            )
+        )
+
+        payload = result["per_detection"]["det-amb-1"]
+        self.assertEqual(payload["diagnostic_adjudication_final"]["classification"], "unresolved")
+        self.assertIn("observation_inconclusive", payload["diagnostic_adjudication_final"]["reason_codes"])
+        self.assertFalse(
+            payload["diagnostic_tracking_evaluation"]["observation_independently_supported_final_association"]
+        )
+
     def test_build_observation_payload_includes_raw_measurements_history_and_proposal(self) -> None:
         detection = self._make_detection()
         scenario_metadata = self._make_scenario_metadata()
@@ -135,8 +796,221 @@ class TestTrackingAgentPhase1ObservationCollaboration(unittest.TestCase):
         self.assertEqual(payload["detection_measurements"]["detection_id"], "det-amb-1")
         self.assertEqual(payload["detection_measurements"]["relative_depth"], 0.52)
         self.assertEqual(
+            payload["evidence_mode"]["mode"],
+            phase1.EVIDENCE_MODE_SYNTHETIC_WITH_HISTORY,
+        )
+        self.assertEqual(
+            payload["evidence_mode"]["visual_identity_verifiability"],
+            phase1.VERIFICATION_DIMENSION_UNAVAILABLE,
+        )
+        self.assertEqual(
             payload["independent_history"]["for_proposed_track"]["track_id"],
             "track-A",
+        )
+
+    def test_synthetic_unverifiable_visual_identity_with_strong_numerics_stays_inconclusive(self) -> None:
+        detection = self._make_detection()
+        scenario_metadata = self._make_scenario_metadata()
+        scenario_metadata["expected_correct_associations"] = {"det-amb-1": "track-A"}
+        proposals = {
+            "det-amb-1": {
+                "detection_id": "det-amb-1",
+                "proposed_track_id": "track-A",
+                "association_confidence": 0.84,
+                "occlusion_likelihood": 0.45,
+                "id_switch_risk": 0.4,
+                "depth_conflict_flag": False,
+                "position_conflict_flag": False,
+                "uncertainties": ["crossing_targets"],
+                "supporting_evidence": ["motion_continuity", "depth_consistency"],
+            }
+        }
+        updates = [
+            {
+                "detection_id": "det-amb-1",
+                "resolved_track_id": "track-A",
+                "accepted": True,
+                "rejection_reasons": [],
+                "uncertainties": ["crossing_targets"],
+                "supporting_evidence": ["motion_continuity", "depth_consistency"],
+            }
+        ]
+
+        async def _inconclusive_invoker(**_kwargs):
+            return self._inconclusive_verdict()
+
+        result = asyncio.run(
+            phase1._run_observation_collaboration_diagnostic(
+                detections=[detection],
+                proposal_by_detection=proposals,
+                updates=updates,
+                scenario_metadata=scenario_metadata,
+                event_reasons=["crossing_targets", "possible_id_switch"],
+                frame_reference="data:image/jpeg;base64,abc",
+                mode=phase1.OBSERVATION_VERIFICATION_MODE_MOCK,
+                observation_model="qwen-3.8-27b",
+                observation_timeout_seconds=6.0,
+                invoker=_inconclusive_invoker,
+                tracking_reconsideration_mode=phase1.TRACKING_RECONSIDERATION_MODE_OFF,
+            )
+        )
+
+        det = result["per_detection"]["det-amb-1"]
+        dimensions = det["observation_verification_dimensions"]
+        self.assertEqual(
+            det["observation_request_payload"]["evidence_mode"]["mode"],
+            phase1.EVIDENCE_MODE_SYNTHETIC_WITH_HISTORY,
+        )
+        self.assertEqual(
+            dimensions["structured_motion_depth_consistency"]["status"],
+            phase1.VERIFICATION_DIMENSION_SUPPORTED,
+        )
+        self.assertEqual(
+            dimensions["visual_identity_verifiability"]["status"],
+            phase1.VERIFICATION_DIMENSION_UNAVAILABLE,
+        )
+        self.assertTrue(dimensions["visual_identity_verifiability"]["visual_content_inspected"])
+        self.assertFalse(dimensions["visual_identity_verifiability"]["real_camera_frame_available"])
+        self.assertEqual(
+            dimensions["overall_observation_verification"]["verification_status"],
+            "inconclusive",
+        )
+        self.assertEqual(
+            dimensions["overall_observation_verification"]["status"],
+            phase1.VERIFICATION_DIMENSION_UNSUPPORTED,
+        )
+        self.assertEqual(det["diagnostic_adjudication_final"]["classification"], "unresolved")
+        self.assertIn("observation_inconclusive", det["diagnostic_adjudication_final"]["reason_codes"])
+        self.assertFalse(det["tracking_reconsideration"]["live_state_mutation"])
+        self.assertFalse(det["diagnostic_alternative_identity_recovery"]["live_state_mutation"])
+        self.assertEqual(result["summary"]["diagnostic_final_adjudication_counts"]["accepted"], 0)
+
+    def test_schema_invalid_observation_is_not_upgraded_to_accepted(self) -> None:
+        detection = self._make_detection()
+        scenario_metadata = self._make_scenario_metadata()
+        scenario_metadata["expected_correct_associations"] = {"det-amb-1": "track-A"}
+        proposals = {
+            "det-amb-1": {
+                "detection_id": "det-amb-1",
+                "proposed_track_id": "track-A",
+                "association_confidence": 0.86,
+                "occlusion_likelihood": 0.3,
+                "id_switch_risk": 0.35,
+                "depth_conflict_flag": False,
+                "position_conflict_flag": False,
+                "uncertainties": [],
+                "supporting_evidence": ["motion_continuity", "depth_consistency"],
+            }
+        }
+        updates = [
+            {
+                "detection_id": "det-amb-1",
+                "resolved_track_id": "track-A",
+                "accepted": True,
+                "rejection_reasons": [],
+                "uncertainties": [],
+                "supporting_evidence": ["motion_continuity", "depth_consistency"],
+            }
+        ]
+
+        async def _schema_invalid_invoker(**_kwargs):
+            return {
+                "verification_status": "supported",
+                "visibility_status": "visible",
+                "identity_consistency": "consistent",
+                "possible_id_switch": False,
+                "confidence": 0.9,
+                "uncertainty": [],
+                "limitations": [],
+                "supporting_evidence_refs": ["evidence://motion"],
+                "contradicting_evidence_refs": [],
+                "recommended_follow_up": None,
+            }
+
+        result = asyncio.run(
+            phase1._run_observation_collaboration_diagnostic(
+                detections=[detection],
+                proposal_by_detection=proposals,
+                updates=updates,
+                scenario_metadata=scenario_metadata,
+                event_reasons=["possible_id_switch"],
+                frame_reference="data:image/jpeg;base64,abc",
+                mode=phase1.OBSERVATION_VERIFICATION_MODE_LIVE,
+                observation_model="qwen-3.8-27b",
+                observation_timeout_seconds=6.0,
+                invoker=_schema_invalid_invoker,
+                tracking_reconsideration_mode=phase1.TRACKING_RECONSIDERATION_MODE_OFF,
+            )
+        )
+
+        det = result["per_detection"]["det-amb-1"]
+        self.assertEqual(det["observation_agent_invocation"]["error"], "observation_response_schema_invalid")
+        self.assertIn("visual_content_inspected", det["observation_agent_invocation"]["missing_keys"])
+        self.assertIsNone(det["observation_agent_verdict"])
+        self.assertEqual(det["diagnostic_adjudication_final"]["classification"], "unresolved")
+        self.assertIn(
+            "observation_verification_missing_or_malformed",
+            det["diagnostic_adjudication_final"]["reason_codes"],
+        )
+        self.assertEqual(result["summary"]["diagnostic_final_adjudication_counts"]["accepted"], 0)
+
+    def test_supported_observation_remains_compatible_with_modality_reporting(self) -> None:
+        detection = self._make_detection()
+        scenario_metadata = self._make_scenario_metadata()
+        scenario_metadata["expected_correct_associations"] = {"det-amb-1": "track-A"}
+        proposals = {
+            "det-amb-1": {
+                "detection_id": "det-amb-1",
+                "proposed_track_id": "track-A",
+                "association_confidence": 0.9,
+                "occlusion_likelihood": 0.2,
+                "id_switch_risk": 0.2,
+                "depth_conflict_flag": False,
+                "position_conflict_flag": False,
+                "uncertainties": [],
+                "supporting_evidence": ["motion_continuity", "depth_consistency"],
+            }
+        }
+        updates = [
+            {
+                "detection_id": "det-amb-1",
+                "resolved_track_id": "track-A",
+                "accepted": True,
+                "rejection_reasons": [],
+                "uncertainties": [],
+                "supporting_evidence": ["motion_continuity", "depth_consistency"],
+            }
+        ]
+
+        async def _supported_invoker(**_kwargs):
+            return self._supported_verdict()
+
+        result = asyncio.run(
+            phase1._run_observation_collaboration_diagnostic(
+                detections=[detection],
+                proposal_by_detection=proposals,
+                updates=updates,
+                scenario_metadata=scenario_metadata,
+                event_reasons=["possible_id_switch"],
+                frame_reference="data:image/jpeg;base64,abc",
+                mode=phase1.OBSERVATION_VERIFICATION_MODE_MOCK,
+                observation_model="qwen-3.8-27b",
+                observation_timeout_seconds=6.0,
+                invoker=_supported_invoker,
+                tracking_reconsideration_mode=phase1.TRACKING_RECONSIDERATION_MODE_OFF,
+            )
+        )
+
+        det = result["per_detection"]["det-amb-1"]
+        dimensions = det["observation_verification_dimensions"]
+        self.assertEqual(det["diagnostic_adjudication_final"]["classification"], "accepted")
+        self.assertEqual(
+            dimensions["overall_observation_verification"]["status"],
+            phase1.VERIFICATION_DIMENSION_SUPPORTED,
+        )
+        self.assertEqual(
+            dimensions["structured_motion_depth_consistency"]["status"],
+            phase1.VERIFICATION_DIMENSION_SUPPORTED,
         )
 
     def test_deterministic_audit_flags_depth_contradiction_without_overwriting_verdict(self) -> None:
@@ -3242,6 +4116,285 @@ class TestTrackingAgentPhase1ObservationCollaboration(unittest.TestCase):
         self.assertEqual(preflight_ok["shortfall"]["tracking_vlm"], 0)
         self.assertEqual(preflight_ok["shortfall"]["observation_visual"], 0)
         self.assertEqual(preflight_ok["shortfall"]["total"], 0)
+
+    def test_persisted_budget_preflight_missing_state_with_sufficient_limits(self) -> None:
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            env = self._budget_env_for_temp_dir(
+                temp_dir,
+                total_limit="6",
+                tracking_limit="2",
+                observation_visual_limit="4",
+            )
+            state_path = env["PROVIDER_CALL_BUDGET_STATE_PATH"]
+            with patch.dict(os.environ, env, clear=False):
+                preflight = phase1._compute_persisted_budget_preflight(
+                    detection_count=2,
+                    observation_verification_mode=phase1.OBSERVATION_VERIFICATION_MODE_LIVE,
+                    tracking_reconsideration_mode=phase1.TRACKING_RECONSIDERATION_MODE_LIVE,
+                )
+
+            self.assertFalse(os.path.exists(state_path))
+
+        self.assertTrue(preflight["sufficient"])
+        self.assertEqual(preflight["required"]["tracking_vlm"], 2)
+        self.assertEqual(preflight["required"]["observation_visual"], 4)
+        self.assertEqual(preflight["required"]["total"], 6)
+        self.assertEqual(preflight["shortfall"]["tracking_vlm"], 0)
+        self.assertEqual(preflight["shortfall"]["observation_visual"], 0)
+        self.assertEqual(preflight["shortfall"]["total"], 0)
+
+    def test_persisted_budget_preflight_missing_state_with_insufficient_limits(self) -> None:
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            env = self._budget_env_for_temp_dir(
+                temp_dir,
+                total_limit="5",
+                tracking_limit="1",
+                observation_visual_limit="3",
+            )
+            with patch.dict(os.environ, env, clear=False):
+                preflight = phase1._compute_persisted_budget_preflight(
+                    detection_count=2,
+                    observation_verification_mode=phase1.OBSERVATION_VERIFICATION_MODE_LIVE,
+                    tracking_reconsideration_mode=phase1.TRACKING_RECONSIDERATION_MODE_LIVE,
+                )
+
+        self.assertFalse(preflight["sufficient"])
+        self.assertEqual(preflight["shortfall"]["tracking_vlm"], 1)
+        self.assertEqual(preflight["shortfall"]["observation_visual"], 1)
+        self.assertEqual(preflight["shortfall"]["total"], 1)
+
+    def test_persisted_budget_preflight_existing_partially_consumed_budget(self) -> None:
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            env = self._budget_env_for_temp_dir(
+                temp_dir,
+                total_limit="10",
+                tracking_limit="3",
+                observation_visual_limit="6",
+            )
+            state_path = env["PROVIDER_CALL_BUDGET_STATE_PATH"]
+            payload = {
+                "schema_version": "1.0",
+                "updated_at": 1000.0,
+                "limits": {
+                    "total_limit": 10,
+                    "per_role_limits": {
+                        "tracking_vlm": 3,
+                        "observation_text": 0,
+                        "reasoning_text": 0,
+                        "observation_visual": 6,
+                    },
+                },
+                "totals": {
+                    "attempted": 2,
+                    "per_role_attempted": {
+                        "tracking_vlm": 1,
+                        "observation_text": 0,
+                        "reasoning_text": 0,
+                        "observation_visual": 1,
+                    },
+                },
+            }
+            with open(state_path, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle)
+
+            with patch.dict(os.environ, env, clear=False):
+                preflight = phase1._compute_persisted_budget_preflight(
+                    detection_count=2,
+                    observation_verification_mode=phase1.OBSERVATION_VERIFICATION_MODE_LIVE,
+                    tracking_reconsideration_mode=phase1.TRACKING_RECONSIDERATION_MODE_LIVE,
+                )
+
+        self.assertTrue(preflight["sufficient"])
+        self.assertEqual(preflight["persisted"]["remaining"]["tracking_vlm"], 2)
+        self.assertEqual(preflight["persisted"]["remaining"]["observation_visual"], 5)
+        self.assertEqual(preflight["persisted"]["remaining"]["total"], 8)
+
+    def test_persisted_budget_preflight_existing_exhausted_budget_fails(self) -> None:
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            env = self._budget_env_for_temp_dir(
+                temp_dir,
+                total_limit="3",
+                tracking_limit="1",
+                observation_visual_limit="2",
+            )
+            state_path = env["PROVIDER_CALL_BUDGET_STATE_PATH"]
+            payload = {
+                "schema_version": "1.0",
+                "updated_at": 1000.0,
+                "limits": {
+                    "total_limit": 3,
+                    "per_role_limits": {
+                        "tracking_vlm": 1,
+                        "observation_text": 0,
+                        "reasoning_text": 0,
+                        "observation_visual": 2,
+                    },
+                },
+                "totals": {
+                    "attempted": 3,
+                    "per_role_attempted": {
+                        "tracking_vlm": 1,
+                        "observation_text": 0,
+                        "reasoning_text": 0,
+                        "observation_visual": 2,
+                    },
+                },
+            }
+            with open(state_path, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle)
+
+            with patch.dict(os.environ, env, clear=False):
+                preflight = phase1._compute_persisted_budget_preflight(
+                    detection_count=2,
+                    observation_verification_mode=phase1.OBSERVATION_VERIFICATION_MODE_LIVE,
+                    tracking_reconsideration_mode=phase1.TRACKING_RECONSIDERATION_MODE_LIVE,
+                )
+
+        self.assertFalse(preflight["sufficient"])
+        self.assertEqual(preflight["shortfall"]["tracking_vlm"], 2)
+        self.assertEqual(preflight["shortfall"]["observation_visual"], 4)
+        self.assertEqual(preflight["shortfall"]["total"], 6)
+
+    def test_persisted_budget_preflight_corrupt_or_unreadable_state_fails_closed(self) -> None:
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            env = self._budget_env_for_temp_dir(
+                temp_dir,
+                total_limit="6",
+                tracking_limit="2",
+                observation_visual_limit="4",
+            )
+            state_path = env["PROVIDER_CALL_BUDGET_STATE_PATH"]
+            with open(state_path, "w", encoding="utf-8") as handle:
+                handle.write("{not-json")
+
+            with patch.dict(os.environ, env, clear=False):
+                corrupt = phase1._compute_persisted_budget_preflight(
+                    detection_count=2,
+                    observation_verification_mode=phase1.OBSERVATION_VERIFICATION_MODE_LIVE,
+                    tracking_reconsideration_mode=phase1.TRACKING_RECONSIDERATION_MODE_LIVE,
+                )
+
+            with open(state_path, "w", encoding="utf-8") as handle:
+                json.dump(
+                    {
+                        "schema_version": "1.0",
+                        "limits": {
+                            "total_limit": 6,
+                            "per_role_limits": {
+                                "tracking_vlm": 2,
+                                "observation_text": 0,
+                                "reasoning_text": 0,
+                                "observation_visual": 4,
+                            },
+                        },
+                        "totals": {
+                            "attempted": 0,
+                            "per_role_attempted": {
+                                "tracking_vlm": 0,
+                                "observation_text": 0,
+                                "reasoning_text": 0,
+                                "observation_visual": 0,
+                            },
+                        },
+                    },
+                    handle,
+                )
+
+            with patch.dict(os.environ, env, clear=False):
+                with patch("agents.provider_call_budget.Path.read_text", side_effect=OSError("permission denied")):
+                    unreadable = phase1._compute_persisted_budget_preflight(
+                        detection_count=2,
+                        observation_verification_mode=phase1.OBSERVATION_VERIFICATION_MODE_LIVE,
+                        tracking_reconsideration_mode=phase1.TRACKING_RECONSIDERATION_MODE_LIVE,
+                    )
+
+        self.assertFalse(corrupt["sufficient"])
+        self.assertIsNone(corrupt["shortfall"]["tracking_vlm"])
+        self.assertIsNone(corrupt["shortfall"]["observation_visual"])
+        self.assertIsNone(corrupt["shortfall"]["total"])
+        self.assertFalse(unreadable["sufficient"])
+        self.assertIsNone(unreadable["shortfall"]["tracking_vlm"])
+        self.assertIsNone(unreadable["shortfall"]["observation_visual"])
+        self.assertIsNone(unreadable["shortfall"]["total"])
+
+    def test_persisted_budget_preflight_missing_or_invalid_configuration_fails_closed(self) -> None:
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            invalid_env = self._budget_env_for_temp_dir(
+                temp_dir,
+                total_limit="invalid",
+                tracking_limit="2",
+                observation_visual_limit="4",
+            )
+            with patch.dict(os.environ, invalid_env, clear=False):
+                invalid = phase1._compute_persisted_budget_preflight(
+                    detection_count=2,
+                    observation_verification_mode=phase1.OBSERVATION_VERIFICATION_MODE_LIVE,
+                    tracking_reconsideration_mode=phase1.TRACKING_RECONSIDERATION_MODE_LIVE,
+                )
+
+            missing_env = self._budget_env_for_temp_dir(
+                temp_dir,
+                total_limit="6",
+                tracking_limit="2",
+                observation_visual_limit="4",
+            )
+            missing_env.pop("PROVIDER_CALL_BUDGET_REASONING_TEXT_LIMIT", None)
+            with patch.dict(os.environ, missing_env, clear=False):
+                os.environ.pop("PROVIDER_CALL_BUDGET_REASONING_TEXT_LIMIT", None)
+                missing = phase1._compute_persisted_budget_preflight(
+                    detection_count=2,
+                    observation_verification_mode=phase1.OBSERVATION_VERIFICATION_MODE_LIVE,
+                    tracking_reconsideration_mode=phase1.TRACKING_RECONSIDERATION_MODE_LIVE,
+                )
+
+        self.assertFalse(invalid["sufficient"])
+        self.assertIsNone(invalid["shortfall"]["tracking_vlm"])
+        self.assertIsNone(invalid["shortfall"]["observation_visual"])
+        self.assertIsNone(invalid["shortfall"]["total"])
+
+        self.assertFalse(missing["sufficient"])
+        self.assertIsNone(missing["shortfall"]["tracking_vlm"])
+        self.assertIsNone(missing["shortfall"]["observation_visual"])
+        self.assertIsNone(missing["shortfall"]["total"])
+
+    def test_persisted_budget_preflight_read_only_creates_no_state_or_events(self) -> None:
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            env = self._budget_env_for_temp_dir(
+                temp_dir,
+                total_limit="6",
+                tracking_limit="2",
+                observation_visual_limit="4",
+            )
+            state_path = env["PROVIDER_CALL_BUDGET_STATE_PATH"]
+            log_path = env["PROVIDER_CALL_BUDGET_LOG_PATH"]
+            lock_path = env["PROVIDER_CALL_BUDGET_LOCK_PATH"]
+
+            with patch.dict(os.environ, env, clear=False):
+                preflight = phase1._compute_persisted_budget_preflight(
+                    detection_count=2,
+                    observation_verification_mode=phase1.OBSERVATION_VERIFICATION_MODE_LIVE,
+                    tracking_reconsideration_mode=phase1.TRACKING_RECONSIDERATION_MODE_LIVE,
+                )
+
+            self.assertFalse(os.path.exists(state_path))
+            self.assertFalse(os.path.exists(log_path))
+            self.assertFalse(os.path.exists(lock_path))
+
+        self.assertTrue(preflight["sufficient"])
 
 
 if __name__ == "__main__":

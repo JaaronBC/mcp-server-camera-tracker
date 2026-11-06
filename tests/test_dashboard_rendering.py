@@ -105,6 +105,28 @@ class TestDashboardRenderingAssessmentSummary(unittest.TestCase):
         assert isinstance(selected, dict)
         self.assertEqual(selected.get("assessment_label"), "global-latest")
 
+    def test_resolve_track_display_label_uses_stable_identity_label_when_available(self) -> None:
+        display_map = {
+            "12": {
+                "display_label": "app-1",
+                "app_identity_id": "app-1",
+                "status": "visible",
+                "provisional": False,
+            }
+        }
+        label = rendering._resolve_track_display_label("12", display_map)
+        self.assertEqual(label, "app-1")
+
+    def test_resolve_track_display_label_falls_back_to_raw_track_id(self) -> None:
+        self.assertEqual(
+            rendering._resolve_track_display_label("12", None),
+            "12",
+        )
+        self.assertEqual(
+            rendering._resolve_track_display_label("12", {"12": {"display_label": ""}}),
+            "12",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

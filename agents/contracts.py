@@ -151,6 +151,8 @@ class DetectionCandidate:
     ground_coordinate_unit: str | None
     position_kind: str
     motion_history: list[dict] = field(default_factory=list)
+    app_identity_id: str | None = None
+    detection_reference: str | None = None
 
     def to_dict(self) -> dict:
         # Performs to dict logic.
@@ -158,6 +160,7 @@ class DetectionCandidate:
             "detection_id": self.detection_id,
             "timestamp": self.timestamp,
             "yolo_track_id": self.yolo_track_id,
+            "app_identity_id": self.app_identity_id,
             "label": self.label,
             "detection_confidence": self.detection_confidence,
             "pixel_bbox": self.pixel_bbox.to_dict(),
@@ -169,6 +172,7 @@ class DetectionCandidate:
             "ground_coordinate_unit": self.ground_coordinate_unit,
             "position_kind": self.position_kind,
             "motion_history": self.motion_history,
+            "detection_reference": self.detection_reference,
         }
 
 
@@ -183,6 +187,13 @@ class VisualAssociationProposal:
     position_conflict_flag: bool
     uncertainties: list[str] = field(default_factory=list)
     supporting_evidence: list[str] = field(default_factory=list)
+    detection_reference: str | None = None
+    proposed_app_identity_id: str | None = None
+    rejected_app_identity_ids: list[str] = field(default_factory=list)
+    identity_evidence_refs: list[str] = field(default_factory=list)
+    identity_snapshot_generation: int | None = None
+    identity_snapshot_version: int | None = None
+    identity_resolution_status: str | None = None
 
     def to_dict(self) -> dict:
         # Performs to dict logic.
@@ -196,6 +207,13 @@ class VisualAssociationProposal:
             "position_conflict_flag": self.position_conflict_flag,
             "uncertainties": self.uncertainties,
             "supporting_evidence": self.supporting_evidence,
+            "detection_reference": self.detection_reference,
+            "proposed_app_identity_id": self.proposed_app_identity_id,
+            "rejected_app_identity_ids": self.rejected_app_identity_ids,
+            "identity_evidence_refs": self.identity_evidence_refs,
+            "identity_snapshot_generation": self.identity_snapshot_generation,
+            "identity_snapshot_version": self.identity_snapshot_version,
+            "identity_resolution_status": self.identity_resolution_status,
         }
 
 
@@ -207,6 +225,13 @@ class VisualAssociationUpdate:
     rejection_reasons: list[str]
     uncertainties: list[str]
     supporting_evidence: list[str]
+    detection_reference: str | None = None
+    proposed_app_identity_id: str | None = None
+    rejected_app_identity_ids: list[str] = field(default_factory=list)
+    identity_evidence_refs: list[str] = field(default_factory=list)
+    identity_snapshot_generation: int | None = None
+    identity_snapshot_version: int | None = None
+    identity_resolution_status: str | None = None
 
     def to_dict(self) -> dict:
         # Performs to dict logic.
@@ -217,6 +242,13 @@ class VisualAssociationUpdate:
             "rejection_reasons": self.rejection_reasons,
             "uncertainties": self.uncertainties,
             "supporting_evidence": self.supporting_evidence,
+            "detection_reference": self.detection_reference,
+            "proposed_app_identity_id": self.proposed_app_identity_id,
+            "rejected_app_identity_ids": self.rejected_app_identity_ids,
+            "identity_evidence_refs": self.identity_evidence_refs,
+            "identity_snapshot_generation": self.identity_snapshot_generation,
+            "identity_snapshot_version": self.identity_snapshot_version,
+            "identity_resolution_status": self.identity_resolution_status,
         }
 
 
@@ -276,6 +308,7 @@ class TrackingClaims:
     possible_id_switch: bool
     visibility_status: VisibilityStatus
     claim_reasons: list[str] = field(default_factory=list)
+    identity_claim: dict[str, Any] | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -284,6 +317,7 @@ class TrackingClaims:
             "possible_id_switch": self.possible_id_switch,
             "visibility_status": self.visibility_status,
             "claim_reasons": self.claim_reasons,
+            "identity_claim": self.identity_claim,
         }
 
     @classmethod
@@ -302,6 +336,11 @@ class TrackingClaims:
                 for item in payload.get("claim_reasons", [])
                 if isinstance(item, str)
             ],
+            identity_claim=(
+                payload.get("identity_claim")
+                if isinstance(payload.get("identity_claim"), dict)
+                else None
+            ),
         )
 
 
@@ -525,6 +564,15 @@ class VisualVerificationEnvelope:
     confidence: float | None = None
     recommended_follow_up: str | None = None
     visual_content_inspected: bool | None = None
+    identity_claim_id: str | None = None
+    identity_claim_status: str | None = None
+    referenced_detection_reference: str | None = None
+    referenced_proposed_app_identity_id: str | None = None
+    referenced_identity_snapshot_generation: int | None = None
+    referenced_identity_snapshot_version: int | None = None
+    identity_claim_evidence_refs: list[str] = field(default_factory=list)
+    identity_claim_alternatives: list[str] = field(default_factory=list)
+    identity_claim_provenance: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -545,6 +593,15 @@ class VisualVerificationEnvelope:
             "limitations": self.limitations,
             "recommended_follow_up": self.recommended_follow_up,
             "visual_content_inspected": self.visual_content_inspected,
+            "identity_claim_id": self.identity_claim_id,
+            "identity_claim_status": self.identity_claim_status,
+            "referenced_detection_reference": self.referenced_detection_reference,
+            "referenced_proposed_app_identity_id": self.referenced_proposed_app_identity_id,
+            "referenced_identity_snapshot_generation": self.referenced_identity_snapshot_generation,
+            "referenced_identity_snapshot_version": self.referenced_identity_snapshot_version,
+            "identity_claim_evidence_refs": self.identity_claim_evidence_refs,
+            "identity_claim_alternatives": self.identity_claim_alternatives,
+            "identity_claim_provenance": self.identity_claim_provenance,
         }
 
     @classmethod
@@ -598,6 +655,51 @@ class VisualVerificationEnvelope:
                 payload.get("visual_content_inspected")
                 if isinstance(payload.get("visual_content_inspected"), bool)
                 else None
+            ),
+            identity_claim_id=(
+                payload.get("identity_claim_id")
+                if isinstance(payload.get("identity_claim_id"), str)
+                else None
+            ),
+            identity_claim_status=(
+                payload.get("identity_claim_status")
+                if isinstance(payload.get("identity_claim_status"), str)
+                else None
+            ),
+            referenced_detection_reference=(
+                payload.get("referenced_detection_reference")
+                if isinstance(payload.get("referenced_detection_reference"), str)
+                else None
+            ),
+            referenced_proposed_app_identity_id=(
+                payload.get("referenced_proposed_app_identity_id")
+                if isinstance(payload.get("referenced_proposed_app_identity_id"), str)
+                else None
+            ),
+            referenced_identity_snapshot_generation=(
+                int(payload.get("referenced_identity_snapshot_generation"))
+                if isinstance(payload.get("referenced_identity_snapshot_generation"), int)
+                else None
+            ),
+            referenced_identity_snapshot_version=(
+                int(payload.get("referenced_identity_snapshot_version"))
+                if isinstance(payload.get("referenced_identity_snapshot_version"), int)
+                else None
+            ),
+            identity_claim_evidence_refs=[
+                str(item)
+                for item in payload.get("identity_claim_evidence_refs", [])
+                if isinstance(item, str)
+            ],
+            identity_claim_alternatives=[
+                str(item)
+                for item in payload.get("identity_claim_alternatives", [])
+                if isinstance(item, str)
+            ],
+            identity_claim_provenance=(
+                dict(payload.get("identity_claim_provenance"))
+                if isinstance(payload.get("identity_claim_provenance"), dict)
+                else {}
             ),
         )
 

@@ -175,6 +175,7 @@ class TrackingEvidenceStore:
         timestamp: float,
         frame_reference: str | None,
         pixel_bbox: dict[str, float] | None,
+        tracking_detection_reference: str | None = None,
     ) -> str:
         detection_ref_id = self._next_id(
             "detref",
@@ -196,6 +197,11 @@ class TrackingEvidenceStore:
             "frame_reference": frame_reference,
             "pixel_bbox": pixel_bbox,
             "process_nonce": self._process_nonce,
+            "tracking_detection_reference": (
+                tracking_detection_reference.strip()
+                if isinstance(tracking_detection_reference, str) and tracking_detection_reference.strip()
+                else None
+            ),
         }
         _json_write(self._refs_dir / f"{detection_ref_id}.json", payload)
         with self._lock:
@@ -230,6 +236,7 @@ class TrackingEvidenceStore:
         expected_track_id: str | None = None,
         expected_detection_id: str | None = None,
         expected_frame_reference: str | None = None,
+        expected_tracking_detection_reference: str | None = None,
         now_timestamp: float | None = None,
     ) -> dict[str, Any]:
         now = float(self._clock()) if now_timestamp is None else float(now_timestamp)
@@ -321,6 +328,24 @@ class TrackingEvidenceStore:
                     "reference": reference,
                     "metadata": metadata,
                 }
+
+            if expected_tracking_detection_reference is not None:
+                tracking_detection_reference = metadata.get("tracking_detection_reference")
+                if not isinstance(tracking_detection_reference, str) or not tracking_detection_reference.strip():
+                    return {
+                        "valid": False,
+                        "status": "tracking_detection_reference_missing",
+                        "reference": reference,
+                        "metadata": metadata,
+                    }
+                if tracking_detection_reference != expected_tracking_detection_reference:
+                    return {
+                        "valid": False,
+                        "status": "tracking_detection_reference_mismatch",
+                        "reference": reference,
+                        "metadata": metadata,
+                    }
+
             if isinstance(frame_reference, str):
                 frame_resolution = self.resolve_reference(frame_reference, now_timestamp=now)
                 if not frame_resolution.get("valid"):
@@ -743,6 +768,7 @@ class TrackingEvidenceResolver:
         expected_track_id: str | None = None,
         expected_detection_id: str | None = None,
         expected_frame_reference: str | None = None,
+        expected_tracking_detection_reference: str | None = None,
         now_timestamp: float | None = None,
     ) -> dict[str, Any]:
         now = float(self._clock()) if now_timestamp is None else float(now_timestamp)
@@ -831,6 +857,24 @@ class TrackingEvidenceResolver:
                     "reference": reference,
                     "metadata": metadata,
                 }
+
+            if expected_tracking_detection_reference is not None:
+                tracking_detection_reference = metadata.get("tracking_detection_reference")
+                if not isinstance(tracking_detection_reference, str) or not tracking_detection_reference.strip():
+                    return {
+                        "valid": False,
+                        "status": "tracking_detection_reference_missing",
+                        "reference": reference,
+                        "metadata": metadata,
+                    }
+                if tracking_detection_reference != expected_tracking_detection_reference:
+                    return {
+                        "valid": False,
+                        "status": "tracking_detection_reference_mismatch",
+                        "reference": reference,
+                        "metadata": metadata,
+                    }
+
             if isinstance(frame_reference, str):
                 frame_resolution = self.resolve_reference(frame_reference, now_timestamp=now)
                 if not frame_resolution.get("valid"):

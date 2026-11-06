@@ -1,1 +1,0 @@
-{"schema_version": "1.0", "updated_at": 1793679231.8634272, "limits": {"total_limit": 0, "per_role_limits": {"tracking_vlm": 0, "observation_text": 0, "reasoning_text": 0, "observation_visual": 0}}, "totals": {"attempted": 0, "per_role_attempted": {"tracking_vlm": 0, "observation_text": 0, "reasoning_text": 0, "observation_visual": 0}}}

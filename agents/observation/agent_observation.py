@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -37,6 +38,8 @@ DEFAULT_OBSERVATION_SYSTEM_PROMPT = (
     "Return JSON only, with no Markdown or unnecessary explanation."
 )
 DEFAULT_OBSERVATION_VISUAL_MODEL = "qwen-3.8-27b"
+DEFAULT_OBSERVATION_VISUAL_MAX_VERIFICATION_AGE_SECONDS = 5.0
+OBSERVATION_VISUAL_MAX_VERIFICATION_AGE_ENV = "OBSERVATION_VISUAL_MAX_VERIFICATION_AGE_SECONDS"
 DEFAULT_OBSERVATION_VISUAL_SYSTEM_PROMPT = (
     "You are the Observation Visual Verification Agent. Verify whether the provided image evidence supports, "
     "contradicts, or is inconclusive for the referenced tracking identity claim. "
@@ -44,6 +47,10 @@ DEFAULT_OBSERVATION_VISUAL_SYSTEM_PROMPT = (
     "verification_status, visibility_status, identity_consistency, possible_id_switch, confidence, "
     "uncertainty, limitations, supporting_evidence_refs, contradicting_evidence_refs, recommended_follow_up, "
     "visual_content_inspected."
+)
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_OBSERVATION_VISUAL_SKILL_PATH = (
+    PROJECT_ROOT / "skills" / "independent-track-verification" / "runtime.md"
 )
 
 _KNOWN_TEXT_ONLY_MODEL_PREFIXES: tuple[str, ...] = (
@@ -59,6 +66,80 @@ _KNOWN_MULTIMODAL_MODEL_PREFIXES: tuple[str, ...] = (
     "gemini",
     "claude-3",
 )
+
+
+def _env_flag_enabled(name: str) -> bool:
+    raw_value = os.getenv(name)
+    if not isinstance(raw_value, str):
+        return False
+    return raw_value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _identity_claim_verification_enabled() -> bool:
+    return _env_flag_enabled("OBSERVATION_IDENTITY_CLAIM_VERIFICATION_ENABLED")
+
+
+def _tracking_identity_evidence_enabled() -> bool:
+    return _env_flag_enabled("TRACKING_IDENTITY_EVIDENCE_ENABLED")
+
+
+def _resolve_observation_visual_max_verification_age_seconds() -> float:
+    raw = os.getenv(OBSERVATION_VISUAL_MAX_VERIFICATION_AGE_ENV)
+    if raw is None:
+        return DEFAULT_OBSERVATION_VISUAL_MAX_VERIFICATION_AGE_SECONDS
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_OBSERVATION_VISUAL_MAX_VERIFICATION_AGE_SECONDS
+    if value < 0:
+        return DEFAULT_OBSERVATION_VISUAL_MAX_VERIFICATION_AGE_SECONDS
+    return value
+
+
+def _resolve_observation_visual_skill_path() -> Path:
+    configured_path = os.getenv("OBSERVATION_VISUAL_SKILL_PATH")
+    if isinstance(configured_path, str) and configured_path.strip():
+        candidate = Path(configured_path.strip()).expanduser()
+        if not candidate.is_absolute():
+            return (PROJECT_ROOT / candidate).resolve()
+        return candidate.resolve()
+    return DEFAULT_OBSERVATION_VISUAL_SKILL_PATH
+
+
+def _load_observation_visual_skill_text(path: Path) -> str | None:
+    try:
+        if not path.is_file():
+            return None
+        loaded = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+
+    if not isinstance(loaded, str):
+        return None
+    normalized = loaded.strip()
+    if not normalized:
+        return None
+    return normalized
+
+
+def _resolve_observation_visual_system_prompt(system_prompt: str | None = None) -> str:
+    if isinstance(system_prompt, str) and system_prompt.strip():
+        return system_prompt
+
+    base_prompt = DEFAULT_OBSERVATION_VISUAL_SYSTEM_PROMPT
+    if not _env_flag_enabled("OBSERVATION_VISUAL_SKILL_ENABLED"):
+        return base_prompt
+
+    skill_text = _load_observation_visual_skill_text(_resolve_observation_visual_skill_path())
+    if not isinstance(skill_text, str):
+        return base_prompt
+
+    return (
+        f"{base_prompt}\n\n"
+        "Additional behavioral skill guidance is provided below. "
+        "If there is any conflict, follow the JSON key and response-format requirements above.\n\n"
+        f"{skill_text}"
+    )
 
 
 @dataclass(slots=True)
@@ -221,6 +302,7 @@ def _build_visual_verification_envelope(
     llm_payload: dict[str, Any],
     referenced_evidence: TrackingEvidenceEnvelope,
     source_evidence_refs: list[str],
+    identity_claim: dict[str, Any] | None = None,
 ) -> VisualVerificationEnvelope:
     _require_visual_payload_shape(llm_payload)
 
@@ -250,6 +332,46 @@ def _build_visual_verification_envelope(
     supporting_refs = _coerce_str_list(llm_payload.get("supporting_evidence_refs"))
     contradicting_refs = _coerce_str_list(llm_payload.get("contradicting_evidence_refs"))
 
+    identity_claim_id = None
+    identity_claim_status = None
+    referenced_detection_reference = None
+    referenced_proposed_app_identity_id = None
+    referenced_identity_snapshot_generation = None
+    referenced_identity_snapshot_version = None
+    identity_claim_evidence_refs: list[str] = []
+    identity_claim_alternatives: list[str] = []
+    identity_claim_provenance: dict[str, Any] = {}
+    if isinstance(identity_claim, dict):
+        claim_id = identity_claim.get("claim_id")
+        if isinstance(claim_id, str) and claim_id.strip():
+            identity_claim_id = claim_id
+
+        claim_status = identity_claim.get("claim_status")
+        if isinstance(claim_status, str) and claim_status.strip():
+            identity_claim_status = claim_status
+
+        claim_detection_reference = identity_claim.get("detection_reference")
+        if isinstance(claim_detection_reference, str) and claim_detection_reference.strip():
+            referenced_detection_reference = claim_detection_reference
+
+        claim_proposed_identity = identity_claim.get("proposed_app_identity_id")
+        if isinstance(claim_proposed_identity, str) and claim_proposed_identity.strip():
+            referenced_proposed_app_identity_id = claim_proposed_identity
+
+        claim_generation = identity_claim.get("identity_snapshot_generation")
+        if isinstance(claim_generation, int):
+            referenced_identity_snapshot_generation = claim_generation
+
+        claim_version = identity_claim.get("identity_snapshot_version")
+        if isinstance(claim_version, int):
+            referenced_identity_snapshot_version = claim_version
+
+        identity_claim_evidence_refs = _coerce_str_list(identity_claim.get("identity_evidence_refs"))
+        identity_claim_alternatives = _coerce_str_list(identity_claim.get("alternative_app_identity_ids"))
+        claim_provenance = identity_claim.get("provenance")
+        if isinstance(claim_provenance, dict):
+            identity_claim_provenance = dict(claim_provenance)
+
     return VisualVerificationEnvelope(
         schema_version=referenced_evidence.schema_version,
         observation_id=observation_id.strip(),
@@ -276,7 +398,60 @@ def _build_visual_verification_envelope(
             else None
         ),
         visual_content_inspected=_coerce_bool(llm_payload.get("visual_content_inspected"), default=True),
+        identity_claim_id=identity_claim_id,
+        identity_claim_status=identity_claim_status,
+        referenced_detection_reference=referenced_detection_reference,
+        referenced_proposed_app_identity_id=referenced_proposed_app_identity_id,
+        referenced_identity_snapshot_generation=referenced_identity_snapshot_generation,
+        referenced_identity_snapshot_version=referenced_identity_snapshot_version,
+        identity_claim_evidence_refs=identity_claim_evidence_refs,
+        identity_claim_alternatives=identity_claim_alternatives,
+        identity_claim_provenance=identity_claim_provenance,
     )
+
+
+def _validate_identity_claim_for_visual_verification(
+    *,
+    claim: dict[str, Any],
+    referenced_evidence: TrackingEvidenceEnvelope,
+) -> list[str]:
+    reasons: list[str] = []
+
+    claim_id = claim.get("claim_id")
+    if not isinstance(claim_id, str) or not claim_id.strip():
+        reasons.append("missing_claim_id")
+
+    proposed_app_identity_id = claim.get("proposed_app_identity_id")
+    if not isinstance(proposed_app_identity_id, str) or not proposed_app_identity_id.strip():
+        reasons.append("missing_proposed_app_identity_id")
+
+    detection_reference = claim.get("detection_reference")
+    if not isinstance(detection_reference, str) or not detection_reference.strip():
+        reasons.append("missing_detection_reference")
+    elif detection_reference not in referenced_evidence.source_evidence_refs:
+        reasons.append("detection_reference_not_bound_to_evidence")
+
+    snapshot_generation = claim.get("identity_snapshot_generation")
+    if not isinstance(snapshot_generation, int):
+        reasons.append("missing_identity_snapshot_generation")
+
+    snapshot_version = claim.get("identity_snapshot_version")
+    if not isinstance(snapshot_version, int):
+        reasons.append("missing_identity_snapshot_version")
+
+    claim_status = claim.get("claim_status")
+    if isinstance(claim_status, str) and claim_status.startswith("unusable"):
+        reasons.append("claim_marked_unusable")
+
+    claim_usable = claim.get("claim_usable")
+    if claim_usable is False:
+        reasons.append("claim_usable_false")
+
+    resolution_status = claim.get("identity_resolution_status")
+    if isinstance(resolution_status, str) and resolution_status.startswith("unresolved_"):
+        reasons.append("identity_resolution_unresolved")
+
+    return reasons
 
 
 def normalize_track_coordinate_metadata(snapshot: dict[str, Any]) -> dict[str, Any]:
@@ -810,12 +985,63 @@ def verify_tracking_evidence_for_observation(
         "source_evidence_refs": list(evidence_package.source_references),
     }
 
+    identity_claim: dict[str, Any] | None = None
+    if _identity_claim_verification_enabled():
+        if not _tracking_identity_evidence_enabled():
+            raise ObservationVisualVerificationError(
+                "identity_claim_flag_mismatch",
+                "Observation identity-claim verification requires tracking identity evidence to be enabled",
+                details={
+                    "message_id": request.message_id,
+                    "feature_flags": {
+                        "OBSERVATION_IDENTITY_CLAIM_VERIFICATION_ENABLED": True,
+                        "TRACKING_IDENTITY_EVIDENCE_ENABLED": False,
+                    },
+                },
+            )
+
+        raw_identity_claim = evidence_package.envelope.tracking_claims.identity_claim
+        if not isinstance(raw_identity_claim, dict):
+            raise ObservationVisualVerificationError(
+                "identity_claim_unusable",
+                "Identity-claim verification is enabled but no identity claim was provided",
+                details={
+                    "message_id": request.message_id,
+                    "unusable_reasons": ["missing_identity_claim"],
+                },
+            )
+        identity_claim = dict(raw_identity_claim)
+        unusable_reasons = _validate_identity_claim_for_visual_verification(
+            claim=identity_claim,
+            referenced_evidence=evidence_package.envelope,
+        )
+        if unusable_reasons:
+            raise ObservationVisualVerificationError(
+                "identity_claim_unusable",
+                "Identity claim is not usable for independent visual verification",
+                details={
+                    "message_id": request.message_id,
+                    "identity_claim_id": identity_claim.get("claim_id"),
+                    "unusable_reasons": unusable_reasons,
+                },
+            )
+
+        visual_input["identity_claim"] = identity_claim
+        visual_input["identity_claim_alternatives"] = _coerce_str_list(
+            identity_claim.get("alternative_app_identity_ids")
+        )
+        visual_input["identity_claim_provenance"] = (
+            identity_claim.get("provenance")
+            if isinstance(identity_claim.get("provenance"), dict)
+            else {}
+        )
+
     invoke = invoke_fn or invoke_visual_verification_llm_response
     selected_timeout = _resolve_timeout_seconds() if timeout_seconds is None else float(timeout_seconds)
     selected_retry_limit = _resolve_retry_limit() if retry_limit is None else int(retry_limit)
     selected_backoff = _resolve_retry_backoff_seconds() if retry_backoff_seconds is None else float(retry_backoff_seconds)
     classify_error = classify_error_fn or _classify_llm_error
-    selected_prompt = system_prompt or DEFAULT_OBSERVATION_VISUAL_SYSTEM_PROMPT
+    selected_prompt = _resolve_observation_visual_system_prompt(system_prompt)
 
     attempts = selected_retry_limit + 1
     last_error: str | None = None
@@ -886,13 +1112,23 @@ def verify_tracking_evidence_for_observation(
         llm_payload=llm_payload,
         referenced_evidence=evidence_package.envelope,
         source_evidence_refs=list(evidence_package.source_references),
+        identity_claim=identity_claim,
     )
+
+    validation_now_timestamp = (
+        float(request.now_timestamp)
+        if isinstance(request.now_timestamp, (int, float))
+        else float(time.time())
+    )
+    max_verification_age_seconds = _resolve_observation_visual_max_verification_age_seconds()
 
     validation = selected_coordinator.validate_visual_verification_envelope(
         envelope,
         evidence_by_message_id={
             evidence_package.envelope.message_id: evidence_package.envelope,
         },
+        now_timestamp=validation_now_timestamp,
+        max_verification_age_seconds=max_verification_age_seconds,
     )
     if not bool(validation.get("valid", False)):
         raise ObservationVisualVerificationError(

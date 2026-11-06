@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict, deque
 from dataclasses import dataclass
+import hashlib
 from typing import Any
 
 from agents.contracts import (
@@ -89,6 +90,7 @@ class TrackingEvidencePackager:
         tracking_claims = self._build_claims(
             detection=detection,
             update_payload=update_payload,
+            timestamp=timestamp,
         )
 
         frame_reference = None
@@ -137,6 +139,11 @@ class TrackingEvidencePackager:
             timestamp=float(timestamp),
             frame_reference=frame_reference,
             pixel_bbox=(None if pixel_bbox is None else pixel_bbox.to_dict()),
+            tracking_detection_reference=(
+                getattr(detection, "detection_reference", None)
+                if isinstance(getattr(detection, "detection_reference", None), str)
+                else None
+            ),
         )
         source_refs.append(detection_ref)
 
@@ -197,7 +204,7 @@ class TrackingEvidencePackager:
         detection_id = getattr(detection, "detection_id", "unknown")
         return f"candidate:{detection_id}"
 
-    def _build_claims(self, *, detection: Any, update_payload: dict[str, Any] | None) -> TrackingClaims:
+    def _build_claims(self, *, detection: Any, update_payload: dict[str, Any] | None, timestamp: float) -> TrackingClaims:
         if not isinstance(update_payload, dict):
             yolo_track_id = getattr(detection, "yolo_track_id", None)
             return TrackingClaims(
@@ -226,10 +233,116 @@ class TrackingEvidencePackager:
             if resolved_track_id != yolo_track_id:
                 possible_id_switch = True
 
+        identity_claim: dict[str, Any] | None = None
+        has_identity_fields = any(
+            key in update_payload
+            for key in (
+                "proposed_app_identity_id",
+                "identity_evidence_refs",
+                "identity_snapshot_generation",
+                "identity_snapshot_version",
+                "identity_resolution_status",
+                "rejected_app_identity_ids",
+            )
+        )
+        if has_identity_fields:
+            proposed_app_identity_id = update_payload.get("proposed_app_identity_id")
+            if not isinstance(proposed_app_identity_id, str) or not proposed_app_identity_id.strip():
+                proposed_app_identity_id = None
+
+            detection_reference = update_payload.get("detection_reference")
+            if not isinstance(detection_reference, str) or not detection_reference.strip():
+                candidate_detection_reference = getattr(detection, "detection_reference", None)
+                detection_reference = (
+                    candidate_detection_reference
+                    if isinstance(candidate_detection_reference, str) and candidate_detection_reference.strip()
+                    else None
+                )
+
+            identity_evidence_refs = update_payload.get("identity_evidence_refs")
+            if not isinstance(identity_evidence_refs, list):
+                identity_evidence_refs = []
+            normalized_identity_evidence_refs = [
+                str(item)
+                for item in identity_evidence_refs
+                if isinstance(item, str) and item.strip()
+            ]
+
+            rejected_app_identity_ids = update_payload.get("rejected_app_identity_ids")
+            if not isinstance(rejected_app_identity_ids, list):
+                rejected_app_identity_ids = []
+            alternatives = [
+                str(item)
+                for item in rejected_app_identity_ids
+                if isinstance(item, str) and item.strip()
+            ]
+
+            snapshot_generation = update_payload.get("identity_snapshot_generation")
+            if not isinstance(snapshot_generation, int):
+                snapshot_generation = None
+
+            snapshot_version = update_payload.get("identity_snapshot_version")
+            if not isinstance(snapshot_version, int):
+                snapshot_version = None
+
+            identity_resolution_status = update_payload.get("identity_resolution_status")
+            if not isinstance(identity_resolution_status, str) or not identity_resolution_status.strip():
+                identity_resolution_status = None
+
+            unusable_reasons: list[str] = []
+            if not accepted:
+                unusable_reasons.append("association_rejected")
+            if proposed_app_identity_id is None:
+                unusable_reasons.append("missing_proposed_app_identity_id")
+            if detection_reference is None:
+                unusable_reasons.append("missing_detection_reference")
+            if snapshot_generation is None:
+                unusable_reasons.append("missing_identity_snapshot_generation")
+            if snapshot_version is None:
+                unusable_reasons.append("missing_identity_snapshot_version")
+            if isinstance(identity_resolution_status, str) and identity_resolution_status.startswith("unresolved_"):
+                unusable_reasons.append(identity_resolution_status)
+
+            claim_status = "usable" if not unusable_reasons else "unusable"
+            claim_fingerprint = "|".join(
+                [
+                    str(getattr(detection, "detection_id", "")),
+                    str(resolved_track_id),
+                    str(detection_reference or ""),
+                    str(proposed_app_identity_id or ""),
+                    str(snapshot_generation if snapshot_generation is not None else ""),
+                    str(snapshot_version if snapshot_version is not None else ""),
+                    str(int(float(timestamp) * 1_000_000)),
+                ]
+            )
+            claim_id = f"idclaim-{hashlib.sha1(claim_fingerprint.encode('utf-8')).hexdigest()[:16]}"
+
+            identity_claim = {
+                "claim_id": claim_id,
+                "claim_kind": "tracking_identity_proposal",
+                "claim_status": claim_status,
+                "claim_usable": claim_status == "usable",
+                "claim_unusable_reasons": unusable_reasons,
+                "detection_id": str(getattr(detection, "detection_id", "")),
+                "detection_reference": detection_reference,
+                "proposed_app_identity_id": proposed_app_identity_id,
+                "alternative_app_identity_ids": alternatives,
+                "identity_evidence_refs": normalized_identity_evidence_refs,
+                "identity_snapshot_generation": snapshot_generation,
+                "identity_snapshot_version": snapshot_version,
+                "identity_resolution_status": identity_resolution_status,
+                "provenance": {
+                    "source_agent": "visual_tracking",
+                    "source_contract": "VisualAssociationUpdate",
+                    "mutation_authorized": False,
+                },
+            }
+
         return TrackingClaims(
             claimed_resolved_track_id=(resolved_track_id if isinstance(resolved_track_id, str) else None),
             association_status=("accepted" if accepted else "rejected"),
             possible_id_switch=possible_id_switch,
             visibility_status="unknown",
             claim_reasons=claim_reasons,
+            identity_claim=identity_claim,
         )

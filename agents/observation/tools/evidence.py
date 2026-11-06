@@ -44,6 +44,7 @@ def _sanitize_details(payload: Any) -> Any:
             "upstream_code",
             "gate_errors",
             "missing_keys",
+            "feature_flags",
             "model",
             "attempts",
             "retry_count",
@@ -58,11 +59,20 @@ def _sanitize_details(payload: Any) -> Any:
             "referenced_message_id",
             "validation",
         }
-        return {
-            str(key): _sanitize_details(value)
-            for key, value in payload.items()
-            if str(key) in allowed_keys
-        }
+        sanitized: dict[str, Any] = {}
+        for key, value in payload.items():
+            normalized_key = str(key)
+            if normalized_key not in allowed_keys:
+                continue
+            if normalized_key == "feature_flags" and isinstance(value, dict):
+                sanitized[normalized_key] = {
+                    str(flag): bool(enabled)
+                    for flag, enabled in value.items()
+                    if isinstance(flag, str)
+                }
+                continue
+            sanitized[normalized_key] = _sanitize_details(value)
+        return sanitized
     if isinstance(payload, list):
         return [_sanitize_details(item) for item in payload]
     if isinstance(payload, (str, int, float, bool)) or payload is None:

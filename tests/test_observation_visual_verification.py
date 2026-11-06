@@ -5,7 +5,10 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+from agents.observation import agent_observation as observation_module
+from agents.tracking import agent_tracking as tracking_module
 from agents.observation.agent_observation import (
     ObservationVisualVerificationError,
     ObservationVisualVerificationRequest,
@@ -19,7 +22,42 @@ def _write_json(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
-def _valid_envelope_payload(*, message_id: str, frame_reference: str, detection_reference: str) -> dict:
+def _valid_envelope_payload(
+    *,
+    message_id: str,
+    frame_reference: str,
+    detection_reference: str,
+    include_identity_claim: bool = False,
+) -> dict:
+    tracking_claims = {
+        "claimed_resolved_track_id": "track-1",
+        "association_status": "accepted",
+        "possible_id_switch": False,
+        "visibility_status": "unknown",
+        "claim_reasons": ["vlm_association_accepted"],
+    }
+    if include_identity_claim:
+        tracking_claims["identity_claim"] = {
+            "claim_id": "idclaim-test-1",
+            "claim_kind": "tracking_identity_proposal",
+            "claim_status": "usable",
+            "claim_usable": True,
+            "claim_unusable_reasons": [],
+            "detection_id": "det-1",
+            "detection_reference": detection_reference,
+            "proposed_app_identity_id": "app-1",
+            "alternative_app_identity_ids": ["app-2"],
+            "identity_evidence_refs": ["identity_snapshot:gen:12:ver:21"],
+            "identity_snapshot_generation": 12,
+            "identity_snapshot_version": 21,
+            "identity_resolution_status": "identity_proposed",
+            "provenance": {
+                "source_agent": "visual_tracking",
+                "source_contract": "VisualAssociationUpdate",
+                "mutation_authorized": False,
+            },
+        }
+
     return {
         "schema_version": "1.0",
         "message_id": message_id,
@@ -57,13 +95,7 @@ def _valid_envelope_payload(*, message_id: str, frame_reference: str, detection_
                 "quality_flags": ["position_kind:calibrated_ground_plane"],
             },
         ],
-        "tracking_claims": {
-            "claimed_resolved_track_id": "track-1",
-            "association_status": "accepted",
-            "possible_id_switch": False,
-            "visibility_status": "unknown",
-            "claim_reasons": ["vlm_association_accepted"],
-        },
+        "tracking_claims": tracking_claims,
         "frame_reference": frame_reference,
         "source_evidence_refs": [frame_reference, detection_reference],
         "uncertainty": [],
@@ -75,7 +107,13 @@ class TestObservationVisualVerification(unittest.TestCase):
         await asyncio.sleep(0)
         return payload
 
-    def _build_valid_store(self, root: Path, *, message_id: str = "msg-1") -> tuple[Path, str, str]:
+    def _build_valid_store(
+        self,
+        root: Path,
+        *,
+        message_id: str = "msg-1",
+        include_identity_claim: bool = False,
+    ) -> tuple[Path, str, str]:
         evidence_root = root / "tracking_evidence"
         refs_dir = evidence_root / "refs"
         frames_dir = evidence_root / "frames"
@@ -137,6 +175,7 @@ class TestObservationVisualVerification(unittest.TestCase):
                     message_id=message_id,
                     frame_reference=frame_reference,
                     detection_reference=detection_reference,
+                    include_identity_claim=include_identity_claim,
                 ),
             },
         )
@@ -215,6 +254,462 @@ class TestObservationVisualVerification(unittest.TestCase):
         self.assertEqual(result.envelope.verification_status, "inconclusive")
         self.assertEqual(result.envelope.visibility_status, "occluded")
         self.assertTrue(result.validation["valid"])
+
+    def test_identity_claim_verification_enabled_binds_claim_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            evidence_root, _, detection_reference = self._build_valid_store(
+                Path(temp_dir),
+                message_id="msg-identity-claim-valid",
+                include_identity_claim=True,
+            )
+            with patch.dict(
+                "os.environ",
+                {
+                    "OBSERVATION_IDENTITY_CLAIM_VERIFICATION_ENABLED": "1",
+                    "TRACKING_IDENTITY_EVIDENCE_ENABLED": "1",
+                },
+                clear=False,
+            ):
+                result = verify_tracking_evidence_for_observation(
+                    ObservationVisualVerificationRequest(
+                        message_id="msg-identity-claim-valid",
+                        now_timestamp=1001.0,
+                    ),
+                    evidence_root_dir=evidence_root,
+                    invoke_fn=lambda **_kwargs: self._async_return(
+                        self._payload(status="supported", identity_consistency="consistent")
+                    ),
+                    model="qwen-3.8-27b",
+                    retry_limit=0,
+                )
+
+        self.assertTrue(result.validation["valid"])
+        self.assertEqual(result.envelope.identity_claim_id, "idclaim-test-1")
+        self.assertEqual(result.envelope.referenced_detection_reference, detection_reference)
+        self.assertEqual(result.envelope.referenced_proposed_app_identity_id, "app-1")
+        self.assertEqual(result.envelope.referenced_identity_snapshot_generation, 12)
+        self.assertEqual(result.envelope.referenced_identity_snapshot_version, 21)
+
+    def test_identity_claim_verification_enabled_rejects_unusable_claim(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            evidence_root, _, _ = self._build_valid_store(
+                Path(temp_dir),
+                message_id="msg-identity-claim-missing",
+                include_identity_claim=False,
+            )
+            with patch.dict(
+                "os.environ",
+                {
+                    "OBSERVATION_IDENTITY_CLAIM_VERIFICATION_ENABLED": "1",
+                    "TRACKING_IDENTITY_EVIDENCE_ENABLED": "1",
+                },
+                clear=False,
+            ):
+                with self.assertRaises(ObservationVisualVerificationError) as raised:
+                    verify_tracking_evidence_for_observation(
+                        ObservationVisualVerificationRequest(
+                            message_id="msg-identity-claim-missing",
+                            now_timestamp=1001.0,
+                        ),
+                        evidence_root_dir=evidence_root,
+                        invoke_fn=lambda **_kwargs: self._async_return(
+                            self._payload(status="supported", identity_consistency="consistent")
+                        ),
+                        model="qwen-3.8-27b",
+                        retry_limit=0,
+                    )
+
+        self.assertEqual(raised.exception.code, "identity_claim_unusable")
+
+    def test_identity_claim_verification_rejects_feature_flag_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            evidence_root, _, _ = self._build_valid_store(
+                Path(temp_dir),
+                message_id="msg-identity-flag-mismatch",
+                include_identity_claim=True,
+            )
+            with patch.dict(
+                "os.environ",
+                {
+                    "OBSERVATION_IDENTITY_CLAIM_VERIFICATION_ENABLED": "1",
+                    "TRACKING_IDENTITY_EVIDENCE_ENABLED": "0",
+                },
+                clear=False,
+            ):
+                with self.assertRaises(ObservationVisualVerificationError) as raised:
+                    verify_tracking_evidence_for_observation(
+                        ObservationVisualVerificationRequest(
+                            message_id="msg-identity-flag-mismatch",
+                            now_timestamp=1001.0,
+                        ),
+                        evidence_root_dir=evidence_root,
+                        invoke_fn=lambda **_kwargs: self._async_return(
+                            self._payload(status="supported", identity_consistency="consistent")
+                        ),
+                        model="qwen-3.8-27b",
+                        retry_limit=0,
+                    )
+
+        self.assertEqual(raised.exception.code, "identity_claim_flag_mismatch")
+
+    def test_visual_verification_age_validation_rejects_stale_and_accepts_fresh(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            evidence_root, _, _ = self._build_valid_store(Path(temp_dir), message_id="msg-age-check")
+
+            with patch.dict(
+                "os.environ",
+                {
+                    "OBSERVATION_VISUAL_MAX_VERIFICATION_AGE_SECONDS": "5",
+                },
+                clear=False,
+            ):
+                with patch("agents.observation.agent_observation.time.time", return_value=1004.0):
+                    fresh = verify_tracking_evidence_for_observation(
+                        ObservationVisualVerificationRequest(message_id="msg-age-check"),
+                        evidence_root_dir=evidence_root,
+                        invoke_fn=lambda **_kwargs: self._async_return(
+                            self._payload(status="supported", identity_consistency="consistent")
+                        ),
+                        model="qwen-3.8-27b",
+                        retry_limit=0,
+                    )
+
+                self.assertTrue(fresh.validation["valid"])
+
+                with patch("agents.observation.agent_observation.time.time", return_value=1007.0):
+                    with self.assertRaises(ObservationVisualVerificationError) as stale_raised:
+                        verify_tracking_evidence_for_observation(
+                            ObservationVisualVerificationRequest(message_id="msg-age-check"),
+                            evidence_root_dir=evidence_root,
+                            invoke_fn=lambda **_kwargs: self._async_return(
+                                self._payload(status="supported", identity_consistency="consistent")
+                            ),
+                            model="qwen-3.8-27b",
+                            retry_limit=0,
+                        )
+
+        self.assertEqual(stale_raised.exception.code, "coordinator_validation_rejected")
+        validation_payload = stale_raised.exception.details.get("validation", {})
+        self.assertIn("stale_verification", validation_payload.get("errors", []))
+
+    def test_verification_status_is_taken_from_llm_payload_directly(self) -> None:
+        payload = self._payload(status="contradicted", identity_consistency="consistent")
+        payload["possible_id_switch"] = False
+        payload["supporting_evidence_refs"] = []
+        payload["contradicting_evidence_refs"] = ["evidence://frame/frame-abc"]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            evidence_root, _, _ = self._build_valid_store(Path(temp_dir), message_id="msg-explicit-verdict")
+            result = verify_tracking_evidence_for_observation(
+                ObservationVisualVerificationRequest(message_id="msg-explicit-verdict", now_timestamp=1001.0),
+                evidence_root_dir=evidence_root,
+                invoke_fn=lambda **_kwargs: self._async_return(payload),
+                model="qwen-3.8-27b",
+                retry_limit=0,
+            )
+
+        self.assertEqual(result.envelope.verification_status, "contradicted")
+        self.assertEqual(result.envelope.identity_consistency, "consistent")
+
+    def test_visual_skill_loader_disabled_by_default_uses_default_prompt(self) -> None:
+        captured_prompt: dict[str, str] = {}
+
+        async def _capture_prompt(**kwargs):
+            captured_prompt["value"] = kwargs["system_prompt"]
+            return self._payload(status="supported", identity_consistency="consistent")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            evidence_root, _, _ = self._build_valid_store(Path(temp_dir), message_id="msg-skill-disabled")
+            with patch.dict("os.environ", {"OBSERVATION_VISUAL_SKILL_ENABLED": "0"}, clear=False):
+                verify_tracking_evidence_for_observation(
+                    ObservationVisualVerificationRequest(message_id="msg-skill-disabled", now_timestamp=1001.0),
+                    evidence_root_dir=evidence_root,
+                    invoke_fn=_capture_prompt,
+                    model="qwen-3.8-27b",
+                    retry_limit=0,
+                )
+
+        self.assertEqual(
+            captured_prompt.get("value"),
+            observation_module.DEFAULT_OBSERVATION_VISUAL_SYSTEM_PROMPT,
+        )
+
+    def test_visual_skill_loader_enabled_appends_skill_text(self) -> None:
+        captured_prompt: dict[str, str] = {}
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            skill_path = temp_path / "skill.md"
+            skill_path.write_text("# Skill\n\nUnique skill marker.", encoding="utf-8")
+            evidence_root, _, _ = self._build_valid_store(temp_path, message_id="msg-skill-enabled")
+
+            async def _capture_prompt(**kwargs):
+                captured_prompt["value"] = kwargs["system_prompt"]
+                return self._payload(status="supported", identity_consistency="consistent")
+
+            with patch.dict(
+                "os.environ",
+                {
+                    "OBSERVATION_VISUAL_SKILL_ENABLED": "1",
+                    "OBSERVATION_VISUAL_SKILL_PATH": str(skill_path),
+                },
+                clear=False,
+            ):
+                verify_tracking_evidence_for_observation(
+                    ObservationVisualVerificationRequest(message_id="msg-skill-enabled", now_timestamp=1001.0),
+                    evidence_root_dir=evidence_root,
+                    invoke_fn=_capture_prompt,
+                    model="qwen-3.8-27b",
+                    retry_limit=0,
+                )
+
+        selected_prompt = captured_prompt.get("value", "")
+        self.assertIn(observation_module.DEFAULT_OBSERVATION_VISUAL_SYSTEM_PROMPT, selected_prompt)
+        self.assertIn("Unique skill marker.", selected_prompt)
+
+    def test_visual_skill_loader_explicit_prompt_override_takes_precedence(self) -> None:
+        captured_prompt: dict[str, str] = {}
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            skill_path = temp_path / "skill.md"
+            skill_path.write_text("# Skill\n\nThis should not be used when override is provided.", encoding="utf-8")
+            evidence_root, _, _ = self._build_valid_store(temp_path, message_id="msg-skill-override")
+
+            async def _capture_prompt(**kwargs):
+                captured_prompt["value"] = kwargs["system_prompt"]
+                return self._payload(status="supported", identity_consistency="consistent")
+
+            with patch.dict(
+                "os.environ",
+                {
+                    "OBSERVATION_VISUAL_SKILL_ENABLED": "1",
+                    "OBSERVATION_VISUAL_SKILL_PATH": str(skill_path),
+                },
+                clear=False,
+            ):
+                verify_tracking_evidence_for_observation(
+                    ObservationVisualVerificationRequest(message_id="msg-skill-override", now_timestamp=1001.0),
+                    evidence_root_dir=evidence_root,
+                    invoke_fn=_capture_prompt,
+                    model="qwen-3.8-27b",
+                    retry_limit=0,
+                    system_prompt="OVERRIDE_VISUAL_PROMPT",
+                )
+
+        self.assertEqual(captured_prompt.get("value"), "OVERRIDE_VISUAL_PROMPT")
+
+    def test_visual_skill_loader_missing_file_falls_back_to_default_prompt(self) -> None:
+        captured_prompt: dict[str, str] = {}
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            missing_path = temp_path / "missing-skill.md"
+            evidence_root, _, _ = self._build_valid_store(temp_path, message_id="msg-skill-missing")
+
+            async def _capture_prompt(**kwargs):
+                captured_prompt["value"] = kwargs["system_prompt"]
+                return self._payload(status="supported", identity_consistency="consistent")
+
+            with patch.dict(
+                "os.environ",
+                {
+                    "OBSERVATION_VISUAL_SKILL_ENABLED": "1",
+                    "OBSERVATION_VISUAL_SKILL_PATH": str(missing_path),
+                },
+                clear=False,
+            ):
+                verify_tracking_evidence_for_observation(
+                    ObservationVisualVerificationRequest(message_id="msg-skill-missing", now_timestamp=1001.0),
+                    evidence_root_dir=evidence_root,
+                    invoke_fn=_capture_prompt,
+                    model="qwen-3.8-27b",
+                    retry_limit=0,
+                )
+
+        self.assertEqual(
+            captured_prompt.get("value"),
+            observation_module.DEFAULT_OBSERVATION_VISUAL_SYSTEM_PROMPT,
+        )
+
+    def test_visual_skill_loader_empty_file_falls_back_to_default_prompt(self) -> None:
+        captured_prompt: dict[str, str] = {}
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            empty_skill_path = temp_path / "empty-skill.md"
+            empty_skill_path.write_text("\n\n", encoding="utf-8")
+            evidence_root, _, _ = self._build_valid_store(temp_path, message_id="msg-skill-empty")
+
+            async def _capture_prompt(**kwargs):
+                captured_prompt["value"] = kwargs["system_prompt"]
+                return self._payload(status="supported", identity_consistency="consistent")
+
+            with patch.dict(
+                "os.environ",
+                {
+                    "OBSERVATION_VISUAL_SKILL_ENABLED": "1",
+                    "OBSERVATION_VISUAL_SKILL_PATH": str(empty_skill_path),
+                },
+                clear=False,
+            ):
+                verify_tracking_evidence_for_observation(
+                    ObservationVisualVerificationRequest(message_id="msg-skill-empty", now_timestamp=1001.0),
+                    evidence_root_dir=evidence_root,
+                    invoke_fn=_capture_prompt,
+                    model="qwen-3.8-27b",
+                    retry_limit=0,
+                )
+
+        self.assertEqual(
+            captured_prompt.get("value"),
+            observation_module.DEFAULT_OBSERVATION_VISUAL_SYSTEM_PROMPT,
+        )
+
+    def test_visual_skill_loader_invalid_file_falls_back_to_default_prompt(self) -> None:
+        captured_prompt: dict[str, str] = {}
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            invalid_skill_path = temp_path / "invalid-skill.md"
+            invalid_skill_path.write_bytes(b"\xff\xfe\xfa")
+            evidence_root, _, _ = self._build_valid_store(temp_path, message_id="msg-skill-invalid")
+
+            async def _capture_prompt(**kwargs):
+                captured_prompt["value"] = kwargs["system_prompt"]
+                return self._payload(status="supported", identity_consistency="consistent")
+
+            with patch.dict(
+                "os.environ",
+                {
+                    "OBSERVATION_VISUAL_SKILL_ENABLED": "1",
+                    "OBSERVATION_VISUAL_SKILL_PATH": str(invalid_skill_path),
+                },
+                clear=False,
+            ):
+                verify_tracking_evidence_for_observation(
+                    ObservationVisualVerificationRequest(message_id="msg-skill-invalid", now_timestamp=1001.0),
+                    evidence_root_dir=evidence_root,
+                    invoke_fn=_capture_prompt,
+                    model="qwen-3.8-27b",
+                    retry_limit=0,
+                )
+
+        self.assertEqual(
+            captured_prompt.get("value"),
+            observation_module.DEFAULT_OBSERVATION_VISUAL_SYSTEM_PROMPT,
+        )
+
+    def test_visual_skill_loader_retains_default_json_schema_instructions(self) -> None:
+        captured_prompt: dict[str, str] = {}
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            skill_path = temp_path / "skill.md"
+            skill_path.write_text("# Skill\n\nSchema retention marker.", encoding="utf-8")
+            evidence_root, _, _ = self._build_valid_store(temp_path, message_id="msg-skill-schema")
+
+            async def _capture_prompt(**kwargs):
+                captured_prompt["value"] = kwargs["system_prompt"]
+                return self._payload(status="supported", identity_consistency="consistent")
+
+            with patch.dict(
+                "os.environ",
+                {
+                    "OBSERVATION_VISUAL_SKILL_ENABLED": "1",
+                    "OBSERVATION_VISUAL_SKILL_PATH": str(skill_path),
+                },
+                clear=False,
+            ):
+                verify_tracking_evidence_for_observation(
+                    ObservationVisualVerificationRequest(message_id="msg-skill-schema", now_timestamp=1001.0),
+                    evidence_root_dir=evidence_root,
+                    invoke_fn=_capture_prompt,
+                    model="qwen-3.8-27b",
+                    retry_limit=0,
+                )
+
+        selected_prompt = captured_prompt.get("value", "")
+        self.assertIn("Never invent evidence and return strict JSON only with keys:", selected_prompt)
+        self.assertIn("visual_content_inspected.", selected_prompt)
+        self.assertIn("Schema retention marker.", selected_prompt)
+
+    def test_visual_skill_loader_does_not_change_provider_invocation_count(self) -> None:
+        call_counter = {"count": 0}
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            skill_path = temp_path / "skill.md"
+            skill_path.write_text("# Skill\n\nInvocation count marker.", encoding="utf-8")
+            evidence_root, _, _ = self._build_valid_store(temp_path, message_id="msg-skill-call-count")
+
+            async def _capture_prompt(**_kwargs):
+                call_counter["count"] += 1
+                return self._payload(status="supported", identity_consistency="consistent")
+
+            with patch.dict(
+                "os.environ",
+                {
+                    "OBSERVATION_VISUAL_SKILL_ENABLED": "1",
+                    "OBSERVATION_VISUAL_SKILL_PATH": str(skill_path),
+                },
+                clear=False,
+            ):
+                verify_tracking_evidence_for_observation(
+                    ObservationVisualVerificationRequest(message_id="msg-skill-call-count", now_timestamp=1001.0),
+                    evidence_root_dir=evidence_root,
+                    invoke_fn=_capture_prompt,
+                    model="qwen-3.8-27b",
+                    retry_limit=0,
+                )
+
+        self.assertEqual(call_counter["count"], 1)
+
+    def test_visual_skill_loader_resolves_default_path_relative_to_project_root(self) -> None:
+        with patch.dict("os.environ", {}, clear=True):
+            resolved = observation_module._resolve_observation_visual_skill_path()
+
+        expected = (
+            observation_module.PROJECT_ROOT
+            / "skills"
+            / "independent-track-verification"
+            / "runtime.md"
+        )
+        self.assertEqual(resolved, expected)
+
+    def test_tracking_and_observation_skill_flags_are_independently_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            tracking_skill_path = temp_path / "tracking-runtime.md"
+            observation_skill_path = temp_path / "observation-runtime.md"
+            tracking_skill_path.write_text("TRACKING_SKILL_MARKER", encoding="utf-8")
+            observation_skill_path.write_text("OBSERVATION_SKILL_MARKER", encoding="utf-8")
+
+            with patch.dict(
+                "os.environ",
+                {
+                    "TRACKING_SKILL_ENABLED": "1",
+                    "TRACKING_SKILL_PATH": str(tracking_skill_path),
+                    "OBSERVATION_VISUAL_SKILL_ENABLED": "1",
+                    "OBSERVATION_VISUAL_SKILL_PATH": str(observation_skill_path),
+                },
+                clear=False,
+            ):
+                tracking_prompt = tracking_module.load_tracking_agent_skill()
+                observation_prompt = observation_module._resolve_observation_visual_system_prompt()
+
+        self.assertIn("TRACKING_SKILL_MARKER", tracking_prompt)
+        self.assertIn("OBSERVATION_SKILL_MARKER", observation_prompt)
+
+    def test_follow_up_issue_visual_content_inspected_non_boolean_is_coerced(self) -> None:
+        """Follow-up issue: non-boolean visual_content_inspected is currently coerced by runtime parsing."""
+        payload = self._payload(status="supported", identity_consistency="consistent")
+        payload["visual_content_inspected"] = None
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            evidence_root, _, _ = self._build_valid_store(Path(temp_dir), message_id="msg-inspect-coercion")
+            result = verify_tracking_evidence_for_observation(
+                ObservationVisualVerificationRequest(message_id="msg-inspect-coercion", now_timestamp=1001.0),
+                evidence_root_dir=evidence_root,
+                invoke_fn=lambda **_kwargs: self._async_return(payload),
+                model="qwen-3.8-27b",
+                retry_limit=0,
+            )
+
+        self.assertTrue(result.envelope.visual_content_inspected)
 
     def test_missing_or_expired_evidence_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

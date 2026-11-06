@@ -124,8 +124,8 @@ The dashboard demo is implemented in `agents/dashboard/live_tracking_display.py`
 
 The Tracking Agent now uses a vision-capable VLM (`qwen-3.8-27b`) asynchronously on selected frames/events while preserving YOLO detections as primary measurements.
 
-Tracking-agent system guidance is loaded from `TrackingAgentSkill.md`.
-You can tune association behavior, uncertainty calibration, and estimation policy there without changing Python code.
+Tracking-agent system guidance is loaded from `skills/object-identity-tracking/runtime.md` when `TRACKING_SKILL_ENABLED=1`.
+You can override the default path with `TRACKING_SKILL_PATH`.
 
 Reasoning pipeline agents are also LLM-backed by default:
 

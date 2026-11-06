@@ -113,7 +113,15 @@ def _write_validated_envelope(root: Path, *, message_id: str, track_id: str, tim
     (envelopes / f"{message_id}.json").write_text(json.dumps(payload), encoding="utf-8")
 
 
-def _verification_envelope(*, message_id: str, track_id: str, timestamp: float) -> dict:
+def _verification_envelope(
+    *,
+    message_id: str,
+    track_id: str,
+    timestamp: float,
+    verification_status: str = "supported",
+    identity_consistency: str = "consistent",
+    identity_claim_provenance: dict | None = None,
+) -> dict:
     return {
         "schema_version": "1.0",
         "observation_id": f"verify-{message_id}",
@@ -121,9 +129,9 @@ def _verification_envelope(*, message_id: str, track_id: str, timestamp: float) 
         "referenced_message_id": message_id,
         "timestamp": timestamp,
         "source_evidence_refs": ["evidence://frame/frame-1"],
-        "verification_status": "supported",
+        "verification_status": verification_status,
         "visibility_status": "visible",
-        "identity_consistency": "consistent",
+        "identity_consistency": identity_consistency,
         "possible_id_switch": False,
         "supporting_evidence_refs": [],
         "contradicting_evidence_refs": [],
@@ -131,6 +139,11 @@ def _verification_envelope(*, message_id: str, track_id: str, timestamp: float) 
         "limitations": [],
         "confidence": 0.8,
         "visual_content_inspected": True,
+        "identity_claim_provenance": (
+            {}
+            if identity_claim_provenance is None
+            else dict(identity_claim_provenance)
+        ),
     }
 
 
@@ -363,6 +376,62 @@ class TestVerificationQueueRuntime(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(results[0]["details"]["possible_id_switch"])
                 self.assertEqual(results[0]["details"]["confidence"], 0.8)
                 self.assertTrue(results[0]["details"]["visual_content_inspected"])
+            finally:
+                await manager.stop()
+
+    async def test_verification_details_preserve_contradicted_status_and_claim_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            evidence_root = Path(temp_dir) / "tracking_evidence"
+            _write_validated_envelope(evidence_root, message_id="msg-1", track_id="track-1", timestamp=1000.0)
+
+            async def handler(tool_name, arguments):
+                if tool_name == "get_tracking_visual_evidence":
+                    return _FakeResult({"available": True, "track_id": "track-1"})
+                if tool_name == "verify_tracking_visual_evidence":
+                    return _FakeResult(
+                        {
+                            "available": True,
+                            "envelope": _verification_envelope(
+                                message_id="msg-1",
+                                track_id="track-1",
+                                timestamp=1000.5,
+                                verification_status="contradicted",
+                                identity_consistency="inconsistent",
+                                identity_claim_provenance={
+                                    "source_agent": "visual_tracking",
+                                    "source_contract": "VisualAssociationUpdate",
+                                    "mutation_authorized": False,
+                                },
+                            ),
+                        }
+                    )
+                raise RuntimeError("unexpected tool")
+
+            manager = VerificationQueueManager(evidence_root_dir=evidence_root)
+            await manager.start(session=_FakeSession(handler))
+            try:
+                accepted = manager.submit_request(
+                    VerificationQueueRequest(
+                        request_id="req-1",
+                        track_id="track-1",
+                        message_id="msg-1",
+                        source="test",
+                        requested_at=1001.0,
+                    )
+                )
+                self.assertTrue(accepted["accepted"])
+                await asyncio.wait_for(manager._queue.join(), timeout=1.0)
+                details = manager.get_recent_results(1)[0]["details"]
+                self.assertEqual(details["verification_status"], "contradicted")
+                self.assertEqual(details["identity_consistency"], "inconsistent")
+                self.assertEqual(
+                    details["identity_claim_provenance"],
+                    {
+                        "source_agent": "visual_tracking",
+                        "source_contract": "VisualAssociationUpdate",
+                        "mutation_authorized": False,
+                    },
+                )
             finally:
                 await manager.stop()
 

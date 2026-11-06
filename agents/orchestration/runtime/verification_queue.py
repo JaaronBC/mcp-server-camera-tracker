@@ -922,6 +922,17 @@ class VerificationQueueManager:
                 "contradicting_evidence_refs": list(envelope.contradicting_evidence_refs),
                 "uncertainty": list(envelope.uncertainty),
                 "limitations": list(envelope.limitations),
+                "identity_claim_id": envelope.identity_claim_id,
+                "identity_claim_status": envelope.identity_claim_status,
+                "referenced_detection_reference": envelope.referenced_detection_reference,
+                "referenced_proposed_app_identity_id": envelope.referenced_proposed_app_identity_id,
+                "referenced_identity_snapshot_generation": envelope.referenced_identity_snapshot_generation,
+                "referenced_identity_snapshot_version": envelope.referenced_identity_snapshot_version,
+                "identity_claim_evidence_refs": list(envelope.identity_claim_evidence_refs),
+                "identity_claim_alternatives": list(envelope.identity_claim_alternatives),
+                "identity_claim_provenance": self._sanitize_identity_claim_provenance(
+                    envelope.identity_claim_provenance
+                ),
             },
         )
 
@@ -998,6 +1009,29 @@ class VerificationQueueManager:
             for key, value in payload.items()
             if str(key) in allowed and isinstance(value, (str, int, float, bool, list, dict, type(None)))
         }
+
+    def _sanitize_identity_claim_provenance(self, payload: Any) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            return {}
+
+        sanitized: dict[str, Any] = {}
+        for key, value in payload.items():
+            if len(sanitized) >= 16:
+                break
+            if not isinstance(key, str):
+                continue
+            normalized_key = key.strip()
+            if not normalized_key:
+                continue
+            if len(normalized_key) > 64:
+                normalized_key = normalized_key[:64]
+
+            if isinstance(value, str):
+                sanitized[normalized_key] = value[:128]
+            elif isinstance(value, (int, float, bool)) or value is None:
+                sanitized[normalized_key] = value
+
+        return sanitized
 
     def _build_precheck_malformed_details(
         self,

@@ -432,10 +432,15 @@ FodyWeavers.xsd
 .venv/
 __pycache__/
 *.pyc
-# Captures
-captures/*.mp4
-captures/*.json
-captures/*.jsonl
-captures/tracking_evidence/**
+
+# Capture artifacts (generated runtime/diagnostic outputs)
+captures/**
+agents/captures/**
+
+# Keep source-like probe assets under captures/
+!captures/probes/
+!captures/probes/**/
+!captures/probes/**/*.py
+!captures/probes/**/*.patch
 
 yolo11n.pt

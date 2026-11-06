@@ -2,12 +2,17 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import tempfile
 import time
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from agents.contracts import BoundingBox, DetectionCandidate, VisualAssociationProposal
 from agents.coordinator import AgentCoordinator
+from agents.tracking import agent_tracking as tracking_module
 from agents.tracking.agent_tracking import AsyncVisualTrackingRuntime, LLMVisualTrackingAgent, VisualTrackingAgentResult
 
 
@@ -62,6 +67,36 @@ class _SlowClient:
         self.chat = SimpleNamespace(completions=_SlowCompletions())
 
 
+class _CapturingCompletions:
+    def __init__(self) -> None:
+        self.call_count = 0
+        self.last_kwargs: dict[str, object] = {}
+
+    async def create(self, **kwargs):
+        self.call_count += 1
+        self.last_kwargs = dict(kwargs)
+
+        class _Message:
+            content = (
+                '{"proposals":[{"detection_id":"det-1","proposed_track_id":"track-1",'
+                '"association_confidence":0.81,"occlusion_likelihood":0.2,"id_switch_risk":0.3,'
+                '"depth_conflict_flag":false,"position_conflict_flag":false,'
+                '"uncertainties":[],"supporting_evidence":[]}],'
+                '"uncertainty_flags":[],"supporting_evidence":[]}'
+            )
+
+        class _Choice:
+            message = _Message()
+            finish_reason = "stop"
+
+        return SimpleNamespace(choices=[_Choice()])
+
+
+class _CapturingClient:
+    def __init__(self, completions: _CapturingCompletions) -> None:
+        self.chat = SimpleNamespace(completions=completions)
+
+
 def make_detection(relative_depth: float | None = None) -> DetectionCandidate:
     # Performs make detection logic.
     return DetectionCandidate(
@@ -83,6 +118,145 @@ def make_detection(relative_depth: float | None = None) -> DetectionCandidate:
 
 
 class TestVisualTrackingRuntime(unittest.TestCase):
+    def test_tracking_skill_disabled_by_default_uses_hardcoded_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            skill_path = temp_path / "skills" / "object-identity-tracking" / "runtime.md"
+            skill_path.parent.mkdir(parents=True, exist_ok=True)
+            skill_path.write_text("SKILL_PROMPT_MARKER", encoding="utf-8")
+
+            with patch.object(tracking_module, "DEFAULT_TRACKING_SKILL_PATH", skill_path), patch.dict(
+                os.environ, {"TRACKING_SKILL_ENABLED": "0"}, clear=False
+            ):
+                loaded = tracking_module.load_tracking_agent_skill()
+
+        self.assertEqual(loaded, tracking_module.TRACKING_AGENT_SYSTEM_PROMPT_FALLBACK)
+
+    def test_tracking_skill_enabled_appends_skill_text(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            skill_path = temp_path / "skills" / "object-identity-tracking" / "runtime.md"
+            skill_path.parent.mkdir(parents=True, exist_ok=True)
+            skill_path.write_text("SKILL_PROMPT_MARKER", encoding="utf-8")
+
+            with patch.object(tracking_module, "DEFAULT_TRACKING_SKILL_PATH", skill_path), patch.dict(
+                os.environ, {"TRACKING_SKILL_ENABLED": "1"}, clear=False
+            ):
+                loaded = tracking_module.load_tracking_agent_skill()
+
+        self.assertIn(tracking_module.TRACKING_AGENT_SYSTEM_PROMPT_FALLBACK, loaded)
+        self.assertIn("SKILL_PROMPT_MARKER", loaded)
+
+    def test_tracking_skill_enabled_does_not_duplicate_base_prompt_when_skill_matches_base(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            skill_path = temp_path / "skills" / "object-identity-tracking" / "runtime.md"
+            skill_path.parent.mkdir(parents=True, exist_ok=True)
+            skill_path.write_text(tracking_module.TRACKING_AGENT_SYSTEM_PROMPT_FALLBACK, encoding="utf-8")
+
+            with patch.object(tracking_module, "DEFAULT_TRACKING_SKILL_PATH", skill_path), patch.dict(
+                os.environ, {"TRACKING_SKILL_ENABLED": "1"}, clear=False
+            ):
+                loaded = tracking_module.load_tracking_agent_skill()
+
+        self.assertEqual(loaded, tracking_module.TRACKING_AGENT_SYSTEM_PROMPT_FALLBACK)
+
+    def test_tracking_skill_override_path_is_resolved_from_project_root(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "TRACKING_SKILL_PATH": "skills/object-identity-tracking/runtime.md",
+            },
+            clear=False,
+        ):
+            resolved = tracking_module._resolve_tracking_skill_path()
+
+        expected = (tracking_module.PROJECT_ROOT / "skills" / "object-identity-tracking" / "runtime.md").resolve()
+        self.assertEqual(resolved, expected)
+
+    def test_tracking_skill_default_path_resolution(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            resolved = tracking_module._resolve_tracking_skill_path()
+        self.assertEqual(resolved, tracking_module.DEFAULT_TRACKING_SKILL_PATH)
+
+    def test_tracking_skill_invalid_file_falls_back_to_hardcoded_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            invalid_skill_path = temp_path / "invalid-skill.md"
+            invalid_skill_path.write_bytes(b"\xff\xfe\xfa")
+
+            with patch.dict(
+                os.environ,
+                {"TRACKING_SKILL_ENABLED": "1", "TRACKING_SKILL_PATH": str(invalid_skill_path)},
+                clear=False,
+            ):
+                loaded = tracking_module.load_tracking_agent_skill()
+
+        self.assertEqual(loaded, tracking_module.TRACKING_AGENT_SYSTEM_PROMPT_FALLBACK)
+
+    def test_tracking_skill_explicit_system_prompt_override_takes_precedence(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            skill_path = temp_path / "skills" / "object-identity-tracking" / "runtime.md"
+            skill_path.parent.mkdir(parents=True, exist_ok=True)
+            skill_path.write_text("SKILL_PROMPT_MARKER", encoding="utf-8")
+
+            with patch.object(tracking_module, "DEFAULT_TRACKING_SKILL_PATH", skill_path), patch.dict(
+                os.environ, {"TRACKING_SKILL_ENABLED": "1"}, clear=False
+            ):
+                agent = LLMVisualTrackingAgent(client=_SlowClient(), system_prompt="OVERRIDE_TRACKING_PROMPT")
+
+        self.assertEqual(agent._system_prompt, "OVERRIDE_TRACKING_PROMPT")
+
+    def test_tracking_skill_schema_instruction_authority_is_retained_when_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            skill_path = temp_path / "skills" / "object-identity-tracking" / "runtime.md"
+            skill_path.parent.mkdir(parents=True, exist_ok=True)
+            skill_path.write_text("SKILL_PROMPT_MARKER", encoding="utf-8")
+
+            with patch.object(tracking_module, "DEFAULT_TRACKING_SKILL_PATH", skill_path), patch.dict(
+                os.environ, {"TRACKING_SKILL_ENABLED": "1"}, clear=False
+            ):
+                loaded = tracking_module.load_tracking_agent_skill()
+
+        self.assertIn(
+            "follow the existing JSON-only and response-schema requirements above",
+            loaded,
+        )
+
+    def test_tracking_skill_does_not_change_provider_invocation_count(self) -> None:
+        completions = _CapturingCompletions()
+        client = _CapturingClient(completions)
+        detection = make_detection()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            skill_path = temp_path / "skills" / "object-identity-tracking" / "runtime.md"
+            skill_path.parent.mkdir(parents=True, exist_ok=True)
+            skill_path.write_text("SKILL_PROMPT_MARKER", encoding="utf-8")
+
+            with patch.object(tracking_module, "DEFAULT_TRACKING_SKILL_PATH", skill_path), patch.dict(
+                os.environ,
+                {
+                    "TRACKING_SKILL_ENABLED": "1",
+                    "PROVIDER_CALL_BUDGET_ENABLED": "0",
+                },
+                clear=False,
+            ):
+                agent = LLMVisualTrackingAgent(client=client)
+                result = asyncio.run(
+                    agent.propose_associations(
+                        frame_reference=None,
+                        detections=[detection],
+                        event_reasons=["count_check"],
+                        request_timeout_seconds=0.2,
+                    )
+                )
+
+        self.assertTrue(result.available)
+        self.assertEqual(completions.call_count, 1)
+
     def test_vlm_assisted_association_is_applied(self) -> None:
         # Performs test vlm assisted association is applied logic.
         proposal = VisualAssociationProposal(

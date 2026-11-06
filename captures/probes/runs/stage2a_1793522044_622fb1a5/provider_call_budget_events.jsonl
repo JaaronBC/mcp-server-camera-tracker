@@ -1,1 +1,0 @@
-{"event_type": "provider_call_attempt", "timestamp": 1793522061.575565, "attempt_id": "attempt-b67419c20e0449b09059ca7cd67f77f4", "role": "observation_visual", "outcome": "ok", "reserved_at": 1793522048.704538, "latency_ms": 12870.468, "usage": {"prompt_tokens": 2597, "completion_tokens": 1039, "total_tokens": 3636}, "reason": null, "error_code": null, "pid": 7788}

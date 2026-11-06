@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import asyncio
 import io
+import tempfile
 import unittest
 from contextlib import redirect_stdout
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import main
@@ -396,6 +398,75 @@ class TestMainAgentOps(unittest.IsolatedAsyncioTestCase):
                         )
 
         self.assertEqual(cycle_mock.await_count, 1)
+
+    async def test_monitor_movement_disabled_identity_intents_produces_no_intent_artifact(self) -> None:
+        class _StubQueueManager:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def start(self, session=None):
+                return None
+
+            async def stop(self):
+                return None
+
+        class _StubFeedbackPublisher:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def publish_from_results(self, recent_results, now_timestamp=None):
+                return {"published": len(recent_results)}
+
+        async def _monitor_impl(
+            session,
+            enable_agent_ops_heartbeat,
+            agent_ops_interval_seconds,
+            agent_ops_max_tracks,
+            agent_ops_summary_every_cycles,
+            agent_ops_summary_window_size,
+            handoff_degraded_warn_rate,
+            handoff_degraded_critical_rate,
+            depth_coverage_summary_enabled,
+            depth_coverage_summary_every_cycles,
+            depth_coverage_sample_limit,
+            verification_manager,
+            verification_request_source_fn,
+            verification_results_persist_fn,
+            verification_submissions_persist_fn,
+            verification_feedback_publish_fn,
+        ):
+            if verification_feedback_publish_fn is not None:
+                verification_feedback_publish_fn([])
+            return None
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            intents_path = root / "tracking_identity_reassociation_intents.json"
+            ack_path = root / "tracking_identity_reassociation_ack_ledger.json"
+            feedback_path = root / "operator_tracking_feedback.json"
+
+            with patch.dict(
+                "os.environ",
+                {
+                    "IDENTITY_REASSOCIATION_INTENT_ENABLED": "0",
+                    "PHASE2D_IDENTITY_REASSOCIATION_INTENTS_PATH": str(intents_path),
+                    "PHASE2D_IDENTITY_REASSOCIATION_ACK_LEDGER_PATH": str(ack_path),
+                    "PHASE16E_OPERATOR_FEEDBACK_PATH": str(feedback_path),
+                },
+                clear=False,
+            ):
+                with patch("main.VerificationQueueManager", _StubQueueManager):
+                    with patch("main.VerificationFeedbackPublisher", _StubFeedbackPublisher):
+                        with patch("main.runtime_agent.make_monitor_movement", return_value=_monitor_impl):
+                            await main.monitor_movement(
+                                FakeSession(result=FakeResult([])),
+                                enable_visual_verification_queue=True,
+                                enable_agent_ops_heartbeat=False,
+                                depth_coverage_summary_enabled=False,
+                            )
+
+            self.assertFalse(intents_path.exists())
+            self.assertFalse(ack_path.exists())
 
     async def test_run_depth_coverage_summary_success(self) -> None:
         # Performs test run depth coverage summary success logic.

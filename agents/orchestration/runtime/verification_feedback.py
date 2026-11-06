@@ -16,6 +16,9 @@ TRACKING_OBSERVATION_FEEDBACK_SCHEMA_VERSION = "1.0"
 MAX_FINDING_REFS = 64
 MAX_FINDING_LIST = 64
 MAX_FINDING_ITEM_LENGTH = 256
+MAX_FINDING_PROVENANCE_KEYS = 16
+MAX_FINDING_PROVENANCE_KEY_LENGTH = 64
+MAX_FINDING_PROVENANCE_VALUE_LENGTH = 128
 VALID_VERIFICATION_STATUSES = {"supported", "contradicted", "inconclusive"}
 VALID_IDENTITY_CONSISTENCY = {"consistent", "inconsistent", "unknown"}
 VALID_VISIBILITY_STATUSES = {
@@ -285,6 +288,59 @@ class VerificationFeedbackPublisher:
         if limitations is None:
             return None
 
+        identity_claim_id = details.get("identity_claim_id")
+        if identity_claim_id is not None and not isinstance(identity_claim_id, str):
+            return None
+
+        identity_claim_status = details.get("identity_claim_status")
+        if identity_claim_status is not None and not isinstance(identity_claim_status, str):
+            return None
+
+        referenced_detection_reference = details.get("referenced_detection_reference")
+        if referenced_detection_reference is not None and not isinstance(referenced_detection_reference, str):
+            return None
+
+        referenced_proposed_app_identity_id = details.get("referenced_proposed_app_identity_id")
+        if referenced_proposed_app_identity_id is not None and not isinstance(
+            referenced_proposed_app_identity_id,
+            str,
+        ):
+            return None
+
+        referenced_identity_snapshot_generation = details.get("referenced_identity_snapshot_generation")
+        if referenced_identity_snapshot_generation is not None and not isinstance(
+            referenced_identity_snapshot_generation,
+            int,
+        ):
+            return None
+
+        referenced_identity_snapshot_version = details.get("referenced_identity_snapshot_version")
+        if referenced_identity_snapshot_version is not None and not isinstance(
+            referenced_identity_snapshot_version,
+            int,
+        ):
+            return None
+
+        identity_claim_evidence_refs = self._sanitize_string_list(
+            details.get("identity_claim_evidence_refs"),
+            max_items=MAX_FINDING_REFS,
+        )
+        if identity_claim_evidence_refs is None:
+            return None
+
+        identity_claim_alternatives = self._sanitize_string_list(
+            details.get("identity_claim_alternatives"),
+            max_items=MAX_FINDING_LIST,
+        )
+        if identity_claim_alternatives is None:
+            return None
+
+        identity_claim_provenance = self._sanitize_provenance_dict(
+            details.get("identity_claim_provenance")
+        )
+        if identity_claim_provenance is None:
+            return None
+
         return {
             "verification_status": verification_status,
             "identity_consistency": identity_consistency,
@@ -297,6 +353,15 @@ class VerificationFeedbackPublisher:
             "contradicting_evidence_refs": contradicting_evidence_refs,
             "uncertainty": uncertainty,
             "limitations": limitations,
+            "identity_claim_id": identity_claim_id,
+            "identity_claim_status": identity_claim_status,
+            "referenced_detection_reference": referenced_detection_reference,
+            "referenced_proposed_app_identity_id": referenced_proposed_app_identity_id,
+            "referenced_identity_snapshot_generation": referenced_identity_snapshot_generation,
+            "referenced_identity_snapshot_version": referenced_identity_snapshot_version,
+            "identity_claim_evidence_refs": identity_claim_evidence_refs,
+            "identity_claim_alternatives": identity_claim_alternatives,
+            "identity_claim_provenance": identity_claim_provenance,
         }
 
     def _sanitize_string_list(self, value: Any, *, max_items: int) -> list[str] | None:
@@ -319,6 +384,34 @@ class VerificationFeedbackPublisher:
         if len(items) > max_items:
             return None
         return items
+
+    def _sanitize_provenance_dict(self, value: Any) -> dict[str, Any] | None:
+        if value is None:
+            return {}
+        if not isinstance(value, dict):
+            return None
+
+        sanitized: dict[str, Any] = {}
+        for key, item in value.items():
+            if len(sanitized) >= MAX_FINDING_PROVENANCE_KEYS:
+                return None
+            if not isinstance(key, str):
+                return None
+
+            normalized_key = key.strip()
+            if not normalized_key:
+                continue
+            if len(normalized_key) > MAX_FINDING_PROVENANCE_KEY_LENGTH:
+                normalized_key = normalized_key[:MAX_FINDING_PROVENANCE_KEY_LENGTH]
+
+            if isinstance(item, str):
+                sanitized[normalized_key] = item[:MAX_FINDING_PROVENANCE_VALUE_LENGTH]
+            elif isinstance(item, (int, float, bool)) or item is None:
+                sanitized[normalized_key] = item
+            else:
+                return None
+
+        return sanitized
 
     def _atomic_write(self, artifact: TrackingObservationFeedbackArtifact) -> None:
         payload = artifact.to_dict()

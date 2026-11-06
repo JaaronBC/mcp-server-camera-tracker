@@ -10,6 +10,7 @@ from agents.observation.observation_types import Observation
 from agents.tracking.tracking_types import GroundPosition, PixelPosition, RadarTrackSnapshot
 from agents.tracking.runtime_support import (
     build_tracking_detection_id,
+    build_tracking_detection_reference,
     estimate_relative_depth_from_image_geometry,
     normalize_position_metadata,
 )
@@ -41,12 +42,12 @@ def build_tracking_frame_outputs(
 
     frame_height, frame_width = frame_shape[:2]
 
-    for bbox, track_id, cls_idx, confidence in zip(
+    for detection_index, (bbox, track_id, cls_idx, confidence) in enumerate(zip(
         coordinates,
         track_ids,
         classes,
         confidences,
-    ):
+    )):
         x1, y1, x2, y2 = bbox
         center_x = (x1 + x2) / 2.0
         center_y = y2
@@ -131,6 +132,12 @@ def build_tracking_frame_outputs(
 
         track_key = str(track_id)
         detection_id = build_tracking_detection_id(track_key)
+        detection_reference = build_tracking_detection_reference(
+            frame_timestamp=now,
+            detection_index=detection_index,
+            detection_id=detection_id,
+            yolo_track_id=track_key,
+        )
         if relative_depth is not None:
             quality_flags.append("relative_depth_estimate:image_geometry")
         else:
@@ -189,6 +196,8 @@ def build_tracking_frame_outputs(
                 ground_coordinate_unit=ground_unit,
                 position_kind=position_kind,
                 motion_history=motion_history,
+                app_identity_id=None,
+                detection_reference=detection_reference,
             )
         )
 

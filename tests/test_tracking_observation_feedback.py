@@ -33,6 +33,11 @@ def _accepted_result(
         "contradicting_evidence_refs": [],
         "uncertainty": ["partial_occlusion"],
         "limitations": ["single_view"],
+        "identity_claim_provenance": {
+            "source_agent": "visual_tracking",
+            "source_contract": "VisualAssociationUpdate",
+            "mutation_authorized": False,
+        },
     }
     if isinstance(details_overrides, dict):
         details.update(details_overrides)
@@ -136,6 +141,95 @@ class TestTrackingObservationFeedback(unittest.TestCase):
             self.assertEqual(details["contradicting_evidence_refs"], contradicting_refs)
             self.assertEqual(details["uncertainty"], ["brief_occlusion"])
             self.assertEqual(details["limitations"], ["low_resolution_segment"])
+
+    def test_provenance_round_trip_is_preserved(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            artifact_path = Path(temp_dir) / "operator_tracking_feedback.json"
+            publisher = VerificationFeedbackPublisher(artifact_path=artifact_path)
+            consumer = TrackingObservationFeedbackConsumer(artifact_path=artifact_path)
+
+            publisher.publish_from_results(
+                [_accepted_result(request_id="req-prov", track_id="track-prov", message_id="msg-prov")],
+                now_timestamp=2101.0,
+            )
+
+            consumed = consumer.poll(
+                current_track_ids={"track-prov"},
+                latest_message_id_by_track={"track-prov": "msg-prov"},
+                now_timestamp=2101.1,
+            )
+
+            self.assertEqual(consumed["accepted_count"], 1)
+            self.assertEqual(
+                consumed["accepted"][0]["details"].get("identity_claim_provenance"),
+                {
+                    "source_agent": "visual_tracking",
+                    "source_contract": "VisualAssociationUpdate",
+                    "mutation_authorized": False,
+                },
+            )
+
+    def test_contradicted_and_inconclusive_verdicts_remain_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            artifact_path = Path(temp_dir) / "operator_tracking_feedback.json"
+            publisher = VerificationFeedbackPublisher(artifact_path=artifact_path)
+            consumer = TrackingObservationFeedbackConsumer(artifact_path=artifact_path)
+
+            publisher.publish_from_results(
+                [
+                    _accepted_result(
+                        request_id="req-contradicted",
+                        track_id="track-contradicted",
+                        message_id="msg-contradicted",
+                        details_overrides={
+                            "verification_status": "contradicted",
+                            "identity_consistency": "inconsistent",
+                            "supporting_evidence_refs": [],
+                            "contradicting_evidence_refs": ["evidence://frame/frame-1"],
+                        },
+                    ),
+                    _accepted_result(
+                        request_id="req-inconclusive",
+                        track_id="track-inconclusive",
+                        message_id="msg-inconclusive",
+                        details_overrides={
+                            "verification_status": "inconclusive",
+                            "identity_consistency": "unknown",
+                            "supporting_evidence_refs": [],
+                            "contradicting_evidence_refs": [],
+                        },
+                    ),
+                ],
+                now_timestamp=2201.0,
+            )
+
+            consumed = consumer.poll(
+                current_track_ids={"track-contradicted", "track-inconclusive"},
+                latest_message_id_by_track={
+                    "track-contradicted": "msg-contradicted",
+                    "track-inconclusive": "msg-inconclusive",
+                },
+                now_timestamp=2201.1,
+            )
+
+            self.assertEqual(consumed["accepted_count"], 2)
+            accepted_by_track = {item["track_id"]: item for item in consumed["accepted"]}
+            self.assertEqual(
+                accepted_by_track["track-contradicted"]["details"]["verification_status"],
+                "contradicted",
+            )
+            self.assertEqual(
+                accepted_by_track["track-contradicted"]["details"]["identity_consistency"],
+                "inconsistent",
+            )
+            self.assertEqual(
+                accepted_by_track["track-inconclusive"]["details"]["verification_status"],
+                "inconclusive",
+            )
+            self.assertEqual(
+                accepted_by_track["track-inconclusive"]["details"]["identity_consistency"],
+                "unknown",
+            )
 
     def test_missing_optional_findings_defaults_to_empty_lists(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

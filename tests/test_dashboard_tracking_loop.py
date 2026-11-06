@@ -7,10 +7,16 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
+import numpy as np
+from agents.contracts import BoundingBox, DetectionCandidate
+from agents.dashboard import rendering
 from agents.dashboard.state import SharedDashboardState
 from agents.dashboard import tracking_loop
+from agents.tracking.identity_registry import PersistentIdentityRegistry
+from agents.tracking.tracking_types import GroundPosition, RadarTrackSnapshot
 
 
 class _FakeCamera:
@@ -96,6 +102,448 @@ class _FakeResult:
 
 class _FakeModel:
     names = {0: "person"}
+
+
+class _FakePlotResult:
+    def __init__(self) -> None:
+        self.plot_calls: list[dict] = []
+
+    def plot(self, *args, **kwargs):
+        self.plot_calls.append(dict(kwargs))
+        return np.zeros((120, 160, 3), dtype=np.uint8)
+
+
+class _FakeAnnotator:
+    def __init__(self, *args, **kwargs) -> None:
+        self.text_calls: list[dict[str, object]] = []
+        self.box_label_calls: list[dict[str, object]] = []
+
+    def text(self, xy, text, txt_color=(255, 255, 255), anchor="top", box_color=()):
+        self.text_calls.append(
+            {
+                "xy": xy,
+                "text": text,
+                "txt_color": txt_color,
+                "anchor": anchor,
+                "box_color": box_color,
+            }
+        )
+
+    def box_label(self, box, label="", color=(128, 128, 128), txt_color=(255, 255, 255)):
+        self.box_label_calls.append(
+            {
+                "box": box,
+                "label": label,
+                "color": color,
+                "txt_color": txt_color,
+            }
+        )
+
+
+def _candidate(
+    *,
+    detection_id: str,
+    yolo_track_id: str,
+    timestamp: float,
+    detection_reference: str,
+) -> DetectionCandidate:
+    return DetectionCandidate(
+        detection_id=detection_id,
+        timestamp=timestamp,
+        yolo_track_id=yolo_track_id,
+        label="person",
+        detection_confidence=0.9,
+        pixel_bbox=BoundingBox(x1=10.0, y1=20.0, x2=50.0, y2=80.0),
+        pixel_center_x=30.0,
+        pixel_center_y=80.0,
+        relative_depth=0.4,
+        ground_x=1.0,
+        ground_z=2.0,
+        ground_coordinate_unit="relative_units",
+        position_kind="relative_ground_estimate",
+        motion_history=[],
+        detection_reference=detection_reference,
+    )
+
+
+class TestStableIdentityDisplayMapping(unittest.TestCase):
+    def test_stable_display_identity_persists_across_track_switch_4_to_12(self) -> None:
+        registry = PersistentIdentityRegistry(retirement_seconds=20.0)
+        registry.process_detections(
+            now=100.0,
+            detections=[
+                _candidate(
+                    detection_id="det-4",
+                    yolo_track_id="4",
+                    timestamp=100.0,
+                    detection_reference="fdet-4",
+                )
+            ],
+        )
+        app_identity_id = registry.get_identity_for_yolo_track("4")
+        self.assertIsNotNone(app_identity_id)
+        assert isinstance(app_identity_id, str)
+
+        registry.process_detections(now=101.0, detections=[])
+        snapshot = registry.snapshot()
+        mutation = registry.apply_identity_mutation(
+            app_identity_id=app_identity_id,
+            new_yolo_track_id="12",
+            now=102.0,
+            expected_generation_at_least=int(snapshot["generation"]),
+            expected_version=int(snapshot["version"]),
+        )
+        self.assertTrue(mutation.accepted)
+
+        display_map, summary = tracking_loop._build_stable_identity_display_map(
+            registry=registry,
+            tracking_candidates=[
+                _candidate(
+                    detection_id="det-12",
+                    yolo_track_id="12",
+                    timestamp=102.0,
+                    detection_reference="fdet-12",
+                )
+            ],
+        )
+
+        self.assertEqual(summary["mapped_count"], 1)
+        self.assertEqual(display_map["12"]["app_identity_id"], app_identity_id)
+        self.assertNotIn("4", display_map)
+
+    def test_conflicting_display_mapping_falls_back_safely(self) -> None:
+        class _ConflictingRegistry:
+            def get_identity_for_yolo_track(self, yolo_track_id: str) -> str | None:
+                if yolo_track_id in {"4", "12"}:
+                    return "app-1"
+                return None
+
+            def get_record(self, app_identity_id: str):
+                if app_identity_id == "app-1":
+                    return SimpleNamespace(status="visible", provisional=False)
+                return None
+
+        display_map, summary = tracking_loop._build_stable_identity_display_map(
+            registry=_ConflictingRegistry(),
+            tracking_candidates=[
+                _candidate(
+                    detection_id="det-4",
+                    yolo_track_id="4",
+                    timestamp=200.0,
+                    detection_reference="fdet-4",
+                ),
+                _candidate(
+                    detection_id="det-12",
+                    yolo_track_id="12",
+                    timestamp=200.0,
+                    detection_reference="fdet-12",
+                ),
+            ],
+        )
+
+        self.assertEqual(summary["conflict_count"], 1)
+        self.assertEqual(summary["mapped_count"], 0)
+        self.assertEqual(display_map, {})
+
+    def test_missing_mapping_falls_back_to_raw_track_label(self) -> None:
+        registry = PersistentIdentityRegistry()
+        display_map, summary = tracking_loop._build_stable_identity_display_map(
+            registry=registry,
+            tracking_candidates=[
+                _candidate(
+                    detection_id="det-1",
+                    yolo_track_id="1",
+                    timestamp=300.0,
+                    detection_reference="fdet-1",
+                )
+            ],
+        )
+
+        self.assertEqual(display_map, {})
+        self.assertEqual(summary["fallback_count"], 1)
+
+    def test_disabled_feature_flag_preserves_legacy_labels(self) -> None:
+        state = SharedDashboardState()
+        state.tracking_stable_identity_visualization_enabled = False
+        state.tracking_identity_registry_enabled = True
+        state.tracking_identity_registry = PersistentIdentityRegistry()
+
+        display_map = tracking_loop._update_stable_identity_display_mapping_if_enabled(
+            state=state,
+            tracking_candidates=[
+                _candidate(
+                    detection_id="det-1",
+                    yolo_track_id="1",
+                    timestamp=400.0,
+                    detection_reference="fdet-1",
+                )
+            ],
+        )
+
+        self.assertEqual(display_map, {})
+        self.assertEqual(state.latest_tracking_display_identity_by_track, {})
+        self.assertIsInstance(state.latest_tracking_display_identity_summary, dict)
+        assert isinstance(state.latest_tracking_display_identity_summary, dict)
+        self.assertEqual(
+            state.latest_tracking_display_identity_summary.get("reason"),
+            "feature_disabled",
+        )
+
+
+class TestStableIdentityDisplayIntegration(unittest.TestCase):
+    def _track_snapshot(self, *, track_id: str, timestamp: float) -> RadarTrackSnapshot:
+        return RadarTrackSnapshot(
+            track_id=track_id,
+            timestamp=timestamp,
+            pixel_position=None,
+            ground_position=GroundPosition(x=1.0, z=2.0),
+            ground_coordinate_unit="relative_units",
+            position_kind="relative_ground_estimate",
+            quality_flags=[],
+            confidence=0.9,
+            relative_depth=0.4,
+        )
+
+    def test_complete_4_to_12_display_transition_uses_same_mapping_for_webcam_and_radar(self) -> None:
+        state = SharedDashboardState()
+        state.tracking_stable_identity_visualization_enabled = True
+
+        registry = PersistentIdentityRegistry(retirement_seconds=20.0)
+        registry.process_detections(
+            now=100.0,
+            detections=[
+                _candidate(
+                    detection_id="det-4",
+                    yolo_track_id="4",
+                    timestamp=100.0,
+                    detection_reference="fdet-4",
+                )
+            ],
+        )
+        app_identity_id = registry.get_identity_for_yolo_track("4")
+        self.assertIsNotNone(app_identity_id)
+        assert isinstance(app_identity_id, str)
+
+        registry.process_detections(now=101.0, detections=[])
+        snapshot = registry.snapshot()
+        mutation = registry.apply_identity_mutation(
+            app_identity_id=app_identity_id,
+            new_yolo_track_id="12",
+            now=102.0,
+            expected_generation_at_least=int(snapshot["generation"]),
+            expected_version=int(snapshot["version"]),
+        )
+        self.assertTrue(mutation.accepted)
+
+        tracking_candidates = [
+            _candidate(
+                detection_id="det-12",
+                yolo_track_id="12",
+                timestamp=102.0,
+                detection_reference="fdet-12",
+            )
+        ]
+        display_map, summary = tracking_loop._build_stable_identity_display_map(
+            registry=registry,
+            tracking_candidates=tracking_candidates,
+        )
+        self.assertEqual(summary["mapped_count"], 1)
+        self.assertEqual(display_map["12"]["app_identity_id"], app_identity_id)
+
+        tracks = {
+            "12": self._track_snapshot(track_id="12", timestamp=102.0),
+        }
+        fake_result = _FakePlotResult()
+        fake_annotator = _FakeAnnotator()
+
+        with (
+            patch.object(tracking_loop, "publish_tracking_frame_message", return_value={}),
+            patch.object(tracking_loop, "Annotator", return_value=fake_annotator),
+        ):
+            tracking_loop._publish_tracking_outputs(
+                state=state,
+                result=fake_result,
+                now=102.0,
+                tracks=tracks,
+                tracking_candidates=tracking_candidates,
+                tracking_agent_observation=None,
+                trail_length=20,
+                detections_for_file=[],
+                udp_socket=None,
+                stable_identity_visualization_enabled=True,
+                display_identity_by_track=display_map,
+            )
+
+        self.assertEqual(fake_result.plot_calls[0].get("labels"), False)
+        drawn_texts = [str(call["text"]) for call in fake_annotator.text_calls]
+        self.assertTrue(
+            any(text.startswith(f"person {app_identity_id}") for text in drawn_texts)
+        )
+        self.assertTrue(any(text.endswith("0.90") for text in drawn_texts))
+        self.assertEqual(fake_annotator.box_label_calls, [])
+
+        state_snapshot = rendering._read_dashboard_state_snapshot(state)
+        self.assertEqual(state_snapshot["tracks"].keys(), {"12"})
+        self.assertEqual(
+            state_snapshot["display_identity_by_track"].get("12", {}).get("app_identity_id"),
+            app_identity_id,
+        )
+        radar_display_label = rendering._resolve_track_display_label(
+            "12",
+            state_snapshot["display_identity_by_track"],
+        )
+        self.assertTrue(radar_display_label.startswith(app_identity_id))
+
+    def test_enabled_mode_with_missing_mapping_falls_back_to_raw_overlay_label(self) -> None:
+        state = SharedDashboardState()
+        state.tracking_stable_identity_visualization_enabled = True
+        fake_result = _FakePlotResult()
+        tracking_candidates = [
+            _candidate(
+                detection_id="det-12",
+                yolo_track_id="12",
+                timestamp=200.0,
+                detection_reference="fdet-12",
+            )
+        ]
+
+        fake_annotator = _FakeAnnotator()
+
+        with (
+            patch.object(tracking_loop, "publish_tracking_frame_message", return_value={}),
+            patch.object(tracking_loop, "Annotator", return_value=fake_annotator),
+        ):
+            tracking_loop._publish_tracking_outputs(
+                state=state,
+                result=fake_result,
+                now=200.0,
+                tracks={"12": self._track_snapshot(track_id="12", timestamp=200.0)},
+                tracking_candidates=tracking_candidates,
+                tracking_agent_observation=None,
+                trail_length=20,
+                detections_for_file=[],
+                udp_socket=None,
+                stable_identity_visualization_enabled=True,
+                display_identity_by_track={},
+            )
+
+        self.assertEqual(fake_result.plot_calls[0].get("labels"), False)
+        drawn_texts = [str(call["text"]) for call in fake_annotator.text_calls]
+        self.assertIn("person id:12 0.90", drawn_texts)
+        self.assertEqual(fake_annotator.box_label_calls, [])
+
+    def test_disabled_mode_preserves_legacy_result_plot_behavior(self) -> None:
+        state = SharedDashboardState()
+        state.tracking_stable_identity_visualization_enabled = False
+        fake_result = _FakePlotResult()
+
+        with patch.object(tracking_loop, "publish_tracking_frame_message", return_value={}):
+            tracking_loop._publish_tracking_outputs(
+                state=state,
+                result=fake_result,
+                now=300.0,
+                tracks={"12": self._track_snapshot(track_id="12", timestamp=300.0)},
+                tracking_candidates=[
+                    _candidate(
+                        detection_id="det-12",
+                        yolo_track_id="12",
+                        timestamp=300.0,
+                        detection_reference="fdet-12",
+                    )
+                ],
+                tracking_agent_observation=None,
+                trail_length=20,
+                detections_for_file=[],
+                udp_socket=None,
+                stable_identity_visualization_enabled=False,
+                display_identity_by_track={},
+            )
+
+        self.assertEqual(fake_result.plot_calls[0], {})
+
+    def test_stable_overlay_formats_provisional_confirmed_and_fallback_labels(self) -> None:
+        frame = np.zeros((120, 160, 3), dtype=np.uint8)
+        fake_annotator = _FakeAnnotator()
+        candidates = [
+            _candidate(
+                detection_id="det-1",
+                yolo_track_id="1",
+                timestamp=500.0,
+                detection_reference="fdet-1",
+            ),
+            _candidate(
+                detection_id="det-2",
+                yolo_track_id="2",
+                timestamp=500.0,
+                detection_reference="fdet-2",
+            ),
+            _candidate(
+                detection_id="det-3",
+                yolo_track_id="3",
+                timestamp=500.0,
+                detection_reference="fdet-3",
+            ),
+        ]
+        display_map = {
+            "1": {
+                "display_label": "app-1 (P)",
+                "app_identity_id": "app-1",
+                "status": "visible",
+                "provisional": True,
+            },
+            "2": {
+                "display_label": "app-2",
+                "app_identity_id": "app-2",
+                "status": "visible",
+                "provisional": False,
+            },
+        }
+
+        with patch.object(tracking_loop, "Annotator", return_value=fake_annotator):
+            tracking_loop._apply_stable_identity_webcam_overlays(
+                frame=frame,
+                tracking_candidates=candidates,
+                stable_identity_visualization_enabled=True,
+                display_identity_by_track=display_map,
+                result_names={0: "person"},
+            )
+
+        drawn_texts = [str(call["text"]) for call in fake_annotator.text_calls]
+        self.assertIn("person app-1 (P) 0.90", drawn_texts)
+        self.assertIn("person app-2 0.90", drawn_texts)
+        self.assertIn("person id:3 0.90", drawn_texts)
+        self.assertEqual(fake_annotator.box_label_calls, [])
+
+    def test_stable_overlay_omits_confidence_when_missing(self) -> None:
+        frame = np.zeros((120, 160, 3), dtype=np.uint8)
+        fake_annotator = _FakeAnnotator()
+        candidate = _candidate(
+            detection_id="det-1",
+            yolo_track_id="1",
+            timestamp=510.0,
+            detection_reference="fdet-1",
+        )
+        candidate.detection_confidence = None
+
+        with patch.object(tracking_loop, "Annotator", return_value=fake_annotator):
+            tracking_loop._apply_stable_identity_webcam_overlays(
+                frame=frame,
+                tracking_candidates=[candidate],
+                stable_identity_visualization_enabled=True,
+                display_identity_by_track={
+                    "1": {
+                        "display_label": "app-1",
+                        "app_identity_id": "app-1",
+                        "status": "visible",
+                        "provisional": False,
+                    }
+                },
+                result_names={0: "person"},
+            )
+
+        drawn_texts = [str(call["text"]) for call in fake_annotator.text_calls]
+        self.assertIn("person app-1", drawn_texts)
+        self.assertNotIn("person app-1 0.90", drawn_texts)
 
 
 class TestDashboardTrackingLoopInitialization(unittest.TestCase):

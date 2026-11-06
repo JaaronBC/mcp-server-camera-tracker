@@ -15,6 +15,7 @@ from agents.orchestration.runtime import app as runtime_app
 from agents.orchestration.runtime import config as runtime_config
 from agents.orchestration.runtime import core as runtime_agent
 from agents.orchestration.runtime import flow as runtime_flow
+from agents.orchestration.runtime.identity_reassociation_intents import IdentityReassociationIntentPublisher
 from agents.orchestration.runtime.verification_feedback import VerificationFeedbackPublisher
 from agents.orchestration.runtime.verification_queue import VerificationQueueManager
 
@@ -27,6 +28,15 @@ VERIFICATION_RESULTS_CAPACITY = 512
 LATEST_VERIFICATION_QUEUE_RESULTS_PATH = PROJECT_ROOT / "captures" / "latest_verification_queue_results.json"
 LATEST_VERIFICATION_QUEUE_SUBMISSIONS_PATH = PROJECT_ROOT / "captures" / "latest_verification_queue_submissions.json"
 LATEST_OPERATOR_TRACKING_FEEDBACK_PATH = PROJECT_ROOT / "captures" / "operator_tracking_feedback.json"
+LATEST_IDENTITY_REASSOCIATION_INTENTS_PATH = PROJECT_ROOT / "captures" / "tracking_identity_reassociation_intents.json"
+LATEST_IDENTITY_REASSOCIATION_ACK_LEDGER_PATH = PROJECT_ROOT / "captures" / "tracking_identity_reassociation_ack_ledger.json"
+
+
+def _env_flag_enabled(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _resolve_verification_request_timeout_seconds() -> float:
@@ -97,7 +107,7 @@ def _resolve_artifact_path(default_path: Path, env_var_name: str) -> Path:
     return Path(raw).expanduser().resolve()
 
 
-def _resolve_verification_artifact_paths() -> tuple[Path, Path, Path]:
+def _resolve_verification_artifact_paths() -> tuple[Path, Path, Path, Path, Path]:
     results_path = _resolve_artifact_path(
         LATEST_VERIFICATION_QUEUE_RESULTS_PATH,
         "PHASE16E_VERIFICATION_RESULTS_PATH",
@@ -110,7 +120,15 @@ def _resolve_verification_artifact_paths() -> tuple[Path, Path, Path]:
         LATEST_OPERATOR_TRACKING_FEEDBACK_PATH,
         "PHASE16E_OPERATOR_FEEDBACK_PATH",
     )
-    return results_path, submissions_path, feedback_path
+    identity_intents_path = _resolve_artifact_path(
+        LATEST_IDENTITY_REASSOCIATION_INTENTS_PATH,
+        "PHASE2D_IDENTITY_REASSOCIATION_INTENTS_PATH",
+    )
+    identity_intents_ack_ledger_path = _resolve_artifact_path(
+        LATEST_IDENTITY_REASSOCIATION_ACK_LEDGER_PATH,
+        "PHASE2D_IDENTITY_REASSOCIATION_ACK_LEDGER_PATH",
+    )
+    return results_path, submissions_path, feedback_path, identity_intents_path, identity_intents_ack_ledger_path
 
 def load_config(args: list[str] | None = None) -> runtime_app.RuntimeConfig:
     """Build runtime configuration from CLI args and environment defaults."""
@@ -242,7 +260,7 @@ async def monitor_movement(
         analysis_interval_seconds=ANALYSIS_INTERVAL_SECONDS,
     )
     run_id = os.getenv("PHASE16E_RUN_ID", "").strip() or None
-    results_path, submissions_path, feedback_path = _resolve_verification_artifact_paths()
+    results_path, submissions_path, feedback_path, identity_intents_path, identity_intents_ack_ledger_path = _resolve_verification_artifact_paths()
 
     def persist_results(results: list[dict[str, Any]]) -> None:
         _persist_json_artifact(results_path, results)
@@ -252,6 +270,11 @@ async def monitor_movement(
 
     verification_manager: VerificationQueueManager | None = None
     verification_feedback_publisher: VerificationFeedbackPublisher | None = None
+    identity_reassociation_intent_publisher: IdentityReassociationIntentPublisher | None = None
+    identity_reassociation_intent_enabled = _env_flag_enabled(
+        "IDENTITY_REASSOCIATION_INTENT_ENABLED",
+        False,
+    )
     if enable_visual_verification_queue:
         verification_manager = VerificationQueueManager(
             evidence_root_dir=PROJECT_ROOT / "captures" / "tracking_evidence",
@@ -266,7 +289,26 @@ async def monitor_movement(
             max_records=256,
             record_ttl_seconds=45.0,
         )
+        if identity_reassociation_intent_enabled:
+            identity_reassociation_intent_publisher = IdentityReassociationIntentPublisher(
+                artifact_path=identity_intents_path,
+                ack_ledger_path=identity_intents_ack_ledger_path,
+                evidence_root_dir=PROJECT_ROOT / "captures" / "tracking_evidence",
+                max_intents=256,
+                max_decisions=1024,
+                intent_ttl_seconds=45.0,
+            )
         await verification_manager.start(session=session)
+
+    def publish_verification_outputs(recent_results: list[dict[str, Any]]) -> dict[str, Any]:
+        summary: dict[str, Any] = {}
+        if verification_feedback_publisher is not None:
+            summary["feedback"] = verification_feedback_publisher.publish_from_results(recent_results)
+        if identity_reassociation_intent_publisher is not None:
+            summary["identity_reassociation_intents"] = identity_reassociation_intent_publisher.publish_from_results(
+                recent_results
+            )
+        return summary
 
     try:
         await monitor_impl(
@@ -295,8 +337,8 @@ async def monitor_movement(
             ),
             verification_feedback_publish_fn=(
                 None
-                if verification_feedback_publisher is None
-                else verification_feedback_publisher.publish_from_results
+                if verification_feedback_publisher is None and identity_reassociation_intent_publisher is None
+                else publish_verification_outputs
             ),
         )
     finally:

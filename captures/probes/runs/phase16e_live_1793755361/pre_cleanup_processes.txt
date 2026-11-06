@@ -1,1 +1,0 @@
-93628 /Applications/Claude.app/Contents/Helpers/disclaimer --pgroup -- /Users/jaaroncabsaban/Documents/GitHub/mcp-server-camera-tracker/.venv/bin/python /Users/jaaroncabsaban/Documents/GitHub/mcp-server-camera-tracker/server.py

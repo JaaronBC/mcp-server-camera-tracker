@@ -1,9 +1,0 @@
-{
-  "report_path": "/Users/jaaroncabsaban/Documents/GitHub/mcp-server-camera-tracker/captures/probes/runs/camera-only-handoff-1793690275/phase16e_report.json",
-  "verdict": "FAIL",
-  "failure_reasons": [
-    "correlated_chain_missing",
-    "main_exit_nonzero:124",
-    "observation_visual_attempt_count_not_equal_to_one"
-  ]
-}

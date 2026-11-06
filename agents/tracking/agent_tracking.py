@@ -22,18 +22,27 @@ from ..coordinator import AgentCoordinator
 from .. import latency_instrumentation
 from .. import llm_call
 from .. import provider_call_budget
+from ..orchestration.runtime.identity_snapshot_service import (
+    DEFAULT_EVIDENCE_ROOT_DIR,
+    DEFAULT_SNAPSHOT_PATH,
+    find_identity_candidates,
+    load_identity_snapshot,
+)
 
 TRACKING_VLM_MODEL = "qwen-3.8-27b"
 DEFAULT_OPENAI_BASE_URL = "https://128.171.10.83:9443/v1"
 DEFAULT_TRACKING_AGENT_MAX_OUTPUT_TOKENS = 384
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-TRACKING_AGENT_SKILL_PATH = PROJECT_ROOT / "TrackingAgentSkill.md"
+DEFAULT_TRACKING_SKILL_PATH = PROJECT_ROOT / "skills" / "object-identity-tracking" / "runtime.md"
 TRACKING_AGENT_SYSTEM_PROMPT_FALLBACK = (
     "You are a visual tracking agent for continuity-preserving identity association. "
     "Given structured detections and optional frame evidence, return conservative, evidence-grounded "
     "association proposals with calibrated uncertainty and explicit conflict flags. "
     "Never invent measurements or unsupported identities, and always return strict JSON only."
 )
+DEFAULT_TRACKING_IDENTITY_EVIDENCE_MAX_CANDIDATES = 8
+DEFAULT_TRACKING_IDENTITY_EVIDENCE_MAX_IDENTITY_POOL = 16
+DEFAULT_TRACKING_IDENTITY_EVIDENCE_STALE_SECONDS = 3.0
 
 _PROVIDER_ERROR_CODE_ALLOWED_PATTERN = re.compile(r"[^a-z0-9._:-]+")
 
@@ -67,13 +76,285 @@ def _extract_exception_telemetry_fields(error: Exception) -> dict[str, object]:
     return fields
 
 
+def _env_flag_enabled(name: str) -> bool:
+    raw_value = os.getenv(name)
+    if not isinstance(raw_value, str):
+        return False
+    return raw_value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_positive_int(name: str, default: int, *, minimum: int = 1, maximum: int = 512) -> int:
+    raw_value = os.getenv(name)
+    if not isinstance(raw_value, str):
+        return default
+    try:
+        parsed = int(raw_value.strip())
+    except ValueError:
+        return default
+    return max(minimum, min(maximum, parsed))
+
+
+def _env_positive_float(name: str, default: float, *, minimum: float = 0.1, maximum: float = 120.0) -> float:
+    raw_value = os.getenv(name)
+    if not isinstance(raw_value, str):
+        return default
+    try:
+        parsed = float(raw_value.strip())
+    except ValueError:
+        return default
+    return max(minimum, min(maximum, parsed))
+
+
+def _tracking_identity_evidence_enabled() -> bool:
+    return _env_flag_enabled("TRACKING_IDENTITY_EVIDENCE_ENABLED")
+
+
+def _resolve_tracking_identity_snapshot_path() -> Path:
+    configured = os.getenv("TRACKING_IDENTITY_SNAPSHOT_PATH")
+    if isinstance(configured, str) and configured.strip():
+        path = Path(configured.strip()).expanduser()
+        if not path.is_absolute():
+            return (PROJECT_ROOT / path).resolve()
+        return path.resolve()
+    return DEFAULT_SNAPSHOT_PATH
+
+
+def _resolve_tracking_identity_evidence_root_dir() -> Path:
+    configured = os.getenv("TRACKING_IDENTITY_EVIDENCE_ROOT_DIR")
+    if isinstance(configured, str) and configured.strip():
+        path = Path(configured.strip()).expanduser()
+        if not path.is_absolute():
+            return (PROJECT_ROOT / path).resolve()
+        return path.resolve()
+    return DEFAULT_EVIDENCE_ROOT_DIR
+
+
+def _extract_identity_pool(snapshot_result: dict[str, object], *, max_identities: int) -> list[dict[str, object]]:
+    snapshot = snapshot_result.get("snapshot") if isinstance(snapshot_result, dict) else None
+    identities = snapshot.get("identities") if isinstance(snapshot, dict) else None
+    if not isinstance(identities, list):
+        return []
+
+    pool: list[dict[str, object]] = []
+    for item in identities:
+        if not isinstance(item, dict):
+            continue
+        app_identity_id = item.get("app_identity_id")
+        lifecycle_status = item.get("status")
+        if not isinstance(app_identity_id, str) or not app_identity_id.strip():
+            continue
+        if lifecycle_status == "retired":
+            continue
+        pool.append(
+            {
+                "app_identity_id": app_identity_id,
+                "lifecycle_status": lifecycle_status,
+                "provisional": bool(item.get("provisional", False)),
+                "generation": item.get("generation"),
+                "identity_version": item.get("identity_version"),
+                "updated_at": item.get("updated_at"),
+                "detection_id": item.get("detection_id"),
+                "detection_reference": item.get("detection_reference"),
+                "yolo_track_id": item.get("yolo_track_id"),
+                "historical_yolo_track_ids": (
+                    list(item.get("historical_yolo_track_ids", []))
+                    if isinstance(item.get("historical_yolo_track_ids"), list)
+                    else []
+                ),
+            }
+        )
+        if len(pool) >= max_identities:
+            break
+    return pool
+
+
+def _gather_tracking_identity_evidence(
+    *,
+    detections: list[DetectionCandidate],
+) -> dict[str, object] | None:
+    if not _tracking_identity_evidence_enabled():
+        return None
+
+    max_candidates = _env_positive_int(
+        "TRACKING_IDENTITY_EVIDENCE_MAX_CANDIDATES",
+        DEFAULT_TRACKING_IDENTITY_EVIDENCE_MAX_CANDIDATES,
+    )
+    max_identity_pool = _env_positive_int(
+        "TRACKING_IDENTITY_EVIDENCE_MAX_IDENTITY_POOL",
+        DEFAULT_TRACKING_IDENTITY_EVIDENCE_MAX_IDENTITY_POOL,
+    )
+    stale_after_seconds = _env_positive_float(
+        "TRACKING_IDENTITY_EVIDENCE_STALE_SECONDS",
+        DEFAULT_TRACKING_IDENTITY_EVIDENCE_STALE_SECONDS,
+    )
+
+    snapshot_path = _resolve_tracking_identity_snapshot_path()
+    evidence_root_dir = _resolve_tracking_identity_evidence_root_dir()
+    snapshot_result = load_identity_snapshot(
+        path=snapshot_path,
+        enabled=True,
+        stale_after_seconds=stale_after_seconds,
+    )
+
+    available = bool(snapshot_result.get("available", False))
+    state = snapshot_result.get("state")
+    snapshot_generation = snapshot_result.get("source_generation")
+    snapshot_version = snapshot_result.get("source_version")
+    identity_pool = _extract_identity_pool(snapshot_result, max_identities=max_identity_pool)
+
+    per_detection: list[dict[str, object]] = []
+    for detection in detections:
+        detection_reference = (
+            detection.detection_reference
+            if isinstance(detection.detection_reference, str)
+            else None
+        )
+
+        if not isinstance(detection_reference, str) or not detection_reference.strip():
+            per_detection.append(
+                {
+                    "detection_id": detection.detection_id,
+                    "detection_reference": detection_reference,
+                    "lookup": {
+                        "available": False,
+                        "candidate_lookup_state": "invalid_request",
+                        "error": "detection_reference_missing",
+                        "reference_kind": "missing",
+                        "resolved_detection_reference": None,
+                        "ambiguity": {"ambiguous": False, "reason": None},
+                        "candidate_count": 0,
+                        "candidates": [],
+                    },
+                    "evidence_usable": False,
+                    "evidence_unusable_reason": "detection_reference_missing",
+                }
+            )
+            continue
+
+        lookup = find_identity_candidates(
+            detection_reference=detection_reference,
+            max_candidates=max_candidates,
+            path=snapshot_path,
+            evidence_root_dir=evidence_root_dir,
+            enabled=True,
+            stale_after_seconds=stale_after_seconds,
+        )
+        lookup_state = lookup.get("candidate_lookup_state")
+        lookup_ambiguity = lookup.get("ambiguity")
+        ambiguity = bool(
+            isinstance(lookup_ambiguity, dict) and lookup_ambiguity.get("ambiguous") is True
+        )
+        lookup_error = lookup.get("error")
+        evidence_usable = available and lookup_state in {"found", "none"} and not ambiguity
+        unusable_reason = None
+        if not available:
+            unusable_reason = f"snapshot_{state or 'unavailable'}"
+        elif ambiguity:
+            unusable_reason = "candidate_reference_ambiguous"
+        elif lookup_state not in {"found", "none"}:
+            if isinstance(lookup_error, str) and lookup_error:
+                unusable_reason = lookup_error
+            else:
+                unusable_reason = f"lookup_{lookup_state}"
+
+        per_detection.append(
+            {
+                "detection_id": detection.detection_id,
+                "detection_reference": detection_reference,
+                "lookup": {
+                    "available": bool(lookup.get("available", False)),
+                    "state": lookup.get("state"),
+                    "candidate_lookup_state": lookup_state,
+                    "error": lookup_error,
+                    "reference_kind": lookup.get("reference_kind"),
+                    "resolved_detection_reference": lookup.get("resolved_detection_reference"),
+                    "ambiguity": lookup_ambiguity,
+                    "candidate_count": lookup.get("candidate_count"),
+                    "candidates": (
+                        list(lookup.get("candidates", []))
+                        if isinstance(lookup.get("candidates"), list)
+                        else []
+                    ),
+                    "provenance": lookup.get("provenance"),
+                },
+                "evidence_usable": evidence_usable,
+                "evidence_unusable_reason": unusable_reason,
+            }
+        )
+
+    return {
+        "enabled": True,
+        "snapshot": {
+            "available": available,
+            "state": state,
+            "error": snapshot_result.get("error"),
+            "fresh": snapshot_result.get("fresh"),
+            "snapshot_age_seconds": snapshot_result.get("snapshot_age_seconds"),
+            "freshness_window_seconds": snapshot_result.get("freshness_window_seconds"),
+            "source_generation": snapshot_generation,
+            "source_version": snapshot_version,
+            "identity_count": snapshot_result.get("identity_count"),
+            "snapshot_path": snapshot_result.get("snapshot_path"),
+            "evidence_root_dir": str(evidence_root_dir),
+            "stale_after_seconds": stale_after_seconds,
+        },
+        "identity_pool": identity_pool,
+        "identity_pool_count": len(identity_pool),
+        "max_candidates": max_candidates,
+        "per_detection": per_detection,
+        "provenance": {
+            "retrieval_mode": "deterministic_read_only_evidence_gathering",
+            "identity_selection_authorized": False,
+            "mutation_authorized": False,
+        },
+    }
+
+
+def _resolve_tracking_skill_path() -> Path:
+    configured_path = os.getenv("TRACKING_SKILL_PATH")
+    if isinstance(configured_path, str) and configured_path.strip():
+        candidate = Path(configured_path.strip()).expanduser()
+        if not candidate.is_absolute():
+            return (PROJECT_ROOT / candidate).resolve()
+        return candidate.resolve()
+    return DEFAULT_TRACKING_SKILL_PATH
+
+
+def _load_text_prompt_file(path: Path) -> str | None:
+    try:
+        if not path.is_file():
+            return None
+        loaded = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+
+    if not isinstance(loaded, str):
+        return None
+    normalized = loaded.strip()
+    if not normalized:
+        return None
+    return normalized
+
+
 def load_tracking_agent_skill() -> str:
     # Loads tracking agent skill data from storage for downstream processing.
-    if TRACKING_AGENT_SKILL_PATH.is_file():
-        loaded = TRACKING_AGENT_SKILL_PATH.read_text(encoding="utf-8").strip()
-        if loaded:
-            return loaded
-    return TRACKING_AGENT_SYSTEM_PROMPT_FALLBACK
+    base_prompt = TRACKING_AGENT_SYSTEM_PROMPT_FALLBACK
+    if not _env_flag_enabled("TRACKING_SKILL_ENABLED"):
+        return base_prompt
+
+    skill_text = _load_text_prompt_file(_resolve_tracking_skill_path())
+    if not isinstance(skill_text, str):
+        return base_prompt
+
+    if skill_text == base_prompt or skill_text in base_prompt:
+        return base_prompt
+
+    return (
+        f"{base_prompt}\n\n"
+        "Additional behavioral skill guidance is provided below. "
+        "If there is any conflict, follow the existing JSON-only and response-schema requirements above.\n\n"
+        f"{skill_text}"
+    )
 
 
 def _resolve_tracking_max_output_tokens() -> int | None:
@@ -162,6 +443,10 @@ class LLMVisualTrackingAgent:
                 )
             self._client = AsyncOpenAI(base_url=self._openai_base_url, api_key=api_key)
 
+        identity_evidence_bundle = _gather_tracking_identity_evidence(
+            detections=detections,
+        )
+
         payload = {
             "event_reasons": event_reasons or [],
             "detections": [item.to_dict() for item in detections],
@@ -171,6 +456,8 @@ class LLMVisualTrackingAgent:
                 "return_json_only": True,
             },
         }
+        if identity_evidence_bundle is not None:
+            payload["identity_candidate_evidence"] = identity_evidence_bundle
 
         user_content: list[dict] = [
             {
@@ -180,7 +467,10 @@ class LLMVisualTrackingAgent:
                     "Return JSON object with keys: proposals, uncertainty_flags, supporting_evidence. "
                     "Each proposal should include detection_id, proposed_track_id, association_confidence, "
                     "occlusion_likelihood, id_switch_risk, depth_conflict_flag, position_conflict_flag, "
-                    "uncertainties, supporting_evidence. Preserve one proposal per detection requiring evaluation; "
+                    "uncertainties, supporting_evidence. When identity_candidate_evidence is provided, each proposal "
+                    "must also include detection_reference and should include proposed_app_identity_id (or null for inconclusive), "
+                    "rejected_app_identity_ids, identity_evidence_refs, identity_snapshot_generation, identity_snapshot_version, "
+                    "and identity_resolution_status. Preserve one proposal per detection requiring evaluation; "
                     "do not omit detections because of output length. Keep uncertainty/supporting_evidence entries concise "
                     "short phrases while preserving material information. Return JSON only, with no Markdown or extra explanation.\n"
                     f"Structured input:\n{json.dumps(payload)}"
@@ -376,9 +666,40 @@ class LLMVisualTrackingAgent:
         if not isinstance(supporting_evidence, list):
             supporting_evidence = []
         normalized_proposals: list[VisualAssociationProposal] = []
+        detection_by_id = {
+            candidate.detection_id: candidate
+            for candidate in detections
+            if isinstance(candidate.detection_id, str)
+        }
+        identity_evidence_by_detection_id: dict[str, dict[str, object]] | None = None
+        evidence_snapshot_generation: int | None = None
+        evidence_snapshot_version: int | None = None
+        if isinstance(identity_evidence_bundle, dict):
+            per_detection = identity_evidence_bundle.get("per_detection")
+            if isinstance(per_detection, list):
+                identity_evidence_by_detection_id = {
+                    item.get("detection_id"): item
+                    for item in per_detection
+                    if isinstance(item, dict) and isinstance(item.get("detection_id"), str)
+                }
+            snapshot_payload = identity_evidence_bundle.get("snapshot")
+            if isinstance(snapshot_payload, dict):
+                source_generation = snapshot_payload.get("source_generation")
+                if isinstance(source_generation, int):
+                    evidence_snapshot_generation = source_generation
+                source_version = snapshot_payload.get("source_version")
+                if isinstance(source_version, int):
+                    evidence_snapshot_version = source_version
+
         for item in raw_proposals:
             if isinstance(item, dict):
-                normalized = _normalize_proposal(item)
+                normalized = _normalize_proposal(
+                    item,
+                    detection_by_id=detection_by_id,
+                    identity_evidence_by_detection_id=identity_evidence_by_detection_id,
+                    evidence_snapshot_generation=evidence_snapshot_generation,
+                    evidence_snapshot_version=evidence_snapshot_version,
+                )
                 if normalized is not None:
                     normalized_proposals.append(normalized)
 
@@ -548,11 +869,20 @@ def _extract_json_object(raw_text: str) -> dict | None:
     return None
 
 
-def _normalize_proposal(payload: dict) -> VisualAssociationProposal | None:
+def _normalize_proposal(
+    payload: dict,
+    *,
+    detection_by_id: dict[str, DetectionCandidate],
+    identity_evidence_by_detection_id: dict[str, dict[str, object]] | None = None,
+    evidence_snapshot_generation: int | None = None,
+    evidence_snapshot_version: int | None = None,
+) -> VisualAssociationProposal | None:
     # Normalizes proposal into contract-safe values.
     detection_id = payload.get("detection_id")
     if not isinstance(detection_id, str):
         return None
+
+    detection = detection_by_id.get(detection_id)
 
     proposed_track_id = payload.get("proposed_track_id")
     if proposed_track_id is not None and not isinstance(proposed_track_id, str):
@@ -578,6 +908,83 @@ def _normalize_proposal(payload: dict) -> VisualAssociationProposal | None:
     if not isinstance(supporting_evidence, list):
         supporting_evidence = []
 
+    detection_reference = payload.get("detection_reference")
+    if not isinstance(detection_reference, str) or not detection_reference.strip():
+        if detection is not None and isinstance(detection.detection_reference, str):
+            detection_reference = detection.detection_reference
+        else:
+            detection_reference = None
+
+    proposed_app_identity_id = payload.get("proposed_app_identity_id")
+    if not isinstance(proposed_app_identity_id, str) or not proposed_app_identity_id.strip():
+        proposed_app_identity_id = None
+
+    rejected_app_identity_ids = payload.get("rejected_app_identity_ids")
+    if not isinstance(rejected_app_identity_ids, list):
+        rejected_app_identity_ids = []
+
+    identity_evidence_refs = payload.get("identity_evidence_refs")
+    if not isinstance(identity_evidence_refs, list):
+        identity_evidence_refs = []
+
+    identity_snapshot_generation = payload.get("identity_snapshot_generation")
+    if not isinstance(identity_snapshot_generation, int):
+        identity_snapshot_generation = None
+
+    identity_snapshot_version = payload.get("identity_snapshot_version")
+    if not isinstance(identity_snapshot_version, int):
+        identity_snapshot_version = None
+
+    identity_resolution_status = payload.get("identity_resolution_status")
+    if not isinstance(identity_resolution_status, str) or not identity_resolution_status.strip():
+        identity_resolution_status = None
+    else:
+        identity_resolution_status = identity_resolution_status.strip()
+
+    if identity_evidence_by_detection_id is not None:
+        identity_entry = identity_evidence_by_detection_id.get(detection_id)
+        lookup_payload = (
+            identity_entry.get("lookup")
+            if isinstance(identity_entry, dict)
+            else None
+        )
+        candidate_ids: set[str] = set()
+        if isinstance(lookup_payload, dict):
+            candidates = lookup_payload.get("candidates")
+            if isinstance(candidates, list):
+                for item in candidates:
+                    if not isinstance(item, dict):
+                        continue
+                    app_identity_id = item.get("app_identity_id")
+                    if isinstance(app_identity_id, str) and app_identity_id.strip():
+                        candidate_ids.add(app_identity_id)
+
+            resolved_detection_reference = lookup_payload.get("resolved_detection_reference")
+            if (
+                isinstance(detection_reference, str)
+                and detection_reference.strip()
+                and isinstance(resolved_detection_reference, str)
+                and resolved_detection_reference.strip()
+                and detection_reference != resolved_detection_reference
+            ):
+                uncertainties.append("identity_claim_detection_reference_mismatch")
+                identity_resolution_status = "unresolved_detection_reference_mismatch"
+
+        if proposed_app_identity_id is not None and candidate_ids and proposed_app_identity_id not in candidate_ids:
+            uncertainties.append("identity_claim_unknown_app_identity_id")
+            proposed_app_identity_id = None
+            identity_resolution_status = "unresolved_unknown_app_identity_id"
+
+    if isinstance(evidence_snapshot_generation, int) and isinstance(identity_snapshot_generation, int):
+        if identity_snapshot_generation != evidence_snapshot_generation:
+            uncertainties.append("identity_claim_snapshot_generation_mismatch")
+            identity_resolution_status = "unresolved_snapshot_mismatch"
+
+    if isinstance(evidence_snapshot_version, int) and isinstance(identity_snapshot_version, int):
+        if identity_snapshot_version != evidence_snapshot_version:
+            uncertainties.append("identity_claim_snapshot_version_mismatch")
+            identity_resolution_status = "unresolved_snapshot_mismatch"
+
     return VisualAssociationProposal(
         detection_id=detection_id,
         proposed_track_id=proposed_track_id,
@@ -588,5 +995,12 @@ def _normalize_proposal(payload: dict) -> VisualAssociationProposal | None:
         position_conflict_flag=bool(payload.get("position_conflict_flag", False)),
         uncertainties=[str(value) for value in uncertainties],
         supporting_evidence=[str(value) for value in supporting_evidence],
+        detection_reference=detection_reference,
+        proposed_app_identity_id=proposed_app_identity_id,
+        rejected_app_identity_ids=[str(value) for value in rejected_app_identity_ids if isinstance(value, str)],
+        identity_evidence_refs=[str(value) for value in identity_evidence_refs if isinstance(value, str)],
+        identity_snapshot_generation=identity_snapshot_generation,
+        identity_snapshot_version=identity_snapshot_version,
+        identity_resolution_status=identity_resolution_status,
     )
 

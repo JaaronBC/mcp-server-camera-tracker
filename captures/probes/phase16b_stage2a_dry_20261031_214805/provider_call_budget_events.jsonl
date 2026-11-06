@@ -1,1 +1,0 @@
-{"event_type": "provider_call_attempt", "timestamp": 1793519811.958067, "attempt_id": "attempt-a0defe7e7b654431b87897a08e45bd00", "role": "observation_visual", "outcome": "error", "reserved_at": 1793519811.946659, "latency_ms": 11.057, "usage": null, "reason": null, "error_code": "timeout", "pid": 91352}

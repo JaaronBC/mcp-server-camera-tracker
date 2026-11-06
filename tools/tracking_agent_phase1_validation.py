@@ -89,6 +89,11 @@ OBSERVATION_REQUIRED_KEYS = (
     "contradicting_evidence_refs",
     "visual_content_inspected",
 )
+EVIDENCE_MODE_SYNTHETIC_WITH_HISTORY = "synthetic_imagery_with_structured_tracking_history"
+EVIDENCE_MODE_SYNTHETIC_NO_HISTORY = "synthetic_imagery_without_structured_tracking_history"
+VERIFICATION_DIMENSION_SUPPORTED = "supported"
+VERIFICATION_DIMENSION_UNSUPPORTED = "unsupported"
+VERIFICATION_DIMENSION_UNAVAILABLE = "unavailable"
 DIAGNOSTIC_ADJUDICATION_CLASSIFICATIONS = ("accepted", "rejected", "unresolved")
 DIAGNOSTIC_ADJUDICATION_PROVISIONAL_MIN_CONFIDENCE = 0.55
 DIAGNOSTIC_RECOVERY_MAX_HISTORY_AGE_SECONDS = 2.5
@@ -334,6 +339,22 @@ def _build_observation_verification_payload(
         independent_history,
         proposal_track_id if isinstance(proposal_track_id, str) else None,
     )
+    structured_history_available = len(independent_history) > 0
+    evidence_mode = {
+        "mode": (
+            EVIDENCE_MODE_SYNTHETIC_WITH_HISTORY
+            if structured_history_available
+            else EVIDENCE_MODE_SYNTHETIC_NO_HISTORY
+        ),
+        "frame_source": "synthetic_frame",
+        "visual_identity_verifiability": VERIFICATION_DIMENSION_UNAVAILABLE,
+        "structured_history_available": structured_history_available,
+        "structured_history_source": (
+            "independent_track_memory"
+            if structured_history_available
+            else None
+        ),
+    }
 
     return {
         "task": "independent_tracking_association_verification",
@@ -346,6 +367,7 @@ def _build_observation_verification_payload(
             "scenario": scenario_metadata.get("scenario"),
             "event_reasons": list(event_reasons),
         },
+        "evidence_mode": evidence_mode,
         "tracking_proposal": _extract_tracking_proposal_view(tracking_proposal),
         "detection_measurements": detection.to_dict(),
         "independent_history": {
@@ -450,6 +472,105 @@ def _run_deterministic_observation_audit(
 def _validate_observation_verdict_schema(payload: dict[str, Any]) -> tuple[bool, list[str]]:
     missing = [key for key in OBSERVATION_REQUIRED_KEYS if key not in payload]
     return len(missing) == 0, missing
+
+
+def _classify_expected_identity_status(
+    *,
+    expected_track_id: str | None,
+    proposed_track_id: str | None,
+) -> tuple[str, bool | None]:
+    if not isinstance(expected_track_id, str) or not expected_track_id.strip():
+        return "expected_identity_unavailable", None
+    if not isinstance(proposed_track_id, str) or not proposed_track_id.strip():
+        return "proposed_identity_missing", False
+    if proposed_track_id == expected_track_id:
+        return "matched_expected_identity", True
+    return "mismatched_expected_identity", False
+
+
+def _classify_structured_motion_depth_consistency(
+    deterministic_audit: dict[str, Any] | None,
+) -> tuple[str, bool | None, bool | None]:
+    measurement_checks = (
+        deterministic_audit.get("measurement_checks")
+        if isinstance(deterministic_audit, dict) and isinstance(deterministic_audit.get("measurement_checks"), dict)
+        else {}
+    )
+    motion_consistent = measurement_checks.get("motion_measurement_consistent")
+    depth_consistent = measurement_checks.get("depth_measurement_consistent")
+
+    if motion_consistent is False or depth_consistent is False:
+        return VERIFICATION_DIMENSION_UNSUPPORTED, motion_consistent, depth_consistent
+    if motion_consistent is True and depth_consistent is True:
+        return VERIFICATION_DIMENSION_SUPPORTED, motion_consistent, depth_consistent
+    return VERIFICATION_DIMENSION_UNAVAILABLE, motion_consistent, depth_consistent
+
+
+def _build_observation_verification_dimensions(
+    *,
+    observation_payload: dict[str, Any],
+    deterministic_audit: dict[str, Any],
+    observation_invocation: dict[str, Any] | None,
+    observation_verdict: dict[str, Any] | None,
+) -> dict[str, Any]:
+    structured_status, motion_consistent, depth_consistent = _classify_structured_motion_depth_consistency(
+        deterministic_audit
+    )
+
+    evidence_mode = observation_payload.get("evidence_mode")
+    evidence_mode_name = None
+    real_camera_frame_available = None
+    visual_identity_verifiability = VERIFICATION_DIMENSION_UNAVAILABLE
+    if isinstance(evidence_mode, dict):
+        mode_value = evidence_mode.get("mode")
+        if isinstance(mode_value, str):
+            evidence_mode_name = mode_value
+        frame_source = evidence_mode.get("frame_source")
+        if isinstance(frame_source, str):
+            real_camera_frame_available = frame_source == "camera_frame"
+        verifiability_value = evidence_mode.get("visual_identity_verifiability")
+        if verifiability_value in {
+            VERIFICATION_DIMENSION_SUPPORTED,
+            VERIFICATION_DIMENSION_UNSUPPORTED,
+            VERIFICATION_DIMENSION_UNAVAILABLE,
+        }:
+            visual_identity_verifiability = str(verifiability_value)
+
+    visual_content_inspected = None
+    if isinstance(observation_verdict, dict):
+        visual_content_inspected = bool(observation_verdict.get("visual_content_inspected", False))
+
+    verification_status = None
+    overall_status = VERIFICATION_DIMENSION_UNAVAILABLE
+    if isinstance(observation_verdict, dict):
+        status_value = observation_verdict.get("verification_status")
+        if isinstance(status_value, str):
+            verification_status = status_value
+            if status_value == "supported":
+                overall_status = VERIFICATION_DIMENSION_SUPPORTED
+            elif status_value in {"contradicted", "inconclusive"}:
+                overall_status = VERIFICATION_DIMENSION_UNSUPPORTED
+
+    invocation_status = observation_invocation.get("status") if isinstance(observation_invocation, dict) else None
+
+    return {
+        "structured_motion_depth_consistency": {
+            "status": structured_status,
+            "motion_measurement_consistent": motion_consistent,
+            "depth_measurement_consistent": depth_consistent,
+        },
+        "visual_identity_verifiability": {
+            "status": visual_identity_verifiability,
+            "evidence_mode": evidence_mode_name,
+            "visual_content_inspected": visual_content_inspected,
+            "real_camera_frame_available": real_camera_frame_available,
+            "invocation_status": invocation_status,
+        },
+        "overall_observation_verification": {
+            "status": overall_status,
+            "verification_status": verification_status,
+        },
+    }
 
 
 def _collect_conflicting_proposed_track_ids(
@@ -1101,40 +1222,36 @@ def _build_provider_call_telemetry_entry(
 
 def _read_persisted_provider_budget_state() -> dict[str, Any]:
     state_path, _, _ = provider_call_budget._resolve_paths()
-    if not state_path.is_file():
-        return {
-            "state_path": str(state_path),
-            "available": False,
-            "error": "state_file_missing",
-            "limits": None,
-            "totals": None,
-        }
+    state_file_exists = state_path.is_file()
     try:
-        payload = json.loads(state_path.read_text(encoding="utf-8"))
+        totals_view = provider_call_budget.read_budget_totals()
     except Exception as error:
         return {
             "state_path": str(state_path),
             "available": False,
-            "error": f"state_file_unreadable:{type(error).__name__}",
+            "error": f"state_unavailable:{type(error).__name__}",
             "limits": None,
             "totals": None,
+            "state_file_exists": state_file_exists,
         }
-    if not isinstance(payload, dict):
+    if not isinstance(totals_view, dict):
         return {
             "state_path": str(state_path),
             "available": False,
             "error": "state_payload_not_object",
             "limits": None,
             "totals": None,
+            "state_file_exists": state_file_exists,
         }
-    limits = payload.get("limits") if isinstance(payload.get("limits"), dict) else None
-    totals = payload.get("totals") if isinstance(payload.get("totals"), dict) else None
+    limits = totals_view.get("limits") if isinstance(totals_view.get("limits"), dict) else None
+    totals = totals_view.get("totals") if isinstance(totals_view.get("totals"), dict) else None
     return {
         "state_path": str(state_path),
         "available": isinstance(limits, dict) and isinstance(totals, dict),
-        "error": None,
+        "error": None if isinstance(limits, dict) and isinstance(totals, dict) else "state_payload_missing_limits_or_totals",
         "limits": limits,
         "totals": totals,
+        "state_file_exists": state_file_exists,
     }
 
 
@@ -1504,6 +1621,11 @@ async def _invoke_observation_agent_verdict(
 
     schema_valid, missing_keys = _validate_observation_verdict_schema(raw_payload)
     if not schema_valid:
+        response_top_level_keys = sorted(
+            str(key)
+            for key in raw_payload.keys()
+            if isinstance(key, str)
+        )
         return {
             "invocation": {
                 "status": "error",
@@ -1511,6 +1633,7 @@ async def _invoke_observation_agent_verdict(
                 "latency_ms": latency_ms,
                 "error": "observation_response_schema_invalid",
                 "missing_keys": missing_keys,
+                "response_top_level_keys": response_top_level_keys,
             },
             "verdict": None,
         }
@@ -1826,6 +1949,17 @@ async def _run_observation_collaboration_diagnostic(
     reconsideration_verification_status_counts: dict[str, int] = {}
     reconsideration_invocation_status_counts: dict[str, int] = {}
     contradiction_count = 0
+    modality_dimension_status_counts = {
+        "structured_motion_depth_consistency": {},
+        "visual_identity_verifiability": {},
+        "overall_observation_verification": {},
+    }
+    raw_expected_associations = scenario_metadata.get("expected_correct_associations") if isinstance(scenario_metadata, dict) else None
+    expected_correct_associations: dict[str, str] = {}
+    if isinstance(raw_expected_associations, dict):
+        for key, value in raw_expected_associations.items():
+            if isinstance(key, str) and isinstance(value, str):
+                expected_correct_associations[key] = value
 
     for detection_id, tracking_proposal in proposal_by_detection.items():
         detection = detection_by_id.get(detection_id)
@@ -1894,6 +2028,38 @@ async def _run_observation_collaboration_diagnostic(
                 verification_status = status_value
                 verification_status_counts[verification_status] = verification_status_counts.get(verification_status, 0) + 1
 
+        observation_dimensions = _build_observation_verification_dimensions(
+            observation_payload=observation_payload,
+            deterministic_audit=deterministic_audit,
+            observation_invocation=(observation_result.get("invocation") if isinstance(observation_result, dict) else None),
+            observation_verdict=(verdict if isinstance(verdict, dict) else None),
+        )
+        for dimension_key in (
+            "structured_motion_depth_consistency",
+            "visual_identity_verifiability",
+            "overall_observation_verification",
+        ):
+            dimension_payload = observation_dimensions.get(dimension_key)
+            if not isinstance(dimension_payload, dict):
+                continue
+            status_value = dimension_payload.get("status")
+            if not isinstance(status_value, str):
+                continue
+            counts = modality_dimension_status_counts[dimension_key]
+            counts[status_value] = counts.get(status_value, 0) + 1
+
+        expected_track_id = expected_correct_associations.get(detection_id)
+        initial_proposed_track_id = (
+            proposal_view.get("proposed_track_id")
+            if isinstance(proposal_view.get("proposed_track_id"), str)
+            else None
+        )
+        initial_expected_identity_status, initial_matches_expected_identity = _classify_expected_identity_status(
+            expected_track_id=expected_track_id,
+            proposed_track_id=initial_proposed_track_id,
+        )
+        observation_independently_supported_initial_association = verification_status == "supported"
+
         per_detection[detection_id] = {
             "tracking_proposal": proposal_view,
             "observation_request_payload": observation_payload,
@@ -1902,6 +2068,26 @@ async def _run_observation_collaboration_diagnostic(
             "deterministic_audit": deterministic_audit,
             "coordinator_decision": updates_by_detection.get(detection_id),
             "observation_verification_status": verification_status,
+            "observation_verification_dimensions": observation_dimensions,
+            "diagnostic_tracking_evaluation": {
+                "expected_track_id": expected_track_id,
+                "initial_proposed_track_id": initial_proposed_track_id,
+                "initial_expected_identity_status": initial_expected_identity_status,
+                "initial_matches_expected_identity": initial_matches_expected_identity,
+                "final_proposed_track_id": initial_proposed_track_id,
+                "final_expected_identity_status": initial_expected_identity_status,
+                "final_matches_expected_identity": initial_matches_expected_identity,
+                "reconsideration_proposed_track_id_changed": False,
+                "incorrect_initial_corrected_after_feedback": False,
+                "observation_independently_supported_initial_association": (
+                    observation_independently_supported_initial_association
+                ),
+                "observation_independently_supported_final_association": (
+                    observation_independently_supported_initial_association
+                ),
+                "deterministic_recovery_correction_proposed": False,
+                "deterministic_recovery_contributed": False,
+            },
         }
 
     conflicting_proposed_track_ids = _collect_conflicting_proposed_track_ids(per_detection)
@@ -2112,11 +2298,74 @@ async def _run_observation_collaboration_diagnostic(
             "coordinator_decision": round2_coordinator_decision,
             "observation_verification_status": round2_verification_status,
         }
+        round2_dimensions = _build_observation_verification_dimensions(
+            observation_payload=round2_observation_payload,
+            deterministic_audit=round2_deterministic_audit,
+            observation_invocation=(
+                round2_observation_result.get("invocation")
+                if isinstance(round2_observation_result, dict)
+                else None
+            ),
+            observation_verdict=(round2_verdict if isinstance(round2_verdict, dict) else None),
+        )
+        payload["observation_verification_dimensions_round2"] = round2_dimensions
+        for dimension_key in (
+            "structured_motion_depth_consistency",
+            "visual_identity_verifiability",
+            "overall_observation_verification",
+        ):
+            dimension_payload = round2_dimensions.get(dimension_key)
+            if not isinstance(dimension_payload, dict):
+                continue
+            status_value = dimension_payload.get("status")
+            if not isinstance(status_value, str):
+                continue
+            counts = modality_dimension_status_counts[dimension_key]
+            counts[status_value] = counts.get(status_value, 0) + 1
+
         payload["diagnostic_adjudication_final"] = _classify_diagnostic_adjudication(
             detection_id=detection_id,
             per_detection_payload=final_adjudication_input,
             conflicting_proposed_track_ids=set(),
         )
+
+        tracking_evaluation = payload.get("diagnostic_tracking_evaluation")
+        if isinstance(tracking_evaluation, dict):
+            initial_proposed_track_id = (
+                tracking_evaluation.get("initial_proposed_track_id")
+                if isinstance(tracking_evaluation.get("initial_proposed_track_id"), str)
+                else None
+            )
+            revised_proposed_track_id = (
+                revised_proposal_view.get("proposed_track_id")
+                if isinstance(revised_proposal_view.get("proposed_track_id"), str)
+                else None
+            )
+            track_id_changed = revised_proposed_track_id != initial_proposed_track_id
+            expected_track_id = (
+                tracking_evaluation.get("expected_track_id")
+                if isinstance(tracking_evaluation.get("expected_track_id"), str)
+                else None
+            )
+            final_expected_identity_status, final_matches_expected_identity = _classify_expected_identity_status(
+                expected_track_id=expected_track_id,
+                proposed_track_id=revised_proposed_track_id,
+            )
+            initial_matches_expected_identity = tracking_evaluation.get("initial_matches_expected_identity")
+            corrected_after_feedback = (
+                initial_matches_expected_identity is False
+                and final_matches_expected_identity is True
+                and track_id_changed
+            )
+            tracking_evaluation["final_proposed_track_id"] = revised_proposed_track_id
+            tracking_evaluation["final_expected_identity_status"] = final_expected_identity_status
+            tracking_evaluation["final_matches_expected_identity"] = final_matches_expected_identity
+            tracking_evaluation["reconsideration_proposed_track_id_changed"] = track_id_changed
+            tracking_evaluation["incorrect_initial_corrected_after_feedback"] = corrected_after_feedback
+            tracking_evaluation["observation_independently_supported_final_association"] = (
+                round2_verification_status == "supported"
+            )
+            payload["diagnostic_tracking_evaluation"] = tracking_evaluation
 
     final_track_assignment_by_detection: dict[str, str | None] = {}
     for detection_id, payload in per_detection.items():
@@ -2177,6 +2426,53 @@ async def _run_observation_collaboration_diagnostic(
         scenario_metadata=scenario_metadata,
     )
 
+    tracking_evaluation_summary = {
+        "initial_expected_identity_status_counts": {},
+        "final_expected_identity_status_counts": {},
+        "reconsideration_track_id_changed_count": 0,
+        "incorrect_initial_corrected_after_feedback_count": 0,
+        "observation_supported_final_association_count": 0,
+        "deterministic_recovery_correction_proposed_count": 0,
+        "deterministic_recovery_contributed_count": 0,
+    }
+
+    for payload in per_detection.values():
+        if not isinstance(payload, dict):
+            continue
+        tracking_evaluation = payload.get("diagnostic_tracking_evaluation")
+        if not isinstance(tracking_evaluation, dict):
+            continue
+
+        recovery_payload = payload.get("diagnostic_alternative_identity_recovery")
+        recovery_correction_proposed = (
+            isinstance(recovery_payload, dict)
+            and isinstance(recovery_payload.get("proposed_correction"), dict)
+        )
+        tracking_evaluation["deterministic_recovery_correction_proposed"] = recovery_correction_proposed
+        tracking_evaluation["deterministic_recovery_contributed"] = False
+
+        initial_status = tracking_evaluation.get("initial_expected_identity_status")
+        if isinstance(initial_status, str):
+            counts = tracking_evaluation_summary["initial_expected_identity_status_counts"]
+            counts[initial_status] = counts.get(initial_status, 0) + 1
+
+        final_status = tracking_evaluation.get("final_expected_identity_status")
+        if isinstance(final_status, str):
+            counts = tracking_evaluation_summary["final_expected_identity_status_counts"]
+            counts[final_status] = counts.get(final_status, 0) + 1
+
+        if tracking_evaluation.get("reconsideration_proposed_track_id_changed") is True:
+            tracking_evaluation_summary["reconsideration_track_id_changed_count"] += 1
+        if tracking_evaluation.get("incorrect_initial_corrected_after_feedback") is True:
+            tracking_evaluation_summary["incorrect_initial_corrected_after_feedback_count"] += 1
+        if tracking_evaluation.get("observation_independently_supported_final_association") is True:
+            tracking_evaluation_summary["observation_supported_final_association_count"] += 1
+        if recovery_correction_proposed:
+            tracking_evaluation_summary["deterministic_recovery_correction_proposed_count"] += 1
+        if tracking_evaluation.get("deterministic_recovery_contributed") is True:
+            tracking_evaluation_summary["deterministic_recovery_contributed_count"] += 1
+        payload["diagnostic_tracking_evaluation"] = tracking_evaluation
+
     return {
         "enabled": mode != OBSERVATION_VERIFICATION_MODE_OFF,
         "mode": mode,
@@ -2220,6 +2516,8 @@ async def _run_observation_collaboration_diagnostic(
                     + (len(proposal_by_detection) + len(eligible_detection_ids))
                 ),
             },
+            "observation_verification_dimensions_status_counts": modality_dimension_status_counts,
+            "diagnostic_tracking_evaluation": tracking_evaluation_summary,
             "diagnostic_alternative_identity_recovery": recovery_summary,
             "provider_request_budget": (
                 {

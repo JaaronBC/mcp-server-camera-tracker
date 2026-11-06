@@ -1,1 +1,0 @@
-{"timestamp": 8021.0, "tracks": [{"track_id": "track-live-1", "timestamp": 8020.0, "ground_position": {"x": 0.0, "z": 1.0}, "confidence": 0.9}, {"track_id": "track-live-1", "timestamp": 8021.0, "ground_position": {"x": 0.5, "z": 1.2}, "confidence": 0.9}]}

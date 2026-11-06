@@ -30,6 +30,9 @@ class _InvalidCoordinator:
 
 class TestTrackingEvidencePackaging(unittest.TestCase):
     def _detection(self, track_id: str, detection_id: str, timestamp: float) -> DetectionCandidate:
+        detection_reference = (
+            f"fdet-{int(float(timestamp) * 1_000_000)}-0-{detection_id}-{track_id}"
+        )
         return DetectionCandidate(
             detection_id=detection_id,
             timestamp=timestamp,
@@ -45,6 +48,7 @@ class TestTrackingEvidencePackaging(unittest.TestCase):
             ground_coordinate_unit="meters",
             position_kind="calibrated_ground_plane",
             motion_history=[],
+            detection_reference=detection_reference,
         )
 
     def _wait_for_frame_available(self, resolver: TrackingEvidenceResolver, frame_reference: str, timeout_seconds: float = 1.0) -> bool:
@@ -192,8 +196,16 @@ class TestTrackingEvidencePackaging(unittest.TestCase):
                 expected_track_id="track-1",
                 expected_detection_id="det-1",
                 expected_frame_reference=frame_evidence.frame_reference,
+                expected_tracking_detection_reference="fdet-1004000000-0-det-1-track-1",
             )
             self.assertTrue(resolved["valid"])
+            metadata = resolved.get("metadata")
+            self.assertIsInstance(metadata, dict)
+            assert isinstance(metadata, dict)
+            self.assertTrue(
+                isinstance(metadata.get("tracking_detection_reference"), str)
+                and str(metadata.get("tracking_detection_reference")).startswith("fdet-")
+            )
 
             wrong_linkage = resolver.resolve_reference(
                 detection_ref,
@@ -201,6 +213,16 @@ class TestTrackingEvidencePackaging(unittest.TestCase):
             )
             self.assertFalse(wrong_linkage["valid"])
             self.assertEqual(wrong_linkage["status"], "track_linkage_mismatch")
+
+            mismatched_tracking_reference = resolver.resolve_reference(
+                detection_ref,
+                expected_tracking_detection_reference="fdet-mismatch",
+            )
+            self.assertFalse(mismatched_tracking_reference["valid"])
+            self.assertEqual(
+                mismatched_tracking_reference["status"],
+                "tracking_detection_reference_mismatch",
+            )
 
             resolver.shutdown()
             store.shutdown()
@@ -254,6 +276,9 @@ class TestTrackingEvidencePackaging(unittest.TestCase):
                 expected_track_id="track-1",
                 expected_detection_id="det-1",
                 expected_frame_reference=frame_evidence.frame_reference,
+                expected_tracking_detection_reference=(
+                    f"fdet-{int(float(now) * 1_000_000)}-0-det-1-track-1"
+                ),
                 now_timestamp=now + 0.1,
             )
             self.assertTrue(detection_resolution["valid"])
@@ -276,6 +301,31 @@ class TestTrackingEvidencePackaging(unittest.TestCase):
             self.assertEqual(package.envelope.track_id, "track-1")
             self.assertEqual(package.envelope.frame_reference, frame_evidence.frame_reference)
             self.assertGreater(len(package.image_evidence.image_bytes), 0)
+
+            resolver.shutdown()
+            store.shutdown()
+
+    def test_detection_reference_mapping_missing_fails_explicitly(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = TrackingEvidenceStore(root / "tracking_evidence")
+
+            reference = store.register_detection_reference(
+                track_id="track-1",
+                detection_id="det-1",
+                timestamp=1234.5,
+                frame_reference=None,
+                pixel_bbox=None,
+                tracking_detection_reference=None,
+            )
+
+            resolver = TrackingEvidenceResolver(root / "tracking_evidence")
+            resolution = resolver.resolve_reference(
+                reference,
+                expected_tracking_detection_reference="fdet-required",
+            )
+            self.assertFalse(resolution["valid"])
+            self.assertEqual(resolution["status"], "tracking_detection_reference_missing")
 
             resolver.shutdown()
             store.shutdown()
