@@ -72,15 +72,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 def resolve_model_path() -> str:
-    candidates = [
-        Path(__file__).resolve().parent / "yolo11n.pt",
-        PROJECT_ROOT / "yolo11n.pt",
-        Path("yolov8n.pt"),
-    ]
-    for candidate in candidates:
-        if candidate.exists():
-            return str(candidate)
-    return "yolov8n.pt"
+    return str(PROJECT_ROOT / "YoloModels" / "droneModel.pt")
 
 
 def build_tracking_message(timestamp: float, detections: list[dict]) -> dict:

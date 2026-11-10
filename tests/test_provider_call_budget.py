@@ -311,7 +311,7 @@ class TestProviderCallBudget(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             env = _env_for_budget(temp_dir)
             with patch.dict(os.environ, env, clear=False):
-                with patch("agents.provider_call_budget.fcntl.flock", side_effect=OSError("lock failed")):
+                with patch("agents.provider_call_budget.FileLock.acquire", side_effect=OSError("lock failed")):
                     reservation = provider_call_budget.reserve_provider_call_attempt(provider_call_budget.ROLE_TRACKING_VLM)
 
         self.assertFalse(reservation.allowed)

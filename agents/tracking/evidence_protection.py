@@ -8,7 +8,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-import fcntl
+from filelock import FileLock, Timeout
 
 
 def _safe_unlink(path: Path) -> None:
@@ -53,7 +53,7 @@ class EvidenceProtectionLock:
             return True
 
         try:
-            handle = self._lock_path.open("a+", encoding="utf-8")
+            handle = FileLock(str(self._lock_path))
         except Exception:
             return False
 
@@ -62,14 +62,17 @@ class EvidenceProtectionLock:
                 with self._inproc_guard:
                     if lock_key in self._inproc_held_paths:
                         raise BlockingIOError()
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                try:
+                    handle.acquire(timeout=0)
+                except Timeout as error:
+                    raise BlockingIOError() from error
                 with self._inproc_guard:
                     self._inproc_held_paths.add(lock_key)
                 try:
-                    handle.seek(0)
-                    handle.truncate(0)
-                    handle.write(f"pid={os.getpid()} acquired_at={time.time()}\n")
-                    handle.flush()
+                    self._lock_path.write_text(
+                        f"pid={os.getpid()} acquired_at={time.time()}\n",
+                        encoding="utf-8",
+                    )
                 except Exception:
                     pass
                 self._handle = handle
@@ -96,11 +99,7 @@ class EvidenceProtectionLock:
         if handle is None:
             return
         try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        except Exception:
-            pass
-        try:
-            handle.close()
+            handle.release()
         except Exception:
             pass
         with self._inproc_guard:

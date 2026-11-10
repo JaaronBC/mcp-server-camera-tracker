@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
 
 from agents.dashboard.state import SharedDashboardState
-from agents.dashboard.tracking_loop import run_live_tracking_loop
+from agents.dashboard.tracking_loop import resolve_model_path, run_live_tracking_loop
 
 
 class FakeCapture:
@@ -42,6 +43,12 @@ class FakeRuntime:
 
 
 class TestTrackingLoopVideoInput(unittest.TestCase):
+    def test_resolve_model_path_uses_drone_model(self) -> None:
+        self.assertEqual(
+            resolve_model_path(),
+            str(Path(__file__).resolve().parents[1] / "YoloModels" / "droneModel.pt"),
+        )
+
     def test_video_frames_are_shown_and_tracked(self) -> None:
         frame = np.zeros((24, 32, 3), dtype=np.uint8)
         annotated_frame = np.full((24, 32, 3), 11, dtype=np.uint8)

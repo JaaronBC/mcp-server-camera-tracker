@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import fcntl
+from filelock import FileLock
 
 ROLE_TRACKING_VLM = "tracking_vlm"
 ROLE_OBSERVATION_TEXT = "observation_text"
@@ -288,54 +288,47 @@ def reserve_provider_call_attempt(role: str) -> ProviderCallReservation:
 
     try:
         with _THREAD_LOCK:
-            with lock_path.open("a+", encoding="utf-8") as lock_handle:
-                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
-                try:
-                    state = _load_state(state_path, limits)
-                    state["limits"] = limits
+            with FileLock(str(lock_path)):
+                state = _load_state(state_path, limits)
+                state["limits"] = limits
+                state["updated_at"] = time.time()
+                _write_state(state_path, state)
+                totals = state["totals"]
+                per_role = totals["per_role_attempted"]
+
+                total_limit = limits["total_limit"]
+                role_limit = limits["per_role_limits"][role]
+
+                if totals["attempted"] >= total_limit:
+                    reservation = ProviderCallReservation(
+                        enabled=True,
+                        allowed=False,
+                        role=role,
+                        attempt_id=attempt_id,
+                        reserved_at=reserved_at,
+                        reason="global_limit_exhausted",
+                    )
+                elif per_role.get(role, 0) >= role_limit:
+                    reservation = ProviderCallReservation(
+                        enabled=True,
+                        allowed=False,
+                        role=role,
+                        attempt_id=attempt_id,
+                        reserved_at=reserved_at,
+                        reason="role_limit_exhausted",
+                    )
+                else:
+                    totals["attempted"] += 1
+                    per_role[role] = per_role.get(role, 0) + 1
                     state["updated_at"] = time.time()
                     _write_state(state_path, state)
-                    totals = state["totals"]
-                    per_role = totals["per_role_attempted"]
-
-                    total_limit = limits["total_limit"]
-                    role_limit = limits["per_role_limits"][role]
-
-                    if totals["attempted"] >= total_limit:
-                        reservation = ProviderCallReservation(
-                            enabled=True,
-                            allowed=False,
-                            role=role,
-                            attempt_id=attempt_id,
-                            reserved_at=reserved_at,
-                            reason="global_limit_exhausted",
-                        )
-                    elif per_role.get(role, 0) >= role_limit:
-                        reservation = ProviderCallReservation(
-                            enabled=True,
-                            allowed=False,
-                            role=role,
-                            attempt_id=attempt_id,
-                            reserved_at=reserved_at,
-                            reason="role_limit_exhausted",
-                        )
-                    else:
-                        totals["attempted"] += 1
-                        per_role[role] = per_role.get(role, 0) + 1
-                        state["updated_at"] = time.time()
-                        _write_state(state_path, state)
-                        reservation = ProviderCallReservation(
-                            enabled=True,
-                            allowed=True,
-                            role=role,
-                            attempt_id=attempt_id,
-                            reserved_at=reserved_at,
-                        )
-                finally:
-                    try:
-                        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
-                    except OSError:
-                        pass
+                    reservation = ProviderCallReservation(
+                        enabled=True,
+                        allowed=True,
+                        role=role,
+                        attempt_id=attempt_id,
+                        reserved_at=reserved_at,
+                    )
     except RuntimeError as error:
         reservation = ProviderCallReservation(
             enabled=True,
