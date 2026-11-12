@@ -22,6 +22,8 @@ class FakeVisualTrackingAgent:
         self._result = result
         self._delay_seconds = delay_seconds
         self.model = model
+        self.call_count = 0
+        self.received_event_reasons: list[list[str]] = []
 
     async def propose_associations(
         self,
@@ -31,6 +33,8 @@ class FakeVisualTrackingAgent:
         request_timeout_seconds: float = 2.0,
     ) -> VisualTrackingAgentResult:
         # Performs propose associations logic.
+        self.call_count += 1
+        self.received_event_reasons.append(list(event_reasons or []))
         if self._delay_seconds > 0:
             await asyncio.sleep(self._delay_seconds)
         return self._result
@@ -378,6 +382,165 @@ class TestVisualTrackingRuntime(unittest.TestCase):
         self.assertLess(elapsed, 0.05)
         self.assertTrue(runtime.is_busy())
 
+        runtime.shutdown()
+
+    def test_periodic_only_reasons_respect_minimum_interval(self) -> None:
+        agent = FakeVisualTrackingAgent(
+            VisualTrackingAgentResult(
+                available=True,
+                proposals=[],
+                uncertainty_flags=["periodic"],
+                supporting_evidence=[],
+                latency_ms=5.0,
+            )
+        )
+        runtime = AsyncVisualTrackingRuntime(
+            AgentCoordinator(),
+            agent,
+            min_invoke_interval_seconds=0.5,
+        )
+        detection = make_detection()
+        baseline = time.time()
+
+        started_first = runtime.submit_if_needed(
+            now=baseline,
+            frame_reference=None,
+            detections=[detection],
+            event_reasons=["periodic_visual_continuity_check"],
+        )
+        self.assertTrue(started_first)
+
+        deadline = time.time() + 1.0
+        while runtime.is_busy() and time.time() < deadline:
+            time.sleep(0.01)
+
+        started_second = runtime.submit_if_needed(
+            now=baseline + 0.1,
+            frame_reference=None,
+            detections=[detection],
+            event_reasons=["periodic_visual_continuity_check"],
+        )
+        self.assertFalse(started_second)
+
+        started_third = runtime.submit_if_needed(
+            now=baseline + 0.7,
+            frame_reference=None,
+            detections=[detection],
+            event_reasons=["periodic_visual_continuity_check"],
+        )
+        self.assertTrue(started_third)
+        runtime.shutdown()
+
+    def test_event_driven_reasons_can_bypass_minimum_interval(self) -> None:
+        agent = FakeVisualTrackingAgent(
+            VisualTrackingAgentResult(
+                available=True,
+                proposals=[],
+                uncertainty_flags=["event"],
+                supporting_evidence=[],
+                latency_ms=5.0,
+            )
+        )
+        runtime = AsyncVisualTrackingRuntime(
+            AgentCoordinator(),
+            agent,
+            min_invoke_interval_seconds=5.0,
+        )
+        detection = make_detection()
+        baseline = time.time()
+
+        started_first = runtime.submit_if_needed(
+            now=baseline,
+            frame_reference=None,
+            detections=[detection],
+            event_reasons=["periodic_visual_continuity_check"],
+        )
+        self.assertTrue(started_first)
+
+        deadline = time.time() + 1.0
+        while runtime.is_busy() and time.time() < deadline:
+            time.sleep(0.01)
+
+        started_second = runtime.submit_if_needed(
+            now=baseline + 0.1,
+            frame_reference=None,
+            detections=[detection],
+            event_reasons=["possible_id_switch", "periodic_visual_continuity_check"],
+        )
+        self.assertTrue(started_second)
+        runtime.shutdown()
+
+    def test_repeated_periodic_submissions_do_not_trigger_extra_calls(self) -> None:
+        agent = FakeVisualTrackingAgent(
+            VisualTrackingAgentResult(
+                available=True,
+                proposals=[],
+                uncertainty_flags=["periodic"],
+                supporting_evidence=[],
+                latency_ms=5.0,
+            )
+        )
+        runtime = AsyncVisualTrackingRuntime(
+            AgentCoordinator(),
+            agent,
+            min_invoke_interval_seconds=0.5,
+        )
+        detection = make_detection()
+        baseline = time.time()
+
+        started_first = runtime.submit_if_needed(
+            now=baseline,
+            frame_reference=None,
+            detections=[detection],
+            event_reasons=["periodic_visual_continuity_check"],
+        )
+        self.assertTrue(started_first)
+
+        deadline = time.time() + 1.0
+        while runtime.is_busy() and time.time() < deadline:
+            time.sleep(0.01)
+
+        for offset in (0.1, 0.2, 0.3, 0.4):
+            started = runtime.submit_if_needed(
+                now=baseline + offset,
+                frame_reference=None,
+                detections=[detection],
+                event_reasons=["periodic_visual_continuity_check"],
+            )
+            self.assertFalse(started)
+
+        self.assertEqual(agent.call_count, 1)
+        runtime.shutdown()
+
+    def test_priority_event_does_not_replace_pending_request(self) -> None:
+        slow_agent = FakeVisualTrackingAgent(
+            VisualTrackingAgentResult(
+                available=True,
+                proposals=[],
+                uncertainty_flags=[],
+                supporting_evidence=[],
+                latency_ms=20.0,
+            ),
+            delay_seconds=0.2,
+        )
+        runtime = AsyncVisualTrackingRuntime(AgentCoordinator(), slow_agent)
+        detection = make_detection()
+
+        started_first = runtime.submit_if_needed(
+            now=time.time(),
+            frame_reference=None,
+            detections=[detection],
+            event_reasons=["periodic_visual_continuity_check"],
+        )
+        self.assertTrue(started_first)
+
+        started_second = runtime.submit_if_needed(
+            now=time.time(),
+            frame_reference=None,
+            detections=[detection],
+            event_reasons=["possible_id_switch"],
+        )
+        self.assertFalse(started_second)
         runtime.shutdown()
 
     def test_tracking_continues_when_vlm_unavailable(self) -> None:

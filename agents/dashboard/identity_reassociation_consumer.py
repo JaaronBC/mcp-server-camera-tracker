@@ -190,6 +190,38 @@ class IdentityReassociationIntentConsumer:
 
             current_owner = registry.get_identity_for_yolo_track(intent.target_yolo_track_id)
             if isinstance(current_owner, str) and current_owner and current_owner != intent.app_identity_id:
+                owner_record = registry.get_record(current_owner)
+                transfer_eligible = (
+                    owner_record is not None
+                    and owner_record.provisional
+                    and record.status == "temporarily_lost"
+                    and self._intent_supports_provisional_transfer(
+                        intent=intent,
+                        expected_source_identity_id=intent.app_identity_id,
+                    )
+                )
+                if transfer_eligible:
+                    transfer_result = registry.apply_verified_provisional_owner_transfer(
+                        app_identity_id=intent.app_identity_id,
+                        provisional_owner_identity_id=current_owner,
+                        target_yolo_track_id=intent.target_yolo_track_id,
+                        now=now,
+                        expected_generation_at_least=intent.identity_snapshot_generation,
+                        expected_version=intent.identity_snapshot_version,
+                    )
+                    if transfer_result.accepted:
+                        applied += 1
+                        reserved_target_tracks.add(intent.target_yolo_track_id)
+                        reserved_identity_ids.add(intent.app_identity_id)
+                        ack_appends.append(self._build_ack(intent_id=intent.intent_id, outcome="applied", reason="provisional_transfer_applied", now=now))
+                        terminal_outcomes[intent.intent_id] = "applied"
+                    else:
+                        rejected += 1
+                        reason = _as_non_empty_string(transfer_result.reason) or "mutation_rejected"
+                        ack_appends.append(self._build_ack(intent_id=intent.intent_id, outcome="rejected", reason=reason, now=now))
+                        terminal_outcomes[intent.intent_id] = "rejected"
+                    continue
+
                 rejected += 1
                 ack_appends.append(self._build_ack(intent_id=intent.intent_id, outcome="rejected", reason="target_track_owned_by_different_identity", now=now))
                 terminal_outcomes[intent.intent_id] = "rejected"
@@ -290,6 +322,36 @@ class IdentityReassociationIntentConsumer:
             return "target_track_detection_reference_mismatch"
 
         return None
+
+    def _intent_supports_provisional_transfer(
+        self,
+        *,
+        intent: IdentityReassociationMutationIntent,
+        expected_source_identity_id: str,
+    ) -> bool:
+        verification_provenance = intent.verification_provenance
+        if not isinstance(verification_provenance, dict):
+            return False
+        if verification_provenance.get("verification_status") != "supported":
+            return False
+        if verification_provenance.get("identity_consistency") != "consistent":
+            return False
+        if verification_provenance.get("verification_referenced_message_id") != intent.evidence_message_id:
+            return False
+
+        identity_claim_provenance = intent.identity_claim_provenance
+        if not isinstance(identity_claim_provenance, dict):
+            return False
+        if identity_claim_provenance.get("source_agent") != "visual_tracking":
+            return False
+        if identity_claim_provenance.get("source_contract") != "VisualAssociationUpdate":
+            return False
+        if identity_claim_provenance.get("mutation_authorized") is not False:
+            return False
+
+        if intent.app_identity_id != expected_source_identity_id:
+            return False
+        return True
 
     def _load_intent_artifact(self) -> dict[str, Any]:
         if not self._intents_path.is_file():

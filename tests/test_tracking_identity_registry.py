@@ -201,6 +201,106 @@ class TestPersistentIdentityRegistry(unittest.TestCase):
         self.assertFalse(conflict.accepted)
         self.assertEqual(conflict.reason, "track_id_already_assigned")
 
+    def test_verified_provisional_owner_transfer_moves_track_atomically(self) -> None:
+        registry = PersistentIdentityRegistry(retirement_seconds=20.0)
+        registry.process_detections(
+            now=700.0,
+            detections=[self._candidate(detection_id="det-old", yolo_track_id="191")],
+        )
+        source_app_identity_id = registry.get_identity_for_yolo_track("191")
+        self.assertIsNotNone(source_app_identity_id)
+        assert isinstance(source_app_identity_id, str)
+
+        registry.process_detections(
+            now=701.0,
+            detections=[self._candidate(detection_id="det-new", yolo_track_id="210")],
+        )
+
+        provisional_owner_identity_id = registry.get_identity_for_yolo_track("210")
+        self.assertIsNotNone(provisional_owner_identity_id)
+        assert isinstance(provisional_owner_identity_id, str)
+        self.assertNotEqual(source_app_identity_id, provisional_owner_identity_id)
+
+        source_before = registry.get_record(source_app_identity_id)
+        owner_before = registry.get_record(provisional_owner_identity_id)
+        snapshot_before = registry.snapshot()
+        self.assertIsNotNone(source_before)
+        self.assertIsNotNone(owner_before)
+        assert source_before is not None
+        assert owner_before is not None
+        self.assertEqual(source_before.status, "temporarily_lost")
+        self.assertTrue(owner_before.provisional)
+
+        transfer_result = registry.apply_verified_provisional_owner_transfer(
+            app_identity_id=source_app_identity_id,
+            provisional_owner_identity_id=provisional_owner_identity_id,
+            target_yolo_track_id="210",
+            now=701.5,
+            expected_generation_at_least=int(snapshot_before["generation"]),
+            expected_version=int(snapshot_before["version"]),
+        )
+        self.assertTrue(transfer_result.accepted)
+
+        source_after = registry.get_record(source_app_identity_id)
+        owner_after = registry.get_record(provisional_owner_identity_id)
+        self.assertIsNotNone(source_after)
+        self.assertIsNotNone(owner_after)
+        assert source_after is not None
+        assert owner_after is not None
+
+        self.assertEqual(registry.get_identity_for_yolo_track("210"), source_app_identity_id)
+        self.assertIsNone(registry.get_identity_for_yolo_track("191"))
+        self.assertEqual(source_after.status, "visible")
+        self.assertEqual(source_after.yolo_track_id, "210")
+        self.assertEqual(owner_after.status, "temporarily_lost")
+        self.assertNotEqual(owner_after.yolo_track_id, "210")
+
+        owner_history_events = [item.event for item in owner_after.history]
+        self.assertIn("provisional_transfer_released_track", owner_history_events)
+
+    def test_verified_provisional_transfer_failure_is_noop(self) -> None:
+        registry = PersistentIdentityRegistry(retirement_seconds=20.0)
+        registry.process_detections(
+            now=800.0,
+            detections=[self._candidate(detection_id="det-old", yolo_track_id="191")],
+        )
+        source_app_identity_id = registry.get_identity_for_yolo_track("191")
+        self.assertIsNotNone(source_app_identity_id)
+        assert isinstance(source_app_identity_id, str)
+
+        registry.process_detections(
+            now=801.0,
+            detections=[self._candidate(detection_id="det-new", yolo_track_id="210")],
+        )
+        provisional_owner_identity_id = registry.get_identity_for_yolo_track("210")
+        self.assertIsNotNone(provisional_owner_identity_id)
+        assert isinstance(provisional_owner_identity_id, str)
+
+        with registry._lock:
+            owner_record = registry._records[provisional_owner_identity_id]
+            owner_record.provisional = False
+
+        snapshot_before = registry.snapshot()
+        source_owner_before = registry.get_identity_for_yolo_track("191")
+        target_owner_before = registry.get_identity_for_yolo_track("210")
+
+        transfer_result = registry.apply_verified_provisional_owner_transfer(
+            app_identity_id=source_app_identity_id,
+            provisional_owner_identity_id=provisional_owner_identity_id,
+            target_yolo_track_id="210",
+            now=801.5,
+            expected_generation_at_least=int(snapshot_before["generation"]),
+            expected_version=int(snapshot_before["version"]),
+        )
+        self.assertFalse(transfer_result.accepted)
+        self.assertEqual(transfer_result.reason, "target_owner_not_provisional")
+
+        snapshot_after = registry.snapshot()
+        self.assertEqual(snapshot_after["generation"], snapshot_before["generation"])
+        self.assertEqual(snapshot_after["version"], snapshot_before["version"])
+        self.assertEqual(registry.get_identity_for_yolo_track("191"), source_owner_before)
+        self.assertEqual(registry.get_identity_for_yolo_track("210"), target_owner_before)
+
     def test_disabled_mode_is_backward_compatible(self) -> None:
         state = SharedDashboardState(video_path=None)
         state.tracking_identity_registry_enabled = False

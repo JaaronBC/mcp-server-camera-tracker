@@ -1,0 +1,23 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "run-tracking-only-harness",
+			"type": "shell",
+			"command": "/Users/jaaroncabsaban/Documents/GitHub/mcp-server-camera-tracker/.venv/bin/python",
+			"args": [
+				"/tmp/mcp_camera_tracker_runs/run_tracking_only_harness.py"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "run-tracking-only-harness",
+			"type": "shell",
+			"command": "/Users/jaaroncabsaban/Documents/GitHub/mcp-server-camera-tracker/.venv/bin/python",
+			"args": [
+				"/tmp/mcp_camera_tracker_runs/run_tracking_only_harness.py"
+			],
+			"isBackground": false
+		}
+	]
+}

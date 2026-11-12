@@ -714,6 +714,323 @@ class TestTrackingIdentityEvidenceProposals(unittest.TestCase):
             after_contents = snapshot_path.read_text(encoding="utf-8")
             self.assertEqual(before_contents, after_contents)
 
+    def test_backfills_snapshot_metadata_when_evidence_is_usable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            snapshot_path = root / "latest_tracking_identity_snapshot.json"
+            evidence_root = root / "tracking_evidence"
+            now = time.time()
+            _write_snapshot(
+                snapshot_path,
+                {
+                    "schema_version": "1.0",
+                    "state": "available",
+                    "snapshot_created_at": now,
+                    "freshness_window_seconds": 3600.0,
+                    "source_generation": 12,
+                    "source_version": 21,
+                    "identity_count": 1,
+                    "identities": [
+                        {
+                            "app_identity_id": "app-visible",
+                            "status": "visible",
+                            "provisional": False,
+                            "generation": 12,
+                            "identity_version": 4,
+                            "updated_at": 1000.0,
+                            "detection_id": "det-1",
+                            "detection_reference": "fdet-1000000-0-det-1-track-1",
+                            "yolo_track_id": "track-1",
+                            "historical_yolo_track_ids": ["track-1"],
+                            "observation_history": [],
+                        }
+                    ],
+                },
+            )
+
+            proposal_content = json.dumps(
+                {
+                    "proposals": [
+                        {
+                            "detection_id": "det-1",
+                            "proposed_track_id": "track-1",
+                            "association_confidence": 0.82,
+                            "occlusion_likelihood": 0.12,
+                            "id_switch_risk": 0.17,
+                            "depth_conflict_flag": False,
+                            "position_conflict_flag": False,
+                            "uncertainties": [],
+                            "supporting_evidence": ["identity_candidate_match"],
+                            "detection_reference": "fdet-1000000-0-det-1-track-1",
+                            "proposed_app_identity_id": "app-visible",
+                            "rejected_app_identity_ids": [],
+                            "identity_evidence_refs": ["identity_snapshot:gen:12:ver:21"],
+                            "identity_resolution_status": "identity_proposed",
+                        }
+                    ],
+                    "uncertainty_flags": [],
+                    "supporting_evidence": [],
+                }
+            )
+            completions = _CaptureCompletions(proposal_content)
+            client = _CaptureClient(completions)
+            agent = LLMVisualTrackingAgent(client=client)
+
+            env = {
+                "PROVIDER_CALL_BUDGET_ENABLED": "0",
+                "TRACKING_IDENTITY_EVIDENCE_ENABLED": "1",
+                "TRACKING_IDENTITY_SNAPSHOT_PATH": str(snapshot_path),
+                "TRACKING_IDENTITY_EVIDENCE_ROOT_DIR": str(evidence_root),
+                "TRACKING_IDENTITY_EVIDENCE_STALE_SECONDS": "3600",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                result = asyncio.run(
+                    agent.propose_associations(
+                        frame_reference=None,
+                        detections=[_make_detection()],
+                        event_reasons=["possible_id_switch"],
+                        request_timeout_seconds=1.0,
+                    )
+                )
+
+            self.assertTrue(result.available)
+            self.assertEqual(len(result.proposals), 1)
+            proposal = result.proposals[0]
+            self.assertEqual(proposal.proposed_app_identity_id, "app-visible")
+            self.assertEqual(proposal.identity_snapshot_generation, 12)
+            self.assertEqual(proposal.identity_snapshot_version, 21)
+            self.assertEqual(proposal.identity_resolution_status, "identity_proposed")
+
+    def test_conflicting_snapshot_metadata_is_preserved_and_marked_unresolved(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            snapshot_path = root / "latest_tracking_identity_snapshot.json"
+            evidence_root = root / "tracking_evidence"
+            now = time.time()
+            _write_snapshot(
+                snapshot_path,
+                {
+                    "schema_version": "1.0",
+                    "state": "available",
+                    "snapshot_created_at": now,
+                    "freshness_window_seconds": 3600.0,
+                    "source_generation": 12,
+                    "source_version": 21,
+                    "identity_count": 1,
+                    "identities": [
+                        {
+                            "app_identity_id": "app-visible",
+                            "status": "visible",
+                            "provisional": False,
+                            "generation": 12,
+                            "identity_version": 4,
+                            "updated_at": 1000.0,
+                            "detection_id": "det-1",
+                            "detection_reference": "fdet-1000000-0-det-1-track-1",
+                            "yolo_track_id": "track-1",
+                            "historical_yolo_track_ids": ["track-1"],
+                            "observation_history": [],
+                        }
+                    ],
+                },
+            )
+
+            proposal_content = json.dumps(
+                {
+                    "proposals": [
+                        {
+                            "detection_id": "det-1",
+                            "proposed_track_id": "track-1",
+                            "association_confidence": 0.82,
+                            "occlusion_likelihood": 0.12,
+                            "id_switch_risk": 0.17,
+                            "depth_conflict_flag": False,
+                            "position_conflict_flag": False,
+                            "uncertainties": [],
+                            "supporting_evidence": ["identity_candidate_match"],
+                            "detection_reference": "fdet-1000000-0-det-1-track-1",
+                            "proposed_app_identity_id": "app-visible",
+                            "rejected_app_identity_ids": [],
+                            "identity_evidence_refs": ["identity_snapshot:gen:99:ver:77"],
+                            "identity_snapshot_generation": 99,
+                            "identity_snapshot_version": 77,
+                            "identity_resolution_status": "identity_proposed",
+                        }
+                    ],
+                    "uncertainty_flags": [],
+                    "supporting_evidence": [],
+                }
+            )
+            completions = _CaptureCompletions(proposal_content)
+            client = _CaptureClient(completions)
+            agent = LLMVisualTrackingAgent(client=client)
+
+            env = {
+                "PROVIDER_CALL_BUDGET_ENABLED": "0",
+                "TRACKING_IDENTITY_EVIDENCE_ENABLED": "1",
+                "TRACKING_IDENTITY_SNAPSHOT_PATH": str(snapshot_path),
+                "TRACKING_IDENTITY_EVIDENCE_ROOT_DIR": str(evidence_root),
+                "TRACKING_IDENTITY_EVIDENCE_STALE_SECONDS": "3600",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                result = asyncio.run(
+                    agent.propose_associations(
+                        frame_reference=None,
+                        detections=[_make_detection()],
+                        event_reasons=["possible_id_switch"],
+                        request_timeout_seconds=1.0,
+                    )
+                )
+
+            self.assertTrue(result.available)
+            self.assertEqual(len(result.proposals), 1)
+            proposal = result.proposals[0]
+            self.assertEqual(proposal.proposed_app_identity_id, "app-visible")
+            self.assertEqual(proposal.identity_snapshot_generation, 99)
+            self.assertEqual(proposal.identity_snapshot_version, 77)
+            self.assertEqual(proposal.identity_resolution_status, "unresolved_snapshot_mismatch")
+            self.assertIn("identity_claim_snapshot_generation_mismatch", proposal.uncertainties)
+            self.assertIn("identity_claim_snapshot_version_mismatch", proposal.uncertainties)
+
+    def test_missing_identity_evidence_rejects_proposed_identity(self) -> None:
+        completions = _CaptureCompletions(
+            json.dumps(
+                {
+                    "proposals": [
+                        {
+                            "detection_id": "det-1",
+                            "proposed_track_id": "track-1",
+                            "association_confidence": 0.75,
+                            "occlusion_likelihood": 0.2,
+                            "id_switch_risk": 0.2,
+                            "depth_conflict_flag": False,
+                            "position_conflict_flag": False,
+                            "uncertainties": [],
+                            "supporting_evidence": ["appearance_match"],
+                            "detection_reference": "fdet-1000000-0-det-1-track-1",
+                            "proposed_app_identity_id": "app-visible",
+                            "identity_snapshot_generation": 12,
+                            "identity_snapshot_version": 21,
+                            "identity_resolution_status": "identity_proposed",
+                        }
+                    ],
+                    "uncertainty_flags": [],
+                    "supporting_evidence": [],
+                }
+            )
+        )
+        client = _CaptureClient(completions)
+        agent = LLMVisualTrackingAgent(client=client)
+
+        with patch.dict(
+            os.environ,
+            {
+                "PROVIDER_CALL_BUDGET_ENABLED": "0",
+                "TRACKING_IDENTITY_EVIDENCE_ENABLED": "0",
+            },
+            clear=False,
+        ):
+            result = asyncio.run(
+                agent.propose_associations(
+                    frame_reference=None,
+                    detections=[_make_detection()],
+                    event_reasons=["possible_id_switch"],
+                    request_timeout_seconds=1.0,
+                )
+            )
+
+        self.assertTrue(result.available)
+        self.assertEqual(len(result.proposals), 1)
+        proposal = result.proposals[0]
+        self.assertIsNone(proposal.proposed_app_identity_id)
+        self.assertEqual(proposal.identity_resolution_status, "unresolved_identity_evidence_unusable")
+        self.assertIn("identity_claim_without_usable_evidence", proposal.uncertainties)
+
+    def test_stale_snapshot_rejects_proposed_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            snapshot_path = root / "latest_tracking_identity_snapshot.json"
+            evidence_root = root / "tracking_evidence"
+            _write_snapshot(
+                snapshot_path,
+                {
+                    "schema_version": "1.0",
+                    "state": "available",
+                    "snapshot_created_at": 1.0,
+                    "freshness_window_seconds": 0.1,
+                    "source_generation": 12,
+                    "source_version": 21,
+                    "identity_count": 1,
+                    "identities": [
+                        {
+                            "app_identity_id": "app-visible",
+                            "status": "visible",
+                            "provisional": False,
+                            "generation": 12,
+                            "identity_version": 4,
+                            "updated_at": 1000.0,
+                            "detection_id": "det-1",
+                            "detection_reference": "fdet-1000000-0-det-1-track-1",
+                            "yolo_track_id": "track-1",
+                            "historical_yolo_track_ids": ["track-1"],
+                            "observation_history": [],
+                        }
+                    ],
+                },
+            )
+
+            proposal_content = json.dumps(
+                {
+                    "proposals": [
+                        {
+                            "detection_id": "det-1",
+                            "proposed_track_id": "track-1",
+                            "association_confidence": 0.8,
+                            "occlusion_likelihood": 0.2,
+                            "id_switch_risk": 0.1,
+                            "depth_conflict_flag": False,
+                            "position_conflict_flag": False,
+                            "uncertainties": [],
+                            "supporting_evidence": ["appearance_match"],
+                            "detection_reference": "fdet-1000000-0-det-1-track-1",
+                            "proposed_app_identity_id": "app-visible",
+                            "identity_snapshot_generation": 12,
+                            "identity_snapshot_version": 21,
+                            "identity_resolution_status": "identity_proposed",
+                        }
+                    ],
+                    "uncertainty_flags": [],
+                    "supporting_evidence": [],
+                }
+            )
+            completions = _CaptureCompletions(proposal_content)
+            client = _CaptureClient(completions)
+            agent = LLMVisualTrackingAgent(client=client)
+
+            env = {
+                "PROVIDER_CALL_BUDGET_ENABLED": "0",
+                "TRACKING_IDENTITY_EVIDENCE_ENABLED": "1",
+                "TRACKING_IDENTITY_SNAPSHOT_PATH": str(snapshot_path),
+                "TRACKING_IDENTITY_EVIDENCE_ROOT_DIR": str(evidence_root),
+                "TRACKING_IDENTITY_EVIDENCE_STALE_SECONDS": "0.1",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                result = asyncio.run(
+                    agent.propose_associations(
+                        frame_reference=None,
+                        detections=[_make_detection()],
+                        event_reasons=["possible_id_switch"],
+                        request_timeout_seconds=1.0,
+                    )
+                )
+
+            self.assertTrue(result.available)
+            self.assertEqual(len(result.proposals), 1)
+            proposal = result.proposals[0]
+            self.assertIsNone(proposal.proposed_app_identity_id)
+            self.assertEqual(proposal.identity_resolution_status, "unresolved_identity_evidence_unusable")
+            self.assertIn("identity_claim_without_usable_evidence", proposal.uncertainties)
+
 
 if __name__ == "__main__":
     unittest.main()

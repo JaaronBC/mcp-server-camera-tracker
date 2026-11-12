@@ -305,6 +305,178 @@ class PersistentIdentityRegistry:
                 version=self._version,
             )
 
+    def apply_verified_provisional_owner_transfer(
+        self,
+        *,
+        app_identity_id: str,
+        provisional_owner_identity_id: str,
+        target_yolo_track_id: str,
+        now: float,
+        expected_generation_at_least: int | None = None,
+        expected_version: int | None = None,
+    ) -> IdentityMutationResult:
+        with self._lock:
+            source_record = self._records.get(app_identity_id)
+            if source_record is None:
+                return IdentityMutationResult(
+                    accepted=False,
+                    reason="unknown_identity",
+                    app_identity_id=app_identity_id,
+                    generation=self._generation,
+                    version=self._version,
+                )
+
+            if source_record.status == "retired":
+                return IdentityMutationResult(
+                    accepted=False,
+                    reason="identity_retired",
+                    app_identity_id=app_identity_id,
+                    generation=self._generation,
+                    version=self._version,
+                )
+
+            if source_record.status != "temporarily_lost":
+                return IdentityMutationResult(
+                    accepted=False,
+                    reason="source_identity_not_recoverable",
+                    app_identity_id=app_identity_id,
+                    generation=self._generation,
+                    version=self._version,
+                )
+
+            if (
+                expected_generation_at_least is not None
+                and int(expected_generation_at_least) < int(source_record.generation)
+            ):
+                return IdentityMutationResult(
+                    accepted=False,
+                    reason="stale_generation",
+                    app_identity_id=app_identity_id,
+                    generation=self._generation,
+                    version=self._version,
+                )
+
+            if expected_version is not None and int(expected_version) != int(self._version):
+                return IdentityMutationResult(
+                    accepted=False,
+                    reason="version_conflict",
+                    app_identity_id=app_identity_id,
+                    generation=self._generation,
+                    version=self._version,
+                )
+
+            normalized_track_id = self._as_non_empty_string(target_yolo_track_id)
+            if normalized_track_id is None:
+                return IdentityMutationResult(
+                    accepted=False,
+                    reason="invalid_track_id",
+                    app_identity_id=app_identity_id,
+                    generation=self._generation,
+                    version=self._version,
+                )
+
+            if provisional_owner_identity_id == app_identity_id:
+                return IdentityMutationResult(
+                    accepted=False,
+                    reason="provisional_owner_same_as_source",
+                    app_identity_id=app_identity_id,
+                    generation=self._generation,
+                    version=self._version,
+                )
+
+            current_owner_identity_id = self._active_yolo_to_identity.get(normalized_track_id)
+            if current_owner_identity_id is None:
+                return IdentityMutationResult(
+                    accepted=False,
+                    reason="target_track_unassigned",
+                    app_identity_id=app_identity_id,
+                    generation=self._generation,
+                    version=self._version,
+                )
+            if current_owner_identity_id != provisional_owner_identity_id:
+                return IdentityMutationResult(
+                    accepted=False,
+                    reason="target_track_owner_mismatch",
+                    app_identity_id=app_identity_id,
+                    generation=self._generation,
+                    version=self._version,
+                )
+
+            provisional_owner_record = self._records.get(provisional_owner_identity_id)
+            if provisional_owner_record is None:
+                return IdentityMutationResult(
+                    accepted=False,
+                    reason="provisional_owner_missing",
+                    app_identity_id=app_identity_id,
+                    generation=self._generation,
+                    version=self._version,
+                )
+            if provisional_owner_record.status == "retired":
+                return IdentityMutationResult(
+                    accepted=False,
+                    reason="provisional_owner_retired",
+                    app_identity_id=app_identity_id,
+                    generation=self._generation,
+                    version=self._version,
+                )
+            if not provisional_owner_record.provisional:
+                return IdentityMutationResult(
+                    accepted=False,
+                    reason="target_owner_not_provisional",
+                    app_identity_id=app_identity_id,
+                    generation=self._generation,
+                    version=self._version,
+                )
+
+            source_old_track_id = self._as_non_empty_string(source_record.yolo_track_id)
+            if source_old_track_id is not None and source_old_track_id != normalized_track_id:
+                self._active_yolo_to_identity.pop(source_old_track_id, None)
+
+            self._active_yolo_to_identity.pop(normalized_track_id, None)
+            self._active_yolo_to_identity[normalized_track_id] = app_identity_id
+
+            source_record.generation = self._generation
+            source_record.version += 1
+            source_record.updated_at = float(now)
+            source_record.status = "visible"
+            source_record.yolo_track_id = normalized_track_id
+            source_record.loss_started_at = None
+            self._append_history(
+                source_record,
+                generation=self._generation,
+                timestamp=now,
+                event="provisional_transfer_applied",
+                detection_id=source_record.detection_id,
+                detection_reference=source_record.detection_reference,
+                yolo_track_id=source_record.yolo_track_id,
+            )
+
+            provisional_owner_record.generation = self._generation
+            provisional_owner_record.version += 1
+            provisional_owner_record.updated_at = float(now)
+            provisional_owner_record.status = "temporarily_lost"
+            provisional_owner_record.loss_started_at = float(now)
+            if provisional_owner_record.yolo_track_id == normalized_track_id:
+                provisional_owner_record.yolo_track_id = None
+            self._append_history(
+                provisional_owner_record,
+                generation=self._generation,
+                timestamp=now,
+                event="provisional_transfer_released_track",
+                detection_id=provisional_owner_record.detection_id,
+                detection_reference=provisional_owner_record.detection_reference,
+                yolo_track_id=provisional_owner_record.yolo_track_id,
+            )
+
+            self._version += 1
+            return IdentityMutationResult(
+                accepted=True,
+                reason=None,
+                app_identity_id=app_identity_id,
+                generation=self._generation,
+                version=self._version,
+            )
+
     def get_record(self, app_identity_id: str) -> PersistentIdentityRecord | None:
         with self._lock:
             record = self._records.get(app_identity_id)

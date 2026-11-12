@@ -961,6 +961,310 @@ class TestIdentityReassociationIntentConsumer(unittest.TestCase):
             self.assertEqual(restart_summary["processed"], 0)
             self.assertEqual(registry.get_identity_for_yolo_track("12"), app_identity_id)
 
+    def test_verified_provisional_conflict_transfers_and_repeat_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            evidence_root = root / "tracking_evidence"
+            intents_path = root / "tracking_identity_reassociation_intents.json"
+            ack_path = root / "tracking_identity_reassociation_ack_ledger.json"
+
+            registry = PersistentIdentityRegistry(retirement_seconds=20.0)
+            registry.process_detections(
+                now=200.0,
+                detections=[_candidate(detection_id="det-old", yolo_track_id="track-old", timestamp=200.0, detection_reference="fdet-old")],
+            )
+            source_identity_id = registry.get_identity_for_yolo_track("track-old")
+            self.assertIsNotNone(source_identity_id)
+            assert isinstance(source_identity_id, str)
+
+            registry.process_detections(
+                now=201.0,
+                detections=[_candidate(detection_id="det-new", yolo_track_id="track-new", timestamp=201.0, detection_reference="fdet-new")],
+            )
+            provisional_owner_id = registry.get_identity_for_yolo_track("track-new")
+            self.assertIsNotNone(provisional_owner_id)
+            assert isinstance(provisional_owner_id, str)
+            self.assertNotEqual(source_identity_id, provisional_owner_id)
+
+            snapshot = registry.snapshot()
+            d_new, f_new = _seed_evidence(
+                evidence_root=evidence_root,
+                frame_id="f-new",
+                detection_ref_id="d-new",
+                track_id="track-new",
+                detection_id="det-new",
+                canonical_detection_reference="fdet-new",
+                timestamp=201.0,
+            )
+            intent = _build_intent(
+                intent_id="intent-transfer",
+                target_yolo_track_id="track-new",
+                app_identity_id=source_identity_id,
+                canonical_detection_reference="fdet-new",
+                evidence_detection_reference=d_new,
+                frame_reference=f_new,
+                process_nonce="proc-1",
+                detection_ref_id="d-new",
+                snapshot_generation=int(snapshot["generation"]),
+                snapshot_version=int(snapshot["version"]),
+                generated_at=201.1,
+                expires_at=260.0,
+            )
+            _write_intents(intents_path, [intent], now=201.1)
+
+            consumer = IdentityReassociationIntentConsumer(
+                intents_path=intents_path,
+                ack_ledger_path=ack_path,
+                evidence_root_dir=evidence_root,
+                enabled=True,
+            )
+            first = consumer.poll_and_apply(
+                registry=registry,
+                tracking_candidates=[
+                    _candidate(detection_id="det-new", yolo_track_id="track-new", timestamp=201.2, detection_reference="fdet-new")
+                ],
+                now_timestamp=201.2,
+            )
+
+            self.assertEqual(first["applied"], 1)
+            self.assertEqual(registry.get_identity_for_yolo_track("track-new"), source_identity_id)
+            self.assertIsNone(registry.get_identity_for_yolo_track("track-old"))
+
+            source_record = registry.get_record(source_identity_id)
+            owner_record = registry.get_record(provisional_owner_id)
+            self.assertIsNotNone(source_record)
+            self.assertIsNotNone(owner_record)
+            assert source_record is not None
+            assert owner_record is not None
+            self.assertEqual(source_record.status, "visible")
+            self.assertEqual(owner_record.status, "temporarily_lost")
+            self.assertIn("provisional_transfer_released_track", [item.event for item in owner_record.history])
+
+            restarted_consumer = IdentityReassociationIntentConsumer(
+                intents_path=intents_path,
+                ack_ledger_path=ack_path,
+                evidence_root_dir=evidence_root,
+                enabled=True,
+            )
+            second = restarted_consumer.poll_and_apply(
+                registry=registry,
+                tracking_candidates=[
+                    _candidate(detection_id="det-new", yolo_track_id="track-new", timestamp=201.3, detection_reference="fdet-new")
+                ],
+                now_timestamp=201.3,
+            )
+            self.assertEqual(second["processed"], 0)
+
+    def test_transfer_conflict_rejected_when_owner_is_not_provisional(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            evidence_root = root / "tracking_evidence"
+            intents_path = root / "tracking_identity_reassociation_intents.json"
+            ack_path = root / "tracking_identity_reassociation_ack_ledger.json"
+
+            registry = PersistentIdentityRegistry(retirement_seconds=20.0)
+            registry.process_detections(
+                now=300.0,
+                detections=[_candidate(detection_id="det-old", yolo_track_id="track-old", timestamp=300.0, detection_reference="fdet-old")],
+            )
+            source_identity_id = registry.get_identity_for_yolo_track("track-old")
+            self.assertIsNotNone(source_identity_id)
+            assert isinstance(source_identity_id, str)
+            registry.process_detections(
+                now=301.0,
+                detections=[_candidate(detection_id="det-new", yolo_track_id="track-new", timestamp=301.0, detection_reference="fdet-new")],
+            )
+            provisional_owner_id = registry.get_identity_for_yolo_track("track-new")
+            self.assertIsNotNone(provisional_owner_id)
+            assert isinstance(provisional_owner_id, str)
+
+            with registry._lock:
+                registry._records[provisional_owner_id].provisional = False
+
+            snapshot = registry.snapshot()
+            d_new, f_new = _seed_evidence(
+                evidence_root=evidence_root,
+                frame_id="f-new",
+                detection_ref_id="d-new",
+                track_id="track-new",
+                detection_id="det-new",
+                canonical_detection_reference="fdet-new",
+                timestamp=301.0,
+            )
+            intent = _build_intent(
+                intent_id="intent-non-provisional-owner",
+                target_yolo_track_id="track-new",
+                app_identity_id=source_identity_id,
+                canonical_detection_reference="fdet-new",
+                evidence_detection_reference=d_new,
+                frame_reference=f_new,
+                process_nonce="proc-1",
+                detection_ref_id="d-new",
+                snapshot_generation=int(snapshot["generation"]),
+                snapshot_version=int(snapshot["version"]),
+                generated_at=301.1,
+                expires_at=360.0,
+            )
+            _write_intents(intents_path, [intent], now=301.1)
+
+            consumer = IdentityReassociationIntentConsumer(
+                intents_path=intents_path,
+                ack_ledger_path=ack_path,
+                evidence_root_dir=evidence_root,
+                enabled=True,
+            )
+            summary = consumer.poll_and_apply(
+                registry=registry,
+                tracking_candidates=[
+                    _candidate(detection_id="det-new", yolo_track_id="track-new", timestamp=301.2, detection_reference="fdet-new")
+                ],
+                now_timestamp=301.2,
+            )
+
+            self.assertEqual(summary["applied"], 0)
+            self.assertEqual(summary["rejected"], 1)
+            self.assertEqual(registry.get_identity_for_yolo_track("track-new"), provisional_owner_id)
+            ack_payload = json.loads(ack_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                ack_payload["acknowledgments"][-1]["reason"],
+                "target_track_owned_by_different_identity",
+            )
+
+    def test_transfer_conflict_rejected_when_source_identity_not_recoverable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            evidence_root = root / "tracking_evidence"
+            intents_path = root / "tracking_identity_reassociation_intents.json"
+            ack_path = root / "tracking_identity_reassociation_ack_ledger.json"
+
+            registry = PersistentIdentityRegistry(retirement_seconds=20.0)
+            registry.process_detections(
+                now=400.0,
+                detections=[
+                    _candidate(detection_id="det-a", yolo_track_id="track-a", timestamp=400.0, detection_reference="fdet-a"),
+                    _candidate(detection_id="det-b", yolo_track_id="track-b", timestamp=400.0, detection_reference="fdet-b"),
+                ],
+            )
+            source_identity_id = registry.get_identity_for_yolo_track("track-a")
+            owner_identity_id = registry.get_identity_for_yolo_track("track-b")
+            self.assertIsNotNone(source_identity_id)
+            self.assertIsNotNone(owner_identity_id)
+            assert isinstance(source_identity_id, str)
+            assert isinstance(owner_identity_id, str)
+
+            snapshot = registry.snapshot()
+            d_b, f_b = _seed_evidence(
+                evidence_root=evidence_root,
+                frame_id="f-b",
+                detection_ref_id="d-b",
+                track_id="track-b",
+                detection_id="det-b",
+                canonical_detection_reference="fdet-b",
+                timestamp=400.1,
+            )
+            intent = _build_intent(
+                intent_id="intent-source-visible",
+                target_yolo_track_id="track-b",
+                app_identity_id=source_identity_id,
+                canonical_detection_reference="fdet-b",
+                evidence_detection_reference=d_b,
+                frame_reference=f_b,
+                process_nonce="proc-1",
+                detection_ref_id="d-b",
+                snapshot_generation=int(snapshot["generation"]),
+                snapshot_version=int(snapshot["version"]),
+                generated_at=400.2,
+                expires_at=460.0,
+            )
+            _write_intents(intents_path, [intent], now=400.2)
+
+            consumer = IdentityReassociationIntentConsumer(
+                intents_path=intents_path,
+                ack_ledger_path=ack_path,
+                evidence_root_dir=evidence_root,
+                enabled=True,
+            )
+            summary = consumer.poll_and_apply(
+                registry=registry,
+                tracking_candidates=[
+                    _candidate(detection_id="det-b", yolo_track_id="track-b", timestamp=400.3, detection_reference="fdet-b")
+                ],
+                now_timestamp=400.3,
+            )
+
+            self.assertEqual(summary["applied"], 0)
+            self.assertEqual(summary["rejected"], 1)
+            self.assertEqual(registry.get_identity_for_yolo_track("track-b"), owner_identity_id)
+
+    def test_transfer_conflict_rejected_when_verification_provenance_unverified(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            evidence_root = root / "tracking_evidence"
+            intents_path = root / "tracking_identity_reassociation_intents.json"
+            ack_path = root / "tracking_identity_reassociation_ack_ledger.json"
+
+            registry = PersistentIdentityRegistry(retirement_seconds=20.0)
+            registry.process_detections(
+                now=500.0,
+                detections=[_candidate(detection_id="det-old", yolo_track_id="track-old", timestamp=500.0, detection_reference="fdet-old")],
+            )
+            source_identity_id = registry.get_identity_for_yolo_track("track-old")
+            self.assertIsNotNone(source_identity_id)
+            assert isinstance(source_identity_id, str)
+
+            registry.process_detections(
+                now=501.0,
+                detections=[_candidate(detection_id="det-new", yolo_track_id="track-new", timestamp=501.0, detection_reference="fdet-new")],
+            )
+            owner_identity_id = registry.get_identity_for_yolo_track("track-new")
+            self.assertIsNotNone(owner_identity_id)
+            assert isinstance(owner_identity_id, str)
+
+            snapshot = registry.snapshot()
+            d_new, f_new = _seed_evidence(
+                evidence_root=evidence_root,
+                frame_id="f-new",
+                detection_ref_id="d-new",
+                track_id="track-new",
+                detection_id="det-new",
+                canonical_detection_reference="fdet-new",
+                timestamp=501.1,
+            )
+            intent = _build_intent(
+                intent_id="intent-unverified",
+                target_yolo_track_id="track-new",
+                app_identity_id=source_identity_id,
+                canonical_detection_reference="fdet-new",
+                evidence_detection_reference=d_new,
+                frame_reference=f_new,
+                process_nonce="proc-1",
+                detection_ref_id="d-new",
+                snapshot_generation=int(snapshot["generation"]),
+                snapshot_version=int(snapshot["version"]),
+                generated_at=501.2,
+                expires_at=560.0,
+            )
+            intent.verification_provenance["verification_status"] = "contradicted"
+            _write_intents(intents_path, [intent], now=501.2)
+
+            consumer = IdentityReassociationIntentConsumer(
+                intents_path=intents_path,
+                ack_ledger_path=ack_path,
+                evidence_root_dir=evidence_root,
+                enabled=True,
+            )
+            summary = consumer.poll_and_apply(
+                registry=registry,
+                tracking_candidates=[
+                    _candidate(detection_id="det-new", yolo_track_id="track-new", timestamp=501.3, detection_reference="fdet-new")
+                ],
+                now_timestamp=501.3,
+            )
+
+            self.assertEqual(summary["applied"], 0)
+            self.assertEqual(summary["rejected"], 1)
+            self.assertEqual(registry.get_identity_for_yolo_track("track-new"), owner_identity_id)
+
     def test_malformed_or_corrupt_artifact_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

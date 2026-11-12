@@ -33,6 +33,9 @@ TRACKING_VLM_MODEL = "qwen-3.8-27b"
 DEFAULT_OPENAI_BASE_URL = "https://128.171.10.83:9443/v1"
 DEFAULT_TRACKING_AGENT_MAX_OUTPUT_TOKENS = 384
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_TRACKING_VLM_DIAGNOSTICS_PATH = (
+    PROJECT_ROOT / "captures" / "diagnostics" / "tracking_vlm_attempt_diagnostics.jsonl"
+)
 DEFAULT_TRACKING_SKILL_PATH = PROJECT_ROOT / "skills" / "object-identity-tracking" / "runtime.md"
 TRACKING_AGENT_SYSTEM_PROMPT_FALLBACK = (
     "You are a visual tracking agent for continuity-preserving identity association. "
@@ -364,6 +367,156 @@ def _resolve_tracking_max_output_tokens() -> int | None:
     )
 
 
+def _resolve_tracking_vlm_diagnostics_path() -> Path:
+    configured = os.getenv("TRACKING_VLM_ATTEMPT_DIAGNOSTICS_PATH")
+    if isinstance(configured, str) and configured.strip():
+        candidate = Path(configured.strip()).expanduser()
+        if not candidate.is_absolute():
+            return (PROJECT_ROOT / candidate).resolve()
+        return candidate.resolve()
+    return DEFAULT_TRACKING_VLM_DIAGNOSTICS_PATH
+
+
+def _append_tracking_vlm_attempt_diagnostic_record(payload: dict[str, object]) -> None:
+    path = _resolve_tracking_vlm_diagnostics_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, separators=(",", ":")) + "\n")
+
+
+def _is_usable_identity_proposal(proposal: VisualAssociationProposal) -> bool:
+    if not isinstance(proposal.proposed_app_identity_id, str) or not proposal.proposed_app_identity_id.strip():
+        return False
+    if not isinstance(proposal.detection_reference, str) or not proposal.detection_reference.strip():
+        return False
+    if not isinstance(proposal.identity_snapshot_generation, int):
+        return False
+    if not isinstance(proposal.identity_snapshot_version, int):
+        return False
+    if not isinstance(proposal.identity_resolution_status, str) or not proposal.identity_resolution_status.strip():
+        return False
+    if proposal.identity_resolution_status.strip().lower().startswith("unresolved"):
+        return False
+    return True
+
+
+def _collect_identity_diagnostic_details(
+    *,
+    raw_proposals: list[object] | None,
+    normalized_proposals: list[VisualAssociationProposal] | None,
+) -> dict[str, object]:
+    raw_items = raw_proposals if isinstance(raw_proposals, list) else []
+    normalized_items = normalized_proposals if isinstance(normalized_proposals, list) else []
+
+    raw_identity_candidate_count = sum(1 for item in raw_items if isinstance(item, dict))
+    normalized_identity_candidate_count = len(normalized_items)
+    usable_identity_proposal_count = sum(1 for item in normalized_items if _is_usable_identity_proposal(item))
+
+    normalized_by_detection_id: dict[str, VisualAssociationProposal] = {}
+    for proposal in normalized_items:
+        detection_id = proposal.detection_id
+        if isinstance(detection_id, str) and detection_id and detection_id not in normalized_by_detection_id:
+            normalized_by_detection_id[detection_id] = proposal
+
+    rejected_identity_candidate_count = 0
+    rejection_reasons: set[str] = set()
+
+    for raw_item in raw_items:
+        if not isinstance(raw_item, dict):
+            continue
+        has_identity_keys = any(
+            key in raw_item
+            for key in (
+                "proposed_app_identity_id",
+                "identity_evidence_refs",
+                "identity_snapshot_generation",
+                "identity_snapshot_version",
+                "identity_resolution_status",
+                "rejected_app_identity_ids",
+            )
+        )
+        if not has_identity_keys:
+            continue
+
+        detection_id = raw_item.get("detection_id")
+        normalized = (
+            normalized_by_detection_id.get(detection_id)
+            if isinstance(detection_id, str)
+            else None
+        )
+
+        if normalized is None:
+            rejected_identity_candidate_count += 1
+            rejection_reasons.add("identity_candidate_failed_normalization")
+            continue
+
+        if _is_usable_identity_proposal(normalized):
+            continue
+
+        rejected_identity_candidate_count += 1
+        if not isinstance(normalized.proposed_app_identity_id, str) or not normalized.proposed_app_identity_id.strip():
+            rejection_reasons.add("missing_proposed_app_identity_id")
+        if not isinstance(normalized.identity_snapshot_generation, int):
+            rejection_reasons.add("missing_identity_snapshot_generation")
+        if not isinstance(normalized.identity_snapshot_version, int):
+            rejection_reasons.add("missing_identity_snapshot_version")
+        if isinstance(normalized.identity_resolution_status, str) and normalized.identity_resolution_status:
+            if normalized.identity_resolution_status.startswith("unresolved"):
+                rejection_reasons.add(normalized.identity_resolution_status)
+        for uncertainty in normalized.uncertainties:
+            if isinstance(uncertainty, str) and uncertainty.startswith("identity_claim_"):
+                rejection_reasons.add(uncertainty)
+
+    return {
+        "raw_identity_candidate_count": raw_identity_candidate_count,
+        "normalized_identity_candidate_count": normalized_identity_candidate_count,
+        "usable_identity_proposal_count": usable_identity_proposal_count,
+        "rejected_identity_candidate_count": rejected_identity_candidate_count,
+        "rejection_reasons": sorted(rejection_reasons),
+    }
+
+
+def _emit_tracking_vlm_attempt_diagnostic(
+    *,
+    attempt_id: str | None,
+    llm_correlation_id: str | None,
+    provider_outcome: str,
+    parse_status: str,
+    parse_error_code: str | None,
+    schema_status: str,
+    result_available: bool,
+    result_error_code: str | None,
+    raw_proposals: list[object] | None = None,
+    normalized_proposals: list[VisualAssociationProposal] | None = None,
+) -> None:
+    identity_metrics = _collect_identity_diagnostic_details(
+        raw_proposals=raw_proposals,
+        normalized_proposals=normalized_proposals,
+    )
+    payload: dict[str, object] = {
+        "schema_version": "1.0",
+        "event_type": "tracking_vlm_attempt_completed",
+        "timestamp": time.time(),
+        "attempt_id": attempt_id,
+        "llm_correlation_id": llm_correlation_id,
+        "provider_outcome": provider_outcome,
+        "parse_status": parse_status,
+        "parse_error_code": parse_error_code,
+        "schema_status": schema_status,
+        "result_available": bool(result_available),
+        "result_error_code": result_error_code,
+        "raw_identity_candidate_count": identity_metrics["raw_identity_candidate_count"],
+        "normalized_identity_candidate_count": identity_metrics["normalized_identity_candidate_count"],
+        "usable_identity_proposal_count": identity_metrics["usable_identity_proposal_count"],
+        "rejected_identity_candidate_count": identity_metrics["rejected_identity_candidate_count"],
+        "rejection_reasons": identity_metrics["rejection_reasons"],
+    }
+    try:
+        _append_tracking_vlm_attempt_diagnostic_record(payload)
+    except Exception:
+        return
+
+
 @dataclass(slots=True)
 class VisualTrackingAgentResult:
     available: bool
@@ -463,16 +616,18 @@ class LLMVisualTrackingAgent:
             {
                 "type": "text",
                 "text": (
-                    "Analyze visual continuity and propose track associations. "
-                    "Return JSON object with keys: proposals, uncertainty_flags, supporting_evidence. "
-                    "Each proposal should include detection_id, proposed_track_id, association_confidence, "
-                    "occlusion_likelihood, id_switch_risk, depth_conflict_flag, position_conflict_flag, "
-                    "uncertainties, supporting_evidence. When identity_candidate_evidence is provided, each proposal "
-                    "must also include detection_reference and should include proposed_app_identity_id (or null for inconclusive), "
-                    "rejected_app_identity_ids, identity_evidence_refs, identity_snapshot_generation, identity_snapshot_version, "
-                    "and identity_resolution_status. Preserve one proposal per detection requiring evaluation; "
-                    "do not omit detections because of output length. Keep uncertainty/supporting_evidence entries concise "
-                    "short phrases while preserving material information. Return JSON only, with no Markdown or extra explanation.\n"
+                    "Analyze visual continuity and propose conservative track associations. "
+                    "Return exactly one compact JSON object with top-level keys: proposals, uncertainty_flags, supporting_evidence. "
+                    "Return no markdown, no commentary, and no prose outside JSON. "
+                    "Empty proposals are allowed when no supported association is available. "
+                    "For each proposal, include: detection_id, proposed_track_id, association_confidence, occlusion_likelihood, "
+                    "id_switch_risk, depth_conflict_flag, position_conflict_flag, uncertainties, supporting_evidence. "
+                    "When identity_candidate_evidence is provided and evidence_usable is true with candidate_lookup_state found/none, "
+                    "include detection_reference, proposed_app_identity_id (or null), rejected_app_identity_ids, identity_evidence_refs, "
+                    "identity_snapshot_generation, identity_snapshot_version, identity_resolution_status. "
+                    "If identity evidence is ambiguous, stale, missing, or otherwise unusable, do not force a match; "
+                    "set proposed_app_identity_id to null and use concise reason tags in identity_resolution_status and uncertainties. "
+                    "Keep uncertainty and evidence values short tag-like strings; avoid repeated descriptions.\n"
                     f"Structured input:\n{json.dumps(payload)}"
                 ),
             }
@@ -569,6 +724,18 @@ class LLMVisualTrackingAgent:
                 status="error",
                 error_code="timeout",
             )
+            _emit_tracking_vlm_attempt_diagnostic(
+                attempt_id=reservation.attempt_id,
+                llm_correlation_id=request_correlation_id,
+                provider_outcome="error",
+                parse_status="not_attempted",
+                parse_error_code=None,
+                schema_status="unknown",
+                result_available=False,
+                result_error_code="vlm_timeout",
+                raw_proposals=None,
+                normalized_proposals=None,
+            )
             return VisualTrackingAgentResult(
                 available=False,
                 proposals=[],
@@ -605,6 +772,18 @@ class LLMVisualTrackingAgent:
                 error_code="runtime_error",
                 **exception_fields,
             )
+            _emit_tracking_vlm_attempt_diagnostic(
+                attempt_id=reservation.attempt_id,
+                llm_correlation_id=request_correlation_id,
+                provider_outcome="error",
+                parse_status="not_attempted",
+                parse_error_code=None,
+                schema_status="unknown",
+                result_available=False,
+                result_error_code="vlm_unavailable",
+                raw_proposals=None,
+                normalized_proposals=None,
+            )
             return VisualTrackingAgentResult(
                 available=False,
                 proposals=[],
@@ -617,6 +796,18 @@ class LLMVisualTrackingAgent:
 
         latency_ms = (time.perf_counter() - started) * 1000.0
         if not response.choices:
+            _emit_tracking_vlm_attempt_diagnostic(
+                attempt_id=reservation.attempt_id,
+                llm_correlation_id=request_correlation_id,
+                provider_outcome="ok",
+                parse_status="parse_failed",
+                parse_error_code="vlm_empty_response",
+                schema_status="invalid",
+                result_available=False,
+                result_error_code="vlm_empty_response",
+                raw_proposals=None,
+                normalized_proposals=None,
+            )
             return VisualTrackingAgentResult(
                 available=False,
                 proposals=[],
@@ -629,6 +820,18 @@ class LLMVisualTrackingAgent:
 
         content = response.choices[0].message.content or ""
         if getattr(response.choices[0], "finish_reason", None) == "length":
+            _emit_tracking_vlm_attempt_diagnostic(
+                attempt_id=reservation.attempt_id,
+                llm_correlation_id=request_correlation_id,
+                provider_outcome="ok",
+                parse_status="parse_failed",
+                parse_error_code="vlm_output_truncated",
+                schema_status="invalid",
+                result_available=False,
+                result_error_code="vlm_output_truncated",
+                raw_proposals=None,
+                normalized_proposals=None,
+            )
             return VisualTrackingAgentResult(
                 available=False,
                 proposals=[],
@@ -640,6 +843,18 @@ class LLMVisualTrackingAgent:
             )
         parsed = _extract_json_object(content)
         if parsed is None:
+            _emit_tracking_vlm_attempt_diagnostic(
+                attempt_id=reservation.attempt_id,
+                llm_correlation_id=request_correlation_id,
+                provider_outcome="ok",
+                parse_status="parse_failed",
+                parse_error_code="vlm_invalid_json_response",
+                schema_status="invalid",
+                result_available=False,
+                result_error_code="vlm_invalid_json_response",
+                raw_proposals=None,
+                normalized_proposals=None,
+            )
             return VisualTrackingAgentResult(
                 available=False,
                 proposals=[],
@@ -674,6 +889,8 @@ class LLMVisualTrackingAgent:
         identity_evidence_by_detection_id: dict[str, dict[str, object]] | None = None
         evidence_snapshot_generation: int | None = None
         evidence_snapshot_version: int | None = None
+        evidence_snapshot_available: bool | None = None
+        eligible_identity_ids: set[str] | None = None
         if isinstance(identity_evidence_bundle, dict):
             per_detection = identity_evidence_bundle.get("per_detection")
             if isinstance(per_detection, list):
@@ -682,8 +899,20 @@ class LLMVisualTrackingAgent:
                     for item in per_detection
                     if isinstance(item, dict) and isinstance(item.get("detection_id"), str)
                 }
+            identity_pool = identity_evidence_bundle.get("identity_pool")
+            if isinstance(identity_pool, list):
+                eligible_identity_ids = {
+                    item.get("app_identity_id")
+                    for item in identity_pool
+                    if isinstance(item, dict)
+                    and isinstance(item.get("app_identity_id"), str)
+                    and item.get("app_identity_id").strip()
+                }
             snapshot_payload = identity_evidence_bundle.get("snapshot")
             if isinstance(snapshot_payload, dict):
+                snapshot_available = snapshot_payload.get("available")
+                if isinstance(snapshot_available, bool):
+                    evidence_snapshot_available = snapshot_available
                 source_generation = snapshot_payload.get("source_generation")
                 if isinstance(source_generation, int):
                     evidence_snapshot_generation = source_generation
@@ -699,6 +928,8 @@ class LLMVisualTrackingAgent:
                     identity_evidence_by_detection_id=identity_evidence_by_detection_id,
                     evidence_snapshot_generation=evidence_snapshot_generation,
                     evidence_snapshot_version=evidence_snapshot_version,
+                    evidence_snapshot_available=evidence_snapshot_available,
+                    eligible_identity_ids=eligible_identity_ids,
                 )
                 if normalized is not None:
                     normalized_proposals.append(normalized)
@@ -708,6 +939,19 @@ class LLMVisualTrackingAgent:
             normalized_uncertainty_flags.append("schema_complete_response")
         else:
             normalized_uncertainty_flags.append("schema_incomplete_response")
+
+        _emit_tracking_vlm_attempt_diagnostic(
+            attempt_id=reservation.attempt_id,
+            llm_correlation_id=request_correlation_id,
+            provider_outcome="ok",
+            parse_status="parsed",
+            parse_error_code=None,
+            schema_status=("complete" if schema_complete else "incomplete"),
+            result_available=True,
+            result_error_code=None,
+            raw_proposals=raw_proposals,
+            normalized_proposals=normalized_proposals,
+        )
 
         return VisualTrackingAgentResult(
             available=True,
@@ -763,7 +1007,8 @@ class AsyncVisualTrackingRuntime:
             self._consume_completed_future_locked()
             if self._pending_future is not None and not self._pending_future.done():
                 return False
-            if (now - self._last_started_at) < self._min_invoke_interval_seconds and not event_reasons:
+            has_priority_event_reasons = self._has_priority_event_reasons(event_reasons)
+            if (now - self._last_started_at) < self._min_invoke_interval_seconds and not has_priority_event_reasons:
                 return False
             self._last_started_at = now
             observation_id = latency_instrumentation.new_correlation_id("tracking-observation")
@@ -777,6 +1022,22 @@ class AsyncVisualTrackingRuntime:
                 request_timeout_seconds,
             )
             return True
+
+    @staticmethod
+    def _has_priority_event_reasons(event_reasons: list[str] | None) -> bool:
+        if not event_reasons:
+            return False
+
+        for reason in event_reasons:
+            if not isinstance(reason, str):
+                continue
+            normalized = reason.strip()
+            if not normalized:
+                continue
+            if normalized != "periodic_visual_continuity_check":
+                return True
+
+        return False
 
     def poll_latest_observation(self):
         # Implements poll latest observation behavior for this module.
@@ -876,6 +1137,8 @@ def _normalize_proposal(
     identity_evidence_by_detection_id: dict[str, dict[str, object]] | None = None,
     evidence_snapshot_generation: int | None = None,
     evidence_snapshot_version: int | None = None,
+    evidence_snapshot_available: bool | None = None,
+    eligible_identity_ids: set[str] | None = None,
 ) -> VisualAssociationProposal | None:
     # Normalizes proposal into contract-safe values.
     detection_id = payload.get("detection_id")
@@ -941,15 +1204,25 @@ def _normalize_proposal(
     else:
         identity_resolution_status = identity_resolution_status.strip()
 
+    identity_evidence_usable = False
+    candidate_lookup_state: str | None = None
+    detection_binding_valid = True
+    candidate_ids: set[str] = set()
+
     if identity_evidence_by_detection_id is not None:
         identity_entry = identity_evidence_by_detection_id.get(detection_id)
+        if isinstance(identity_entry, dict):
+            identity_evidence_usable = bool(identity_entry.get("evidence_usable", False))
         lookup_payload = (
             identity_entry.get("lookup")
             if isinstance(identity_entry, dict)
             else None
         )
-        candidate_ids: set[str] = set()
         if isinstance(lookup_payload, dict):
+            state_value = lookup_payload.get("candidate_lookup_state")
+            if isinstance(state_value, str) and state_value.strip():
+                candidate_lookup_state = state_value.strip()
+
             candidates = lookup_payload.get("candidates")
             if isinstance(candidates, list):
                 for item in candidates:
@@ -969,21 +1242,65 @@ def _normalize_proposal(
             ):
                 uncertainties.append("identity_claim_detection_reference_mismatch")
                 identity_resolution_status = "unresolved_detection_reference_mismatch"
+                detection_binding_valid = False
 
-        if proposed_app_identity_id is not None and candidate_ids and proposed_app_identity_id not in candidate_ids:
-            uncertainties.append("identity_claim_unknown_app_identity_id")
-            proposed_app_identity_id = None
-            identity_resolution_status = "unresolved_unknown_app_identity_id"
+        if proposed_app_identity_id is not None:
+            if evidence_snapshot_available is False:
+                uncertainties.append("identity_claim_without_usable_evidence")
+                proposed_app_identity_id = None
+                identity_resolution_status = "unresolved_identity_evidence_unusable"
+            elif (
+                isinstance(eligible_identity_ids, set)
+                and eligible_identity_ids
+                and proposed_app_identity_id not in eligible_identity_ids
+            ):
+                uncertainties.append("identity_claim_unknown_app_identity_id")
+                proposed_app_identity_id = None
+                identity_resolution_status = "unresolved_unknown_app_identity_id"
+            if candidate_lookup_state == "found":
+                if proposed_app_identity_id not in candidate_ids:
+                    uncertainties.append("identity_claim_unknown_app_identity_id")
+                    proposed_app_identity_id = None
+                    identity_resolution_status = "unresolved_unknown_app_identity_id"
+            elif candidate_lookup_state is not None:
+                uncertainties.append("identity_claim_lookup_state_invalid")
+                proposed_app_identity_id = None
+                identity_resolution_status = "unresolved_identity_evidence_unusable"
+    elif proposed_app_identity_id is not None:
+        uncertainties.append("identity_claim_without_usable_evidence")
+        proposed_app_identity_id = None
+        identity_resolution_status = "unresolved_identity_evidence_unusable"
 
-    if isinstance(evidence_snapshot_generation, int) and isinstance(identity_snapshot_generation, int):
-        if identity_snapshot_generation != evidence_snapshot_generation:
-            uncertainties.append("identity_claim_snapshot_generation_mismatch")
-            identity_resolution_status = "unresolved_snapshot_mismatch"
+    generation_conflict = (
+        isinstance(evidence_snapshot_generation, int)
+        and isinstance(identity_snapshot_generation, int)
+        and identity_snapshot_generation != evidence_snapshot_generation
+    )
+    version_conflict = (
+        isinstance(evidence_snapshot_version, int)
+        and isinstance(identity_snapshot_version, int)
+        and identity_snapshot_version != evidence_snapshot_version
+    )
 
-    if isinstance(evidence_snapshot_version, int) and isinstance(identity_snapshot_version, int):
-        if identity_snapshot_version != evidence_snapshot_version:
-            uncertainties.append("identity_claim_snapshot_version_mismatch")
-            identity_resolution_status = "unresolved_snapshot_mismatch"
+    if generation_conflict:
+        uncertainties.append("identity_claim_snapshot_generation_mismatch")
+        identity_resolution_status = "unresolved_snapshot_mismatch"
+
+    if version_conflict:
+        uncertainties.append("identity_claim_snapshot_version_mismatch")
+        identity_resolution_status = "unresolved_snapshot_mismatch"
+
+    can_backfill_snapshot = (
+        identity_evidence_usable
+        and detection_binding_valid
+        and not generation_conflict
+        and not version_conflict
+    )
+    if can_backfill_snapshot:
+        if identity_snapshot_generation is None and isinstance(evidence_snapshot_generation, int):
+            identity_snapshot_generation = evidence_snapshot_generation
+        if identity_snapshot_version is None and isinstance(evidence_snapshot_version, int):
+            identity_snapshot_version = evidence_snapshot_version
 
     return VisualAssociationProposal(
         detection_id=detection_id,
