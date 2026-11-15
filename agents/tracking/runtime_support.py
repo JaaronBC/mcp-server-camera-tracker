@@ -254,18 +254,20 @@ def submit_tracking_runtime_candidates(
 
     submission_reasons = [*event_reasons, "periodic_visual_continuity_check"]
 
-    frame_reference = None
-    try:
-        frame_reference = encode_frame(frame)
-    except Exception:
-        frame_reference = None
+    def encode_frame_reference() -> str | None:
+        try:
+            return encode_frame(frame)
+        except Exception:
+            return None
 
     return runtime.submit_if_needed(
         now=now,
-        frame_reference=frame_reference,
+        frame_reference=None,
         detections=detections,
         event_reasons=submission_reasons,
         request_timeout_seconds=request_timeout_seconds,
+        frame_reference_factory=encode_frame_reference,
+        bypass_cadence=bool(event_reasons),
     )
 
 

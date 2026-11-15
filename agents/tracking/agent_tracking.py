@@ -12,7 +12,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
-from typing import Protocol
+from typing import Callable, Protocol
 
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
@@ -757,14 +757,24 @@ class AsyncVisualTrackingRuntime:
         detections: list[DetectionCandidate],
         event_reasons: list[str] | None = None,
         request_timeout_seconds: float = 2.0,
+        frame_reference_factory: Callable[[], str | None] | None = None,
+        bypass_cadence: bool | None = None,
     ) -> bool:
         # Implements submit if needed behavior for this module.
         with self._lock:
             self._consume_completed_future_locked()
             if self._pending_future is not None and not self._pending_future.done():
                 return False
-            if (now - self._last_started_at) < self._min_invoke_interval_seconds and not event_reasons:
+            should_bypass_cadence = (
+                bool(event_reasons) if bypass_cadence is None else bypass_cadence
+            )
+            if (
+                (now - self._last_started_at) < self._min_invoke_interval_seconds
+                and not should_bypass_cadence
+            ):
                 return False
+            if frame_reference_factory is not None:
+                frame_reference = frame_reference_factory()
             self._last_started_at = now
             observation_id = latency_instrumentation.new_correlation_id("tracking-observation")
             self._pending_future = self._executor.submit(

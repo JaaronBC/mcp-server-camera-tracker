@@ -14,6 +14,7 @@ from agents.contracts import BoundingBox, DetectionCandidate, VisualAssociationP
 from agents.coordinator import AgentCoordinator
 from agents.tracking import agent_tracking as tracking_module
 from agents.tracking.agent_tracking import AsyncVisualTrackingRuntime, LLMVisualTrackingAgent, VisualTrackingAgentResult
+from agents.tracking.runtime_support import submit_tracking_runtime_candidates
 
 
 class FakeVisualTrackingAgent:
@@ -118,6 +119,79 @@ def make_detection(relative_depth: float | None = None) -> DetectionCandidate:
 
 
 class TestVisualTrackingRuntime(unittest.TestCase):
+    def test_periodic_submission_respects_cadence_before_encoding_frame(self) -> None:
+        agent = FakeVisualTrackingAgent(
+            VisualTrackingAgentResult(
+                available=True,
+                proposals=[],
+                uncertainty_flags=[],
+                supporting_evidence=[],
+                latency_ms=1.0,
+            ),
+            delay_seconds=0.1,
+        )
+        runtime = AsyncVisualTrackingRuntime(
+            AgentCoordinator(),
+            agent,
+            min_invoke_interval_seconds=10.0,
+        )
+        detection = make_detection()
+        encoded_frames: list[object] = []
+
+        started = runtime.submit_if_needed(
+            now=100.0,
+            frame_reference=None,
+            detections=[detection],
+            event_reasons=["initial"],
+        )
+        self.assertTrue(started)
+
+        def encode_frame(frame: object) -> str:
+            encoded_frames.append(frame)
+            return "encoded-frame"
+
+        rejected_while_busy = submit_tracking_runtime_candidates(
+            runtime=runtime,
+            now=100.1,
+            frame="busy-frame",
+            detections=[detection],
+            event_reasons=[],
+            encode_frame=encode_frame,
+        )
+        self.assertFalse(rejected_while_busy)
+        self.assertEqual(encoded_frames, [])
+
+        deadline = time.time() + 1.0
+        while runtime.is_busy() and time.time() < deadline:
+            time.sleep(0.01)
+
+        rejected_by_cadence = submit_tracking_runtime_candidates(
+            runtime=runtime,
+            now=100.2,
+            frame="cadence-frame",
+            detections=[detection],
+            event_reasons=[],
+            encode_frame=encode_frame,
+        )
+        self.assertFalse(rejected_by_cadence)
+        self.assertEqual(encoded_frames, [])
+
+        submitted_for_event = submit_tracking_runtime_candidates(
+            runtime=runtime,
+            now=100.3,
+            frame="event-frame",
+            detections=[detection],
+            event_reasons=["low_detection_confidence"],
+            encode_frame=encode_frame,
+        )
+        self.assertTrue(submitted_for_event)
+        self.assertEqual(encoded_frames, ["event-frame"])
+
+        deadline = time.time() + 1.0
+        while runtime.is_busy() and time.time() < deadline:
+            time.sleep(0.01)
+        runtime.shutdown()
+
     def test_tracking_skill_disabled_by_default_uses_hardcoded_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
