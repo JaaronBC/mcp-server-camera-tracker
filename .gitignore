@@ -82,6 +82,10 @@ dlldata.c
 # Benchmark Results
 BenchmarkDotNet.Artifacts/
 
+# datasets
+datasets/drone_dataset/
+runs/detect/
+
 # .NET Core
 project.lock.json
 project.fragment.lock.json

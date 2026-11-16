@@ -969,6 +969,8 @@ def run_live_tracking_loop(
     is_video_file = configured_video_path is not None
 
     model, camera, calibration, udp_socket, tracking_runtime = initialized
+    frame_index = 0
+    detection_stride = 2
 
     try:
         while True:
@@ -1005,6 +1007,10 @@ def run_live_tracking_loop(
                 state.input_error = None
                 state.frame_height, state.frame_width = frame.shape[:2]
                 state.last_live_frame_time = now
+
+            frame_index += 1
+            if (frame_index - 1) % detection_stride != 0:
+                continue
 
             detection_result = _run_detection_or_mark_error(state, model, frame)
             if isinstance(detection_result, tuple) and len(detection_result) == 2:
