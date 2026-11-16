@@ -97,6 +97,7 @@ class TestTrackingOnlyHarnessControls(unittest.TestCase):
             self.assertEqual(env["PHASE2D_TRACKING_DECISION_TOOL_RESULTS_PATH"], str(paths.tracking_decision_tool_results))
             self.assertEqual(env["PHASE2D_TRACKING_DECISION_REQUEST_INDEX_PATH"], str(paths.tracking_decision_request_index))
             self.assertEqual(env["PHASE2D_TRACKING_DECISION_RESULT_INDEX_PATH"], str(paths.tracking_decision_result_index))
+            self.assertEqual(env["PHASE2D_TRACKING_DECISION_IPC_ENABLED"], "1")
 
             self.assertEqual(module._validate_controlled_isolation(paths, env), [])
 
@@ -311,12 +312,78 @@ class TestTrackingOnlyHarnessControls(unittest.TestCase):
             probe_env, _ = module._build_prelaunch_probe_env(runtime_env, Path(temp_dir))
             probe = module._probe_child_tracking_agent_config(module.PYTHON_PATH, module.ORIGINAL_REPO_ROOT, probe_env)
             self.assertTrue(probe["passed"], probe)
+            self.assertEqual(probe["details"]["phase2d_tracking_decision_ipc_enabled_env"], "1")
+            self.assertTrue(probe["details"]["dashboard_tracking_decision_ipc_enabled"])
+            self.assertTrue(probe["details"]["dashboard_state_tracking_decision_ipc_enabled"])
             self.assertEqual(probe["details"]["tracking_agent_compact_decision_mode"], "1")
             self.assertEqual(
                 probe["details"]["tracking_agent_request_timeout_seconds_env"],
                 str(module.TIMEOUT_SECONDS),
             )
             self.assertEqual(probe["details"]["request_kwargs_max_tokens"], 768)
+            self.assertEqual(probe["details"]["fake_completion_call_count"], 1)
+
+            self.assertTrue(probe["details"]["semantic_probe_input_omits_tool_requests"])
+            self.assertTrue(probe["details"]["semantic_probe_input_omits_tool_name"])
+            self.assertTrue(probe["details"]["semantic_probe_input_omits_provenance"])
+            self.assertTrue(probe["details"]["semantic_probe_input_omits_investigation_id"])
+            self.assertTrue(probe["details"]["semantic_probe_input_omits_request_id"])
+            self.assertTrue(probe["details"]["semantic_probe_input_omits_correlation_id"])
+
+            self.assertEqual(
+                probe["details"]["semantic_probe_action"],
+                "request_additional_tracking_evidence",
+            )
+            self.assertEqual(
+                probe["details"]["semantic_probe_tool_name"],
+                "get_track_evidence_history",
+            )
+            self.assertEqual(
+                probe["details"]["semantic_probe_investigation_id"],
+                "inv-semantic-probe-1",
+            )
+            self.assertEqual(
+                probe["details"]["semantic_probe_request_id"],
+                "req-semantic-probe-1",
+            )
+            self.assertEqual(
+                probe["details"]["semantic_probe_correlation_id"],
+                "corr-semantic-probe-1",
+            )
+            self.assertEqual(probe["details"]["semantic_probe_tool_request_count"], 1)
+            self.assertTrue(probe["details"]["semantic_probe_canonical_tool_request_shape"])
+
+            semantic_arguments = probe["details"]["semantic_probe_arguments"]
+            self.assertIsInstance(semantic_arguments, dict)
+            self.assertEqual(semantic_arguments.get("track_id"), "track-semantic-probe-1")
+            self.assertEqual(semantic_arguments.get("max_messages"), 3)
+            self.assertEqual(semantic_arguments.get("max_history_records"), 2)
+
+            self.assertEqual(probe["details"]["semantic_probe_validation_errors"], [])
+            self.assertEqual(probe["details"]["semantic_probe_validation_error_count"], 0)
+            self.assertTrue(probe["details"]["semantic_probe_validator_passed"])
+            self.assertTrue(probe["details"]["semantic_probe_negative_rejected"])
+            self.assertIn(
+                "decision_action_invalid",
+                probe["details"]["semantic_probe_negative_validation_errors"],
+            )
+
+    def test_process_probe_rejects_negative_semantic_action(self) -> None:
+        module = _load_harness({})
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = module._build_paths(Path(temp_dir))
+            runtime_env = module._build_env(paths)
+            probe_env, _ = module._build_prelaunch_probe_env(runtime_env, Path(temp_dir))
+            probe = module._probe_child_tracking_agent_config(
+                module.PYTHON_PATH,
+                module.ORIGINAL_REPO_ROOT,
+                probe_env,
+            )
+            self.assertTrue(probe["passed"], probe)
+            negative_errors = probe["details"].get("semantic_probe_negative_validation_errors")
+            self.assertIsInstance(negative_errors, list)
+            self.assertGreater(len(negative_errors), 0)
+            self.assertIn("decision_action_invalid", negative_errors)
 
     def test_probe_artifact_paths_are_disjoint_from_runtime_paths(self) -> None:
         module = _load_harness({})
@@ -724,6 +791,78 @@ class TestTrackingOnlyHarnessControls(unittest.TestCase):
             },
         )
         self.assertEqual(missing["status"], "missing_or_unavailable_registry_evidence")
+
+    def test_isolation_validation_rejects_disabled_tracking_decision_ipc(self) -> None:
+        module = _load_harness({})
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = module._build_paths(Path(temp_dir))
+            env = module._build_env(paths)
+            env["PHASE2D_TRACKING_DECISION_IPC_ENABLED"] = "0"
+            errors = module._validate_controlled_isolation(paths, env)
+            self.assertTrue(
+                any(error.startswith("tracking_decision_ipc_must_be_enabled:") for error in errors),
+                errors,
+            )
+
+    def test_run_harness_fails_closed_when_child_ipc_probe_reports_disabled(self) -> None:
+        module = _load_harness({})
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            run_dir = (root / "run").resolve()
+            isolated_repo = (root / "isolated_repo").resolve()
+            captures_dir = (root / "captures").resolve()
+            captures_dir.mkdir(parents=True, exist_ok=True)
+            video_path = (root / "video.mp4").resolve()
+            video_path.write_bytes(b"video")
+
+            def _fake_workspace_copy(src_repo_root: Path, dst_repo_root: Path) -> dict:
+                dst_repo_root.mkdir(parents=True, exist_ok=True)
+                (dst_repo_root / "captures").mkdir(parents=True, exist_ok=True)
+                (dst_repo_root / "main.py").write_text("print('noop')\n", encoding="utf-8")
+                return {
+                    "source_repo_root": str(src_repo_root),
+                    "isolated_repo_root": str(dst_repo_root),
+                    "isolated_captures_dir": str((dst_repo_root / "captures").resolve()),
+                    "copy_duration_seconds": 0.0,
+                }
+
+            with patch.object(module, "RUN_DIR", run_dir), \
+                patch.object(module, "ISOLATED_REPO_ROOT", isolated_repo), \
+                patch.object(module, "REPORT_PATH", (run_dir / "tracking_only_report.json").resolve()), \
+                patch.object(module, "VIDEO_PATH", video_path), \
+                patch.object(module, "ORIGINAL_CAPTURES_DIR", captures_dir), \
+                patch.object(module, "_preflight_errors", return_value=[]), \
+                patch.object(module, "_probe_child_interpreter", return_value={"passed": True}), \
+                patch.object(module, "_build_isolated_workspace", side_effect=_fake_workspace_copy), \
+                patch.object(module, "_server_process_snapshot", return_value=[]), \
+                patch.object(module, "_dashboard_process_snapshot", return_value=[]), \
+                patch.object(module, "_probe_child_gate_installation", side_effect=[
+                    {"passed": True, "details": {"runtime_submit_wrapped": True}},
+                    {"passed": True, "details": {}},
+                ]), \
+                patch.object(module, "_probe_child_budget_env", return_value={"passed": True, "details": {}}), \
+                patch.object(
+                    module,
+                    "_probe_child_tracking_agent_config",
+                    return_value={
+                        "passed": False,
+                        "details": {
+                            "phase2d_tracking_decision_ipc_enabled_env": "0",
+                            "dashboard_tracking_decision_ipc_enabled": False,
+                            "dashboard_state_tracking_decision_ipc_enabled": False,
+                        },
+                        "mismatches": [
+                            "PHASE2D_TRACKING_DECISION_IPC_ENABLED_ENV:expected=1:actual=0",
+                        ],
+                    },
+                ):
+                exit_code = module.run_harness()
+
+            self.assertEqual(exit_code, 1)
+
+            report = json.loads((run_dir / "artifacts" / "tracking_only_report.json").read_text(encoding="utf-8"))
+            self.assertEqual(report.get("error"), "prelaunch_probe_failed")
+            self.assertIn("child_tracking_agent_config_probe_failed", report["preflight"]["errors"])
 
 
 if __name__ == "__main__":

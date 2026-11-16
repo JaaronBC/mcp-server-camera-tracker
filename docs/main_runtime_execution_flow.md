@@ -274,8 +274,8 @@ This runtime now propagates investigation lifecycle metadata through existing ar
 #### Investigation ID generation
 
 - Reasoning-cycle events (`agents/orchestration/tools/ops.py`) generate `investigation_id` as a deterministic hash of:
-   - `cycle_id`
-   - `track_id`
+  - `cycle_id`
+  - `track_id`
 - IDs are emitted only when `evidence_requested=True` for a track event.
 - Queue ingestion (`agents/orchestration/runtime/verification_queue.py`) preserves event-provided IDs and derives fallback IDs only if missing.
 
