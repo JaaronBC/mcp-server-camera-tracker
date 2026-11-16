@@ -8,6 +8,7 @@ from agents.tracking.tracking_types import GroundPosition, RadarTrackSnapshot
 from agents.tracking.runtime_support import (
     apply_tracking_agent_updates_to_tracks,
     apply_tracking_agent_metric_update_to_state,
+    commit_live_tracking_frame_state,
     summarize_tracking_agent_observation_metrics,
 )
 
@@ -275,6 +276,73 @@ class TestTrackingRuntimeSupportMetrics(unittest.TestCase):
         self.assertEqual(state.tracking_agent_llm_other_failure_count, 0)
         self.assertEqual(state.tracking_agent_unavailable_count, 1)
         self.assertEqual(state.tracking_agent_last_error, "vlm_api_key_missing")
+
+    def test_commit_state_publishes_tracking_decision_metadata(self) -> None:
+        class _Lock:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        class _Frame:
+            shape = (480, 640, 3)
+
+        observation = TrackingAgentObservation(
+            timestamp=1000.0,
+            source_agent="visual_tracking",
+            vlm_model="qwen-3.8-27b",
+            proposal_latency_ms=12.0,
+            frame_reference="frame://1",
+            updates=[],
+            uncertainties=["needs_more_evidence"],
+            decision={
+                "action": "request_additional_tracking_evidence",
+                "investigation_id": "inv-100",
+                "tool_requests": [
+                    {
+                        "request_id": "req-100",
+                        "tool_name": "get_track_evidence_history",
+                        "arguments": {"track_id": "track-1"},
+                    }
+                ],
+            },
+        )
+
+        state = types.SimpleNamespace(
+            lock=_Lock(),
+            latest_annotated_frame=None,
+            frame_height=0,
+            frame_width=0,
+            last_live_frame_time=0.0,
+            last_observation_time=0.0,
+            camera_status="",
+            detector_status="",
+            active_tracks={},
+            latest_tracking_display_identity_by_track={},
+            latest_tracking_agent_observation=None,
+            track_trails={},
+        )
+
+        commit_live_tracking_frame_state(
+            state=state,
+            now=1001.0,
+            annotated_frame=_Frame(),
+            tracks={},
+            tracking_agent_observation=observation,
+            trail_length=8,
+            display_identity_by_track=None,
+        )
+
+        self.assertIsInstance(state.latest_tracking_agent_observation, dict)
+        self.assertEqual(
+            state.latest_tracking_agent_observation.get("decision", {}).get("action"),
+            "request_additional_tracking_evidence",
+        )
+        self.assertEqual(
+            state.latest_tracking_agent_observation.get("decision", {}).get("investigation_id"),
+            "inv-100",
+        )
 
 
 if __name__ == "__main__":

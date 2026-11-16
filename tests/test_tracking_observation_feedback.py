@@ -62,6 +62,32 @@ def _accepted_result(
 
 
 class TestTrackingObservationFeedback(unittest.TestCase):
+    def test_publish_preserves_investigation_lifecycle_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            artifact_path = Path(temp_dir) / "operator_tracking_feedback.json"
+            publisher = VerificationFeedbackPublisher(artifact_path=artifact_path)
+
+            result = _accepted_result(
+                request_id="req-inv-1",
+                track_id="track-inv-1",
+                message_id="msg-inv-1",
+            )
+            result["investigation_id"] = "inv-abc123"
+            result["investigation_state"] = "awaiting_reassociation"
+            result["verification_outcome"] = "supported"
+            result["investigation_termination_reason"] = None
+
+            publish_result = publisher.publish_from_results([result], now_timestamp=1001.0)
+            self.assertEqual(publish_result["published"], 1)
+
+            payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+            self.assertEqual(len(payload["records"]), 1)
+            record = payload["records"][0]
+            self.assertEqual(record.get("investigation_id"), "inv-abc123")
+            self.assertEqual(record.get("investigation_state"), "awaiting_reassociation")
+            self.assertEqual(record.get("verification_outcome"), "supported")
+            self.assertIsNone(record.get("investigation_termination_reason"))
+
     def test_publish_and_consume_successful_current_feedback(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             artifact_path = Path(temp_dir) / "operator_tracking_feedback.json"

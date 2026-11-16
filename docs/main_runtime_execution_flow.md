@@ -267,6 +267,79 @@ Used by:
 - health summaries (`summarize_agent_event_health`),
 - dashboard renderer assessment lines.
 
+### 8.4 Investigation lifecycle metadata flow (Phase 2 pre-MCP integration)
+
+This runtime now propagates investigation lifecycle metadata through existing artifacts.
+
+#### Investigation ID generation
+
+- Reasoning-cycle events (`agents/orchestration/tools/ops.py`) generate `investigation_id` as a deterministic hash of:
+   - `cycle_id`
+   - `track_id`
+- IDs are emitted only when `evidence_requested=True` for a track event.
+- Queue ingestion (`agents/orchestration/runtime/verification_queue.py`) preserves event-provided IDs and derives fallback IDs only if missing.
+
+#### Lifecycle states
+
+The propagated state vocabulary is:
+
+- `open`
+- `awaiting_evidence`
+- `verifying`
+- `awaiting_reassociation`
+- `resolved`
+- `closed`
+
+Current state transitions are inferred in existing deterministic components:
+
+- event creation -> `awaiting_evidence`
+- queue verification completed + supported/consistent -> `awaiting_reassociation`
+- queue verification completed + contradicted/inconclusive/non-current/stale -> `resolved`
+- terminal failure/rejection/timeout or final ack decision -> `closed`
+
+#### Verification outcomes (separate from lifecycle state)
+
+`verification_outcome` is propagated independently and uses:
+
+- `supported`
+- `contradicted`
+- `inconclusive`
+
+It is not the same field as `investigation_state` and does not encode mutation acceptance.
+
+#### Termination reasons (separate from verification outcome)
+
+Representative `investigation_termination_reason` values include:
+
+- verification-level: `verification_contradicted`, `verification_inconclusive`, `verification_not_current`, `verification_stale_for_current`, `operator_timeout`
+- reassociation safeguards: `stale_snapshot_generation`, `stale_snapshot_version`, `target_track_owned_by_different_identity`, `unknown_identity`, `identity_retired`
+- mutation outcomes: `mutation_applied`, `mutation_rejected`, `provisional_transfer_applied`, `already_applied`
+- lifecycle expiry: `intent_expired`, `intent_previously_expired`
+
+#### Propagation chain
+
+The metadata flow is:
+
+1. **Event**: reasoning cycle emits `investigation_id` + initial `investigation_state`.
+2. **Queue**: submission/execution records carry `investigation_id`, infer/attach state and termination metadata.
+3. **Feedback**: observation feedback artifact preserves investigation metadata for downstream consumers.
+4. **Intent**: reassociation intent publisher carries investigation fields into decisions + pending intents.
+5. **Acknowledgment**: reassociation consumer writes terminal ack entries with investigation metadata.
+
+#### Verified proposal vs accepted registry mutation
+
+- A **verified identity proposal** means visual verification accepted evidence and may produce an intent (`awaiting_reassociation`).
+- An **accepted registry mutation** occurs only after registry safeguards pass in the reassociation consumer.
+- Therefore: verification support and reassociation acceptance are intentionally distinct outcomes.
+
+#### Current limitation (important before MCP expansion)
+
+Investigation lifecycle is currently **metadata propagation**, not a centralized authoritative state machine:
+
+- No dedicated investigation ledger with strict transition validation.
+- No single source of truth that reconciles all artifacts into one canonical investigation state.
+- State can be inferred consistently in-path, but authority remains distributed across event/queue/feedback/intent/ack artifacts.
+
 ---
 
 ## 9) What each agent is doing

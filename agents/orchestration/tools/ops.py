@@ -1,6 +1,7 @@
 # MCP tools for reasoning-cycle event logging, health summaries, and event log maintenance.
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import time
@@ -17,6 +18,19 @@ AGENT_EVENTS_PATH = PROJECT_ROOT / "captures" / "agent_events.jsonl"
 AGENT_EVENT_HEALTH_FRESHNESS_SECONDS = 30.0
 MAX_EVIDENCE_STR_LIST_ITEMS = 5
 MAX_EVIDENCE_SELECTED_UPDATES = 3
+VALID_INVESTIGATION_STATES = {
+    "open",
+    "awaiting_evidence",
+    "verifying",
+    "awaiting_reassociation",
+    "resolved",
+    "closed",
+}
+
+
+def _build_investigation_id(*, cycle_id: str, track_id: str) -> str:
+    fingerprint = f"{cycle_id}|{track_id}".encode("utf-8")
+    return f"inv-{hashlib.sha1(fingerprint).hexdigest()[:20]}"
 
 
 def _agent_events_path() -> Path:
@@ -513,6 +527,13 @@ def _build_reasoning_cycle_event(
     correlation_id: str | None = None,
     cycle_correlation_id: str | None = None,
 ) -> dict[str, Any]:
+    evidence_requested = result.get("evidence_request") is not None
+    investigation_id = (
+        _build_investigation_id(cycle_id=cycle_id, track_id=track_id)
+        if evidence_requested
+        else None
+    )
+    investigation_state = "awaiting_evidence" if evidence_requested else None
     return {
         "event_type": "reasoning_cycle",
         "event_origin": event_origin,
@@ -524,7 +545,7 @@ def _build_reasoning_cycle_event(
         "status": status,
         "latency_ms": round(latency_ms, 3),
         "assessment_label": assessment_label,
-        "evidence_requested": result.get("evidence_request") is not None,
+        "evidence_requested": evidence_requested,
         "bounded_out": bounded_out,
         "conflicts": conflicts,
         "limitations": limitations,
@@ -597,6 +618,12 @@ def _build_reasoning_cycle_event(
         "error": result.get("error"),
         "correlation_id": correlation_id,
         "cycle_correlation_id": cycle_correlation_id,
+        "investigation_id": investigation_id,
+        "investigation_state": (
+            investigation_state
+            if investigation_state in VALID_INVESTIGATION_STATES
+            else None
+        ),
     }
 
 

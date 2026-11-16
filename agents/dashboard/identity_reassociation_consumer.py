@@ -136,7 +136,18 @@ class IdentityReassociationIntentConsumer:
 
             if intent.expires_at <= now:
                 expired += 1
-                ack_appends.append(self._build_ack(intent_id=intent.intent_id, outcome="expired", reason="intent_expired", now=now))
+                ack_appends.append(
+                    self._build_ack(
+                        intent_id=intent.intent_id,
+                        outcome="expired",
+                        reason="intent_expired",
+                        now=now,
+                        investigation_id=intent.investigation_id,
+                        verification_outcome=intent.verification_outcome,
+                        investigation_state="closed",
+                        investigation_termination_reason="intent_expired",
+                    )
+                )
                 terminal_outcomes[intent.intent_id] = "expired"
                 continue
 
@@ -147,30 +158,85 @@ class IdentityReassociationIntentConsumer:
             )
             if validation_error is not None:
                 rejected += 1
-                ack_appends.append(self._build_ack(intent_id=intent.intent_id, outcome="rejected", reason=validation_error, now=now))
+                ack_appends.append(
+                    self._build_ack(
+                        intent_id=intent.intent_id,
+                        outcome="rejected",
+                        reason=validation_error,
+                        now=now,
+                        investigation_id=intent.investigation_id,
+                        verification_outcome=intent.verification_outcome,
+                        investigation_state="closed",
+                        investigation_termination_reason=validation_error,
+                    )
+                )
                 terminal_outcomes[intent.intent_id] = "rejected"
                 continue
 
             if intent.target_yolo_track_id in reserved_target_tracks:
                 rejected += 1
-                ack_appends.append(self._build_ack(intent_id=intent.intent_id, outcome="rejected", reason="conflicting_pending_target_track", now=now))
+                ack_appends.append(
+                    self._build_ack(
+                        intent_id=intent.intent_id,
+                        outcome="rejected",
+                        reason="conflicting_pending_target_track",
+                        now=now,
+                        investigation_id=intent.investigation_id,
+                        verification_outcome=intent.verification_outcome,
+                        investigation_state="closed",
+                        investigation_termination_reason="conflicting_pending_target_track",
+                    )
+                )
                 terminal_outcomes[intent.intent_id] = "rejected"
                 continue
             if intent.app_identity_id in reserved_identity_ids:
                 rejected += 1
-                ack_appends.append(self._build_ack(intent_id=intent.intent_id, outcome="rejected", reason="conflicting_pending_app_identity", now=now))
+                ack_appends.append(
+                    self._build_ack(
+                        intent_id=intent.intent_id,
+                        outcome="rejected",
+                        reason="conflicting_pending_app_identity",
+                        now=now,
+                        investigation_id=intent.investigation_id,
+                        verification_outcome=intent.verification_outcome,
+                        investigation_state="closed",
+                        investigation_termination_reason="conflicting_pending_app_identity",
+                    )
+                )
                 terminal_outcomes[intent.intent_id] = "rejected"
                 continue
 
             record = registry.get_record(intent.app_identity_id)
             if record is None:
                 rejected += 1
-                ack_appends.append(self._build_ack(intent_id=intent.intent_id, outcome="rejected", reason="unknown_identity", now=now))
+                ack_appends.append(
+                    self._build_ack(
+                        intent_id=intent.intent_id,
+                        outcome="rejected",
+                        reason="unknown_identity",
+                        now=now,
+                        investigation_id=intent.investigation_id,
+                        verification_outcome=intent.verification_outcome,
+                        investigation_state="closed",
+                        investigation_termination_reason="unknown_identity",
+                    )
+                )
                 terminal_outcomes[intent.intent_id] = "rejected"
                 continue
             if record.status == "retired":
                 rejected += 1
-                ack_appends.append(self._build_ack(intent_id=intent.intent_id, outcome="rejected", reason="identity_retired", now=now))
+                ack_appends.append(
+                    self._build_ack(
+                        intent_id=intent.intent_id,
+                        outcome="rejected",
+                        reason="identity_retired",
+                        now=now,
+                        investigation_id=intent.investigation_id,
+                        verification_outcome=intent.verification_outcome,
+                        investigation_state="closed",
+                        investigation_termination_reason="identity_retired",
+                    )
+                )
                 terminal_outcomes[intent.intent_id] = "rejected"
                 continue
 
@@ -179,12 +245,34 @@ class IdentityReassociationIntentConsumer:
             current_version = snapshot_before.get("version")
             if isinstance(current_generation, int) and intent.identity_snapshot_generation < current_generation:
                 rejected += 1
-                ack_appends.append(self._build_ack(intent_id=intent.intent_id, outcome="rejected", reason="stale_snapshot_generation", now=now))
+                ack_appends.append(
+                    self._build_ack(
+                        intent_id=intent.intent_id,
+                        outcome="rejected",
+                        reason="stale_snapshot_generation",
+                        now=now,
+                        investigation_id=intent.investigation_id,
+                        verification_outcome=intent.verification_outcome,
+                        investigation_state="closed",
+                        investigation_termination_reason="stale_snapshot_generation",
+                    )
+                )
                 terminal_outcomes[intent.intent_id] = "rejected"
                 continue
             if isinstance(current_version, int) and intent.identity_snapshot_version < current_version:
                 rejected += 1
-                ack_appends.append(self._build_ack(intent_id=intent.intent_id, outcome="rejected", reason="stale_snapshot_version", now=now))
+                ack_appends.append(
+                    self._build_ack(
+                        intent_id=intent.intent_id,
+                        outcome="rejected",
+                        reason="stale_snapshot_version",
+                        now=now,
+                        investigation_id=intent.investigation_id,
+                        verification_outcome=intent.verification_outcome,
+                        investigation_state="closed",
+                        investigation_termination_reason="stale_snapshot_version",
+                    )
+                )
                 terminal_outcomes[intent.intent_id] = "rejected"
                 continue
 
@@ -213,22 +301,66 @@ class IdentityReassociationIntentConsumer:
                         applied += 1
                         reserved_target_tracks.add(intent.target_yolo_track_id)
                         reserved_identity_ids.add(intent.app_identity_id)
-                        ack_appends.append(self._build_ack(intent_id=intent.intent_id, outcome="applied", reason="provisional_transfer_applied", now=now))
+                        ack_appends.append(
+                            self._build_ack(
+                                intent_id=intent.intent_id,
+                                outcome="applied",
+                                reason="provisional_transfer_applied",
+                                now=now,
+                                investigation_id=intent.investigation_id,
+                                verification_outcome=intent.verification_outcome,
+                                investigation_state="closed",
+                                investigation_termination_reason="provisional_transfer_applied",
+                            )
+                        )
                         terminal_outcomes[intent.intent_id] = "applied"
                     else:
                         rejected += 1
                         reason = _as_non_empty_string(transfer_result.reason) or "mutation_rejected"
-                        ack_appends.append(self._build_ack(intent_id=intent.intent_id, outcome="rejected", reason=reason, now=now))
+                        ack_appends.append(
+                            self._build_ack(
+                                intent_id=intent.intent_id,
+                                outcome="rejected",
+                                reason=reason,
+                                now=now,
+                                investigation_id=intent.investigation_id,
+                                verification_outcome=intent.verification_outcome,
+                                investigation_state="closed",
+                                investigation_termination_reason=reason,
+                            )
+                        )
                         terminal_outcomes[intent.intent_id] = "rejected"
                     continue
 
                 rejected += 1
-                ack_appends.append(self._build_ack(intent_id=intent.intent_id, outcome="rejected", reason="target_track_owned_by_different_identity", now=now))
+                ack_appends.append(
+                    self._build_ack(
+                        intent_id=intent.intent_id,
+                        outcome="rejected",
+                        reason="target_track_owned_by_different_identity",
+                        now=now,
+                        investigation_id=intent.investigation_id,
+                        verification_outcome=intent.verification_outcome,
+                        investigation_state="closed",
+                        investigation_termination_reason="target_track_owned_by_different_identity",
+                    )
+                )
                 terminal_outcomes[intent.intent_id] = "rejected"
                 continue
             if current_owner == intent.app_identity_id:
                 applied += 1
-                ack_appends.append(self._build_ack(intent_id=intent.intent_id, outcome="applied", reason="already_applied", now=now))
+                ack_appends.append(
+                    self._build_ack(
+                        intent_id=intent.intent_id,
+                        outcome="applied",
+                        reason="already_applied",
+                        now=now,
+                        investigation_id=intent.investigation_id,
+                        verification_outcome=intent.verification_outcome,
+                        investigation_state="closed",
+                        investigation_termination_reason="already_applied",
+                    )
+                )
                 terminal_outcomes[intent.intent_id] = "applied"
                 continue
 
@@ -243,12 +375,34 @@ class IdentityReassociationIntentConsumer:
                 applied += 1
                 reserved_target_tracks.add(intent.target_yolo_track_id)
                 reserved_identity_ids.add(intent.app_identity_id)
-                ack_appends.append(self._build_ack(intent_id=intent.intent_id, outcome="applied", reason="mutation_applied", now=now))
+                ack_appends.append(
+                    self._build_ack(
+                        intent_id=intent.intent_id,
+                        outcome="applied",
+                        reason="mutation_applied",
+                        now=now,
+                        investigation_id=intent.investigation_id,
+                        verification_outcome=intent.verification_outcome,
+                        investigation_state="closed",
+                        investigation_termination_reason="mutation_applied",
+                    )
+                )
                 terminal_outcomes[intent.intent_id] = "applied"
             else:
                 rejected += 1
                 reason = _as_non_empty_string(mutation.reason) or "mutation_rejected"
-                ack_appends.append(self._build_ack(intent_id=intent.intent_id, outcome="rejected", reason=reason, now=now))
+                ack_appends.append(
+                    self._build_ack(
+                        intent_id=intent.intent_id,
+                        outcome="rejected",
+                        reason=reason,
+                        now=now,
+                        investigation_id=intent.investigation_id,
+                        verification_outcome=intent.verification_outcome,
+                        investigation_state="closed",
+                        investigation_termination_reason=reason,
+                    )
+                )
                 terminal_outcomes[intent.intent_id] = "rejected"
 
         if ack_appends:
@@ -462,6 +616,12 @@ class IdentityReassociationIntentConsumer:
                 outcome = _as_non_empty_string(item.get("outcome"))
                 timestamp_value = item.get("timestamp")
                 reason = _as_non_empty_string(item.get("reason"))
+                investigation_id = _as_non_empty_string(item.get("investigation_id"))
+                verification_outcome = _as_non_empty_string(item.get("verification_outcome"))
+                investigation_state = _as_non_empty_string(item.get("investigation_state"))
+                investigation_termination_reason = _as_non_empty_string(
+                    item.get("investigation_termination_reason")
+                )
                 if intent_id is None or outcome is None:
                     continue
                 if outcome not in TERMINAL_ACK_OUTCOMES:
@@ -474,6 +634,10 @@ class IdentityReassociationIntentConsumer:
                         "outcome": outcome,
                         "timestamp": float(timestamp_value),
                         "reason": reason,
+                        "investigation_id": investigation_id,
+                        "verification_outcome": verification_outcome,
+                        "investigation_state": investigation_state,
+                        "investigation_termination_reason": investigation_termination_reason,
                     }
                 )
                 terminal_outcomes[intent_id] = outcome
@@ -484,12 +648,27 @@ class IdentityReassociationIntentConsumer:
             "acknowledgments": acknowledgments,
         }
 
-    def _build_ack(self, *, intent_id: str, outcome: str, reason: str, now: float) -> dict[str, Any]:
+    def _build_ack(
+        self,
+        *,
+        intent_id: str,
+        outcome: str,
+        reason: str,
+        now: float,
+        investigation_id: str | None = None,
+        verification_outcome: str | None = None,
+        investigation_state: str | None = None,
+        investigation_termination_reason: str | None = None,
+    ) -> dict[str, Any]:
         return {
             "intent_id": intent_id,
             "outcome": outcome,
             "timestamp": float(now),
             "reason": reason,
+            "investigation_id": investigation_id,
+            "verification_outcome": verification_outcome,
+            "investigation_state": investigation_state,
+            "investigation_termination_reason": investigation_termination_reason,
         }
 
     def _write_ack_ledger(self, payload: dict[str, Any]) -> None:

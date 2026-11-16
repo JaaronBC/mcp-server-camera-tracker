@@ -244,6 +244,11 @@ class TestIdentityReassociationIntentConsumer(unittest.TestCase):
             ack_payload = json.loads(ack_path.read_text(encoding="utf-8"))
             self.assertEqual(ack_payload["schema_version"], INTENT_ACK_LEDGER_SCHEMA_VERSION)
             self.assertEqual(ack_payload["acknowledgments"][-1]["outcome"], "applied")
+            self.assertEqual(ack_payload["acknowledgments"][-1].get("investigation_state"), "closed")
+            self.assertEqual(
+                ack_payload["acknowledgments"][-1].get("investigation_termination_reason"),
+                "mutation_applied",
+            )
 
     def test_rejects_stale_snapshot_generation_and_version(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

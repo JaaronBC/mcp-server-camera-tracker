@@ -261,6 +261,99 @@ class TestVisualTrackingRuntime(unittest.TestCase):
         self.assertTrue(result.available)
         self.assertEqual(completions.call_count, 1)
 
+    def test_prompt_includes_decision_contract_actions_and_evidence_guidance(self) -> None:
+        completions = _CapturingCompletions()
+        client = _CapturingClient(completions)
+        detection = make_detection()
+
+        with patch.dict(
+            os.environ,
+            {
+                "TRACKING_SKILL_ENABLED": "0",
+                "PROVIDER_CALL_BUDGET_ENABLED": "0",
+            },
+            clear=False,
+        ):
+            agent = LLMVisualTrackingAgent(client=client)
+            result = asyncio.run(
+                agent.propose_associations(
+                    frame_reference=None,
+                    detections=[detection],
+                    event_reasons=["count_check"],
+                    request_timeout_seconds=0.2,
+                )
+            )
+
+        self.assertTrue(result.available)
+        messages = completions.last_kwargs.get("messages")
+        self.assertIsInstance(messages, list)
+        assert isinstance(messages, list)
+        user_message = messages[1]
+        content_list = user_message.get("content")
+        self.assertIsInstance(content_list, list)
+        assert isinstance(content_list, list)
+        prompt_text = str(content_list[0].get("text", ""))
+        self.assertIn("top-level decision object", prompt_text)
+        self.assertIn("request_identity_snapshot", prompt_text)
+        self.assertIn("request_additional_tracking_evidence", prompt_text)
+        self.assertIn("propose_identity_association", prompt_text)
+        self.assertIn("inconclusive", prompt_text)
+        self.assertIn("do not guess", prompt_text)
+
+    def test_compact_prompt_includes_exact_allowlisted_tool_names_and_mapping(self) -> None:
+        completions = _CapturingCompletions()
+        client = _CapturingClient(completions)
+        detection = make_detection()
+
+        with patch.dict(
+            os.environ,
+            {
+                "TRACKING_SKILL_ENABLED": "0",
+                "PROVIDER_CALL_BUDGET_ENABLED": "0",
+                "TRACKING_AGENT_COMPACT_DECISION_MODE": "1",
+            },
+            clear=False,
+        ):
+            agent = LLMVisualTrackingAgent(client=client)
+            result = asyncio.run(
+                agent.propose_associations(
+                    frame_reference=None,
+                    detections=[detection],
+                    event_reasons=["count_check"],
+                    request_timeout_seconds=0.2,
+                )
+            )
+
+        self.assertTrue(result.available)
+        messages = completions.last_kwargs.get("messages")
+        self.assertIsInstance(messages, list)
+        assert isinstance(messages, list)
+        user_message = messages[1]
+        content_list = user_message.get("content")
+        self.assertIsInstance(content_list, list)
+        assert isinstance(content_list, list)
+        prompt_text = str(content_list[0].get("text", ""))
+        self.assertIn("Semantic-first decision contract: provide action, target selector, concise reason/uncertainty, and optional evidence_bounds.", prompt_text)
+        self.assertIn("Runtime binds investigation_id, request_id, correlation_id, canonical tool_name, and canonical tool_requests structure.", prompt_text)
+        self.assertIn("If you include explicit tool_name/tool/tool_request, it must exactly match action mapping or the decision is rejected.", prompt_text)
+        self.assertIn(
+            "Tool mapping is strict: request_identity_snapshot -> get_identity_snapshot; request_additional_tracking_evidence -> get_track_evidence_history.",
+            prompt_text,
+        )
+        self.assertIn(
+            "If including provenance, it must be a flat object with non-empty string keys and scalar values only (string, number, boolean, or null); do not use nested objects or arrays.",
+            prompt_text,
+        )
+        self.assertIn("evidence_bounds must be an object when present.", prompt_text)
+        self.assertIn(
+            "For request_identity_snapshot, provide exactly one selector: app_identity_id or detection_reference.",
+            prompt_text,
+        )
+        self.assertIn(
+            "For request_additional_tracking_evidence, provide track_id.",
+            prompt_text,
+        )
+
     def test_vlm_assisted_association_is_applied(self) -> None:
         # Performs test vlm assisted association is applied logic.
         proposal = VisualAssociationProposal(
@@ -382,6 +475,46 @@ class TestVisualTrackingRuntime(unittest.TestCase):
         self.assertLess(elapsed, 0.05)
         self.assertTrue(runtime.is_busy())
 
+        runtime.shutdown()
+
+    def test_tracking_continues_when_vlm_is_slow_with_decision_metadata(self) -> None:
+        agent = FakeVisualTrackingAgent(
+            VisualTrackingAgentResult(
+                available=True,
+                proposals=[],
+                uncertainty_flags=["slow_response"],
+                supporting_evidence=[],
+                latency_ms=1200.0,
+                decision={
+                    "action": "request_additional_tracking_evidence",
+                    "investigation_id": "inv-slow-1",
+                    "tool_requests": [
+                        {
+                            "request_id": "req-slow-1",
+                            "tool_name": "get_track_evidence_history",
+                            "arguments": {"track_id": "track-1"},
+                        }
+                    ],
+                },
+            ),
+            delay_seconds=0.2,
+        )
+
+        runtime = AsyncVisualTrackingRuntime(AgentCoordinator(), agent)
+        detection = make_detection()
+
+        started_at = time.perf_counter()
+        started = runtime.submit_if_needed(
+            now=time.time(),
+            frame_reference="data:image/jpeg;base64,abc",
+            detections=[detection],
+            event_reasons=["periodic_visual_continuity_check"],
+        )
+        elapsed = time.perf_counter() - started_at
+
+        self.assertTrue(started)
+        self.assertLess(elapsed, 0.05)
+        self.assertTrue(runtime.is_busy())
         runtime.shutdown()
 
     def test_periodic_only_reasons_respect_minimum_interval(self) -> None:
@@ -737,6 +870,51 @@ class TestVisualTrackingRuntime(unittest.TestCase):
         self.assertEqual(observation.llm_correlation_id, "corr-success")
         self.assertIsInstance(observation.observation_id, str)
         self.assertTrue(bool(observation.observation_id))
+
+    def test_runtime_observation_preserves_decision_metadata(self) -> None:
+        agent = FakeVisualTrackingAgent(
+            VisualTrackingAgentResult(
+                available=True,
+                proposals=[],
+                uncertainty_flags=["needs_more_evidence"],
+                supporting_evidence=[],
+                latency_ms=10.0,
+                llm_correlation_id="corr-decision",
+                decision={
+                    "action": "request_identity_snapshot",
+                    "investigation_id": "inv-1",
+                    "tool_requests": [
+                        {
+                            "request_id": "req-1",
+                            "tool_name": "get_identity_snapshot",
+                            "arguments": {"app_identity_id": "app-1"},
+                        }
+                    ],
+                },
+            )
+        )
+        runtime = AsyncVisualTrackingRuntime(AgentCoordinator(), agent)
+        detection = make_detection()
+        runtime.submit_if_needed(
+            now=time.time(),
+            frame_reference=None,
+            detections=[detection],
+            event_reasons=["possible_id_switch"],
+        )
+
+        observation = None
+        deadline = time.time() + 1.0
+        while observation is None and time.time() < deadline:
+            observation = runtime.poll_latest_observation()
+            time.sleep(0.01)
+
+        runtime.shutdown()
+        self.assertIsNotNone(observation)
+        assert observation is not None
+        self.assertIsInstance(observation.decision, dict)
+        assert isinstance(observation.decision, dict)
+        self.assertEqual(observation.decision.get("action"), "request_identity_snapshot")
+        self.assertEqual(observation.to_dict().get("decision", {}).get("investigation_id"), "inv-1")
 
     def test_failed_observation_includes_ids(self) -> None:
         agent = FakeVisualTrackingAgent(

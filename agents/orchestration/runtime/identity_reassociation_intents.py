@@ -15,6 +15,16 @@ INTENT_ARTIFACT_SCHEMA_VERSION = "1.1"
 INTENT_ACK_LEDGER_SCHEMA_VERSION = "1.0"
 TERMINAL_ACK_OUTCOMES = {"applied", "rejected", "expired"}
 EXPIRY_REASONS = {"intent_expired", "intent_previously_expired"}
+VALID_INVESTIGATION_STATES = {
+    "open",
+    "awaiting_evidence",
+    "verifying",
+    "awaiting_reassociation",
+    "resolved",
+    "closed",
+}
+TERMINAL_INVESTIGATION_STATES = {"resolved", "closed"}
+VALID_VERIFICATION_OUTCOMES = {"supported", "contradicted", "inconclusive"}
 
 
 def _as_non_empty_string(value: Any) -> str | None:
@@ -94,6 +104,10 @@ class IdentityReassociationMutationIntent:
     identity_snapshot_version: int
     verification_provenance: dict[str, Any]
     identity_claim_provenance: dict[str, Any]
+    investigation_id: str | None = None
+    investigation_state: str | None = None
+    verification_outcome: str | None = None
+    investigation_termination_reason: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -115,6 +129,10 @@ class IdentityReassociationMutationIntent:
             "identity_evidence_refs": list(self.identity_evidence_refs),
             "identity_snapshot_generation": self.identity_snapshot_generation,
             "identity_snapshot_version": self.identity_snapshot_version,
+            "investigation_id": self.investigation_id,
+            "investigation_state": self.investigation_state,
+            "verification_outcome": self.verification_outcome,
+            "investigation_termination_reason": self.investigation_termination_reason,
             "verification_provenance": dict(self.verification_provenance),
             "identity_claim_provenance": dict(self.identity_claim_provenance),
         }
@@ -179,6 +197,17 @@ class IdentityReassociationMutationIntent:
         if verification_provenance is None or identity_claim_provenance is None:
             return None
 
+        investigation_id = _as_non_empty_string(payload.get("investigation_id"))
+        investigation_state = _as_non_empty_string(payload.get("investigation_state"))
+        if investigation_state not in VALID_INVESTIGATION_STATES:
+            investigation_state = None
+        verification_outcome = _as_non_empty_string(payload.get("verification_outcome"))
+        if verification_outcome not in VALID_VERIFICATION_OUTCOMES:
+            verification_outcome = None
+        investigation_termination_reason = _as_non_empty_string(
+            payload.get("investigation_termination_reason")
+        )
+
         return cls(
             schema_version=schema_version,
             intent_id=intent_id,
@@ -198,6 +227,10 @@ class IdentityReassociationMutationIntent:
             identity_evidence_refs=identity_evidence_refs,
             identity_snapshot_generation=int(generation),
             identity_snapshot_version=int(version),
+            investigation_id=investigation_id,
+            investigation_state=investigation_state,
+            verification_outcome=verification_outcome,
+            investigation_termination_reason=investigation_termination_reason,
             verification_provenance=verification_provenance,
             identity_claim_provenance=identity_claim_provenance,
         )
@@ -226,6 +259,7 @@ class IdentityReassociationIntentPublisher:
         self._resolver = TrackingEvidenceResolver(self._evidence_root_dir)
         self._max_intents = max(1, int(max_intents))
         self._max_decisions = max(1, int(max_decisions))
+        self._max_terminal_investigations = max(256, self._max_decisions)
         self._intent_ttl_seconds = max(1.0, float(intent_ttl_seconds))
 
     @property
@@ -276,8 +310,49 @@ class IdentityReassociationIntentPublisher:
         existing_intents: list[IdentityReassociationMutationIntent] = list(existing_payload.get("intents", []))
         existing_decisions: list[dict[str, Any]] = list(existing_payload.get("decisions", []))
         expired_tombstones: set[str] = set(existing_payload.get("expired_tombstones", set()))
+        existing_terminal_investigations: list[dict[str, Any]] = list(
+            existing_payload.get("terminal_investigations", [])
+        )
 
         terminal_outcomes_by_intent: dict[str, str] = dict(ack_payload.get("terminal_outcomes", {}))
+        terminal_investigation_state_by_id: dict[str, str] = {}
+        terminal_investigation_reason_by_id: dict[str, str] = {}
+        terminal_investigations_by_id: dict[str, dict[str, Any]] = {}
+
+        def register_terminal_investigation(payload: dict[str, Any]) -> None:
+            investigation_id = _as_non_empty_string(payload.get("investigation_id"))
+            investigation_state = _as_non_empty_string(payload.get("investigation_state"))
+            if investigation_id is None or investigation_state not in TERMINAL_INVESTIGATION_STATES:
+                return
+            terminal_investigation_state_by_id[investigation_id] = investigation_state
+            investigation_reason = _as_non_empty_string(payload.get("investigation_termination_reason"))
+            if investigation_reason is not None:
+                terminal_investigation_reason_by_id[investigation_id] = investigation_reason
+
+            generated_at_value = payload.get("generated_at")
+            generated_at = float(now)
+            if isinstance(generated_at_value, (int, float)):
+                generated_at = float(generated_at_value)
+
+            terminal_investigations_by_id[investigation_id] = {
+                "investigation_id": investigation_id,
+                "investigation_state": investigation_state,
+                "investigation_termination_reason": investigation_reason,
+                "generated_at": generated_at,
+            }
+
+        for terminal_payload in existing_terminal_investigations:
+            if isinstance(terminal_payload, dict):
+                register_terminal_investigation(terminal_payload)
+
+        for terminal_payload in ack_payload.get("terminal_investigations", []):
+            if isinstance(terminal_payload, dict):
+                register_terminal_investigation(terminal_payload)
+
+        for existing_decision in existing_decisions:
+            if isinstance(existing_decision, dict):
+                register_terminal_investigation(existing_decision)
+
         pending_existing_intents: list[IdentityReassociationMutationIntent] = []
         expired_pruned = 0
         for existing_intent in existing_intents:
@@ -294,13 +369,22 @@ class IdentityReassociationIntentPublisher:
                         "evidence_message_id": existing_intent.evidence_message_id,
                         "claim_id": existing_intent.claim_id,
                         "intent_id": existing_intent.intent_id,
+                        "investigation_id": existing_intent.investigation_id,
+                        "investigation_state": "closed",
+                        "verification_outcome": existing_intent.verification_outcome,
+                        "investigation_termination_reason": "intent_expired",
                         "accepted": False,
                         "reason": "intent_expired",
                     }
                 )
+                register_terminal_investigation(existing_decisions[-1])
                 continue
             terminal_outcome = terminal_outcomes_by_intent.get(existing_intent.intent_id)
             if terminal_outcome in TERMINAL_ACK_OUTCOMES:
+                investigation_id = _as_non_empty_string(existing_intent.investigation_id)
+                if investigation_id is not None:
+                    terminal_investigation_state_by_id[investigation_id] = "closed"
+                    terminal_investigation_reason_by_id[investigation_id] = f"intent_{terminal_outcome}"
                 continue
             pending_existing_intents.append(existing_intent)
 
@@ -327,10 +411,47 @@ class IdentityReassociationIntentPublisher:
         decisions: list[dict[str, Any]] = []
 
         for result in results:
+            result_investigation_id = _as_non_empty_string(result.get("investigation_id"))
+            if result_investigation_id is None:
+                details_payload = result.get("details")
+                if isinstance(details_payload, dict):
+                    result_investigation_id = _as_non_empty_string(details_payload.get("investigation_id"))
+
+            terminal_state = (
+                terminal_investigation_state_by_id.get(result_investigation_id)
+                if result_investigation_id is not None
+                else None
+            )
+            if terminal_state in TERMINAL_INVESTIGATION_STATES:
+                rejected += 1
+                decisions.append(
+                    {
+                        "schema_version": INTENT_ARTIFACT_SCHEMA_VERSION,
+                        "generated_at": now,
+                        "verification_request_id": _as_non_empty_string(result.get("request_id")),
+                        "source": _as_non_empty_string(result.get("source")),
+                        "target_yolo_track_id": _as_non_empty_string(result.get("track_id")),
+                        "evidence_message_id": _as_non_empty_string(result.get("evidence_message_id")),
+                        "claim_id": None,
+                        "intent_id": None,
+                        "investigation_id": result_investigation_id,
+                        "investigation_state": terminal_state,
+                        "verification_outcome": _as_non_empty_string(result.get("verification_outcome")),
+                        "investigation_termination_reason": (
+                            terminal_investigation_reason_by_id.get(result_investigation_id)
+                            or "investigation_already_terminal"
+                        ),
+                        "accepted": False,
+                        "reason": "investigation_already_terminal",
+                    }
+                )
+                continue
+
             intent, decision = self._build_intent_from_result(result, now_timestamp=now)
             if intent is None:
                 rejected += 1
                 decisions.append(decision)
+                register_terminal_investigation(decision)
                 continue
 
             if intent.intent_id in expired_tombstones:
@@ -340,8 +461,11 @@ class IdentityReassociationIntentPublisher:
                         **decision,
                         "accepted": False,
                         "reason": "intent_previously_expired",
+                        "investigation_state": "closed",
+                        "investigation_termination_reason": "intent_previously_expired",
                     }
                 )
+                register_terminal_investigation(decisions[-1])
                 continue
 
             terminal_outcome = terminal_outcomes_by_intent.get(intent.intent_id)
@@ -353,8 +477,14 @@ class IdentityReassociationIntentPublisher:
                         "accepted": False,
                         "reason": "intent_terminal_outcome",
                         "terminal_outcome": terminal_outcome,
+                        "investigation_state": "closed",
+                        "investigation_termination_reason": f"intent_{terminal_outcome}",
                     }
                 )
+                register_terminal_investigation(decisions[-1])
+                if intent.investigation_id is not None:
+                    terminal_investigation_state_by_id[intent.investigation_id] = "closed"
+                    terminal_investigation_reason_by_id[intent.investigation_id] = f"intent_{terminal_outcome}"
                 continue
 
             existing_binding = claim_binding_by_id.get(intent.claim_id)
@@ -414,6 +544,15 @@ class IdentityReassociationIntentPublisher:
         if len(merged_decisions) > self._max_decisions:
             merged_decisions = merged_decisions[-self._max_decisions :]
 
+        merged_terminal_investigations = list(terminal_investigations_by_id.values())
+        merged_terminal_investigations.sort(
+            key=lambda item: float(item.get("generated_at", 0.0))
+        )
+        if len(merged_terminal_investigations) > self._max_terminal_investigations:
+            merged_terminal_investigations = merged_terminal_investigations[
+                -self._max_terminal_investigations :
+            ]
+
         self._atomic_write(
             {
                 "schema_version": INTENT_ARTIFACT_SCHEMA_VERSION,
@@ -423,6 +562,7 @@ class IdentityReassociationIntentPublisher:
                 "intent_ttl_seconds": self._intent_ttl_seconds,
                 "intents": [item.to_dict() for item in merged_intents],
                 "decisions": merged_decisions,
+                "terminal_investigations": merged_terminal_investigations,
             }
         )
 
@@ -451,6 +591,17 @@ class IdentityReassociationIntentPublisher:
         evidence_message_id = _as_non_empty_string(result.get("evidence_message_id"))
         details = result.get("details")
 
+        investigation_id = _as_non_empty_string(result.get("investigation_id"))
+        investigation_state = _as_non_empty_string(result.get("investigation_state"))
+        if investigation_state not in VALID_INVESTIGATION_STATES:
+            investigation_state = None
+        verification_outcome = _as_non_empty_string(result.get("verification_outcome"))
+        if verification_outcome not in VALID_VERIFICATION_OUTCOMES:
+            verification_outcome = None
+        investigation_termination_reason = _as_non_empty_string(
+            result.get("investigation_termination_reason")
+        )
+
         decision_base = {
             "schema_version": INTENT_ARTIFACT_SCHEMA_VERSION,
             "generated_at": now_timestamp,
@@ -460,6 +611,10 @@ class IdentityReassociationIntentPublisher:
             "evidence_message_id": evidence_message_id,
             "claim_id": None,
             "intent_id": None,
+            "investigation_id": investigation_id,
+            "investigation_state": investigation_state,
+            "verification_outcome": verification_outcome,
+            "investigation_termination_reason": investigation_termination_reason,
             "accepted": False,
             "reason": "invalid_result_shape",
         }
@@ -469,21 +624,82 @@ class IdentityReassociationIntentPublisher:
         if not isinstance(details, dict):
             return None, {**decision_base, "reason": "missing_details"}
 
+        if investigation_id is None:
+            fingerprint = "|".join([request_id, target_track_id, evidence_message_id])
+            investigation_id = f"inv-{hashlib.sha1(fingerprint.encode('utf-8')).hexdigest()[:20]}"
+            decision_base["investigation_id"] = investigation_id
+
+        if investigation_state is None:
+            details_state = _as_non_empty_string(details.get("investigation_state"))
+            if details_state in VALID_INVESTIGATION_STATES:
+                investigation_state = details_state
+                decision_base["investigation_state"] = investigation_state
+
+        if verification_outcome is None:
+            details_outcome = _as_non_empty_string(details.get("verification_outcome"))
+            if details_outcome in VALID_VERIFICATION_OUTCOMES:
+                verification_outcome = details_outcome
+                decision_base["verification_outcome"] = verification_outcome
+
+        if investigation_termination_reason is None:
+            details_termination_reason = _as_non_empty_string(
+                details.get("investigation_termination_reason")
+            )
+            if details_termination_reason is not None:
+                investigation_termination_reason = details_termination_reason
+                decision_base["investigation_termination_reason"] = investigation_termination_reason
+
         if result.get("status") != "completed":
-            return None, {**decision_base, "reason": "verification_not_completed"}
+            return None, {
+                **decision_base,
+                "reason": "verification_not_completed",
+                "investigation_state": "closed",
+                "investigation_termination_reason": "verification_not_completed",
+            }
         if result.get("validation_outcome") != "accepted" or not bool(result.get("coordinator_valid", False)):
-            return None, {**decision_base, "reason": "verification_not_validated"}
+            return None, {
+                **decision_base,
+                "reason": "verification_not_validated",
+                "investigation_state": "closed",
+                "investigation_termination_reason": "verification_not_validated",
+            }
         if result.get("current_applicability") != "current":
-            return None, {**decision_base, "reason": "verification_not_current"}
+            return None, {
+                **decision_base,
+                "reason": "verification_not_current",
+                "investigation_state": "resolved",
+                "investigation_termination_reason": "verification_not_current",
+            }
         if bool(result.get("stale_for_current_decisions", False)):
-            return None, {**decision_base, "reason": "verification_stale_for_current"}
+            return None, {
+                **decision_base,
+                "reason": "verification_stale_for_current",
+                "investigation_state": "resolved",
+                "investigation_termination_reason": "verification_stale_for_current",
+            }
 
         verification_status = _as_non_empty_string(details.get("verification_status"))
         identity_consistency = _as_non_empty_string(details.get("identity_consistency"))
+        if verification_status in VALID_VERIFICATION_OUTCOMES:
+            decision_base["verification_outcome"] = verification_status
         if verification_status != "supported":
-            return None, {**decision_base, "reason": "verification_not_supported"}
+            return None, {
+                **decision_base,
+                "reason": "verification_not_supported",
+                "investigation_state": "resolved",
+                "investigation_termination_reason": (
+                    f"verification_{verification_status}"
+                    if verification_status in VALID_VERIFICATION_OUTCOMES
+                    else "verification_not_supported"
+                ),
+            }
         if identity_consistency != "consistent":
-            return None, {**decision_base, "reason": "identity_not_consistent"}
+            return None, {
+                **decision_base,
+                "reason": "identity_not_consistent",
+                "investigation_state": "resolved",
+                "investigation_termination_reason": "identity_not_consistent",
+            }
 
         claim_id = _as_non_empty_string(details.get("identity_claim_id"))
         claim_status = _as_non_empty_string(details.get("identity_claim_status"))
@@ -590,6 +806,10 @@ class IdentityReassociationIntentPublisher:
             identity_evidence_refs=identity_evidence_refs,
             identity_snapshot_generation=int(snapshot_generation),
             identity_snapshot_version=int(snapshot_version),
+            investigation_id=investigation_id,
+            investigation_state="awaiting_reassociation",
+            verification_outcome=verification_status,
+            investigation_termination_reason=None,
             verification_provenance=verification_provenance,
             identity_claim_provenance=identity_claim_provenance,
         )
@@ -598,6 +818,9 @@ class IdentityReassociationIntentPublisher:
             **decision_base,
             "claim_id": claim_id,
             "intent_id": intent_id,
+            "investigation_state": "awaiting_reassociation",
+            "verification_outcome": verification_status,
+            "investigation_termination_reason": None,
             "reason": None,
         }
 
@@ -653,6 +876,7 @@ class IdentityReassociationIntentPublisher:
                 "recovered_from_backup": False,
                 "intents": [],
                 "decisions": [],
+                "terminal_investigations": [],
                 "expired_tombstones": set(),
             }
 
@@ -663,6 +887,7 @@ class IdentityReassociationIntentPublisher:
                 "recovered_from_backup": False,
                 "intents": primary.get("intents", []),
                 "decisions": primary.get("decisions", []),
+                "terminal_investigations": primary.get("terminal_investigations", []),
                 "expired_tombstones": self._collect_expired_tombstones(primary.get("decisions", [])),
             }
 
@@ -673,6 +898,7 @@ class IdentityReassociationIntentPublisher:
                 "recovered_from_backup": True,
                 "intents": backup.get("intents", []),
                 "decisions": backup.get("decisions", []),
+                "terminal_investigations": backup.get("terminal_investigations", []),
                 "expired_tombstones": self._collect_expired_tombstones(backup.get("decisions", [])),
             }
 
@@ -682,6 +908,7 @@ class IdentityReassociationIntentPublisher:
             "recovered_from_backup": False,
             "intents": [],
             "decisions": [],
+            "terminal_investigations": [],
             "expired_tombstones": set(),
         }
 
@@ -725,10 +952,39 @@ class IdentityReassociationIntentPublisher:
                 if isinstance(item, dict):
                     decisions.append(dict(item))
 
+        terminal_investigations: list[dict[str, Any]] = []
+        raw_terminal_investigations = payload.get("terminal_investigations")
+        if isinstance(raw_terminal_investigations, list):
+            for item in raw_terminal_investigations:
+                if not isinstance(item, dict):
+                    continue
+                investigation_id = _as_non_empty_string(item.get("investigation_id"))
+                investigation_state = _as_non_empty_string(item.get("investigation_state"))
+                if (
+                    investigation_id is None
+                    or investigation_state not in TERMINAL_INVESTIGATION_STATES
+                ):
+                    continue
+                termination_reason = _as_non_empty_string(item.get("investigation_termination_reason"))
+                generated_at = item.get("generated_at")
+                terminal_investigations.append(
+                    {
+                        "investigation_id": investigation_id,
+                        "investigation_state": investigation_state,
+                        "investigation_termination_reason": termination_reason,
+                        "generated_at": (
+                            float(generated_at)
+                            if isinstance(generated_at, (int, float))
+                            else 0.0
+                        ),
+                    }
+                )
+
         return {
             "ok": True,
             "intents": intents,
             "decisions": decisions,
+            "terminal_investigations": terminal_investigations,
         }
 
     def _default_ack_ledger_payload(self, *, now_timestamp: float) -> dict[str, Any]:
@@ -752,6 +1008,7 @@ class IdentityReassociationIntentPublisher:
                 "load_ok": True,
                 "recovered_from_backup": False,
                 "terminal_outcomes": primary.get("terminal_outcomes", {}),
+                "terminal_investigations": primary.get("terminal_investigations", []),
             }
 
         backup = self._parse_ack_ledger(self._ack_backup_path)
@@ -760,12 +1017,14 @@ class IdentityReassociationIntentPublisher:
                 "load_ok": True,
                 "recovered_from_backup": True,
                 "terminal_outcomes": backup.get("terminal_outcomes", {}),
+                "terminal_investigations": backup.get("terminal_investigations", []),
             }
 
         return {
             "load_ok": False,
             "load_failure_reason": "ack_ledger_unrecoverable",
             "terminal_outcomes": {},
+            "terminal_investigations": [],
         }
 
     def _parse_ack_ledger(self, path: Path) -> dict[str, Any]:
@@ -781,6 +1040,7 @@ class IdentityReassociationIntentPublisher:
             return {"ok": False}
 
         terminal_outcomes: dict[str, str] = {}
+        terminal_investigation_by_id: dict[str, dict[str, Any]] = {}
         raw_acks = payload.get("acknowledgments")
         if isinstance(raw_acks, list):
             for item in raw_acks:
@@ -788,15 +1048,40 @@ class IdentityReassociationIntentPublisher:
                     continue
                 intent_id = _as_non_empty_string(item.get("intent_id"))
                 outcome = _as_non_empty_string(item.get("outcome"))
+                investigation_id = _as_non_empty_string(item.get("investigation_id"))
+                investigation_state = _as_non_empty_string(item.get("investigation_state"))
+                investigation_termination_reason = _as_non_empty_string(
+                    item.get("investigation_termination_reason")
+                )
+                timestamp_value = item.get("timestamp")
                 if intent_id is None or outcome is None:
                     continue
                 if outcome not in TERMINAL_ACK_OUTCOMES:
                     continue
                 terminal_outcomes[intent_id] = outcome
 
+                if investigation_id is None:
+                    continue
+
+                if investigation_state not in TERMINAL_INVESTIGATION_STATES:
+                    investigation_state = "closed"
+
+                generated_at = (
+                    float(timestamp_value)
+                    if isinstance(timestamp_value, (int, float))
+                    else 0.0
+                )
+                terminal_investigation_by_id[investigation_id] = {
+                    "investigation_id": investigation_id,
+                    "investigation_state": investigation_state,
+                    "investigation_termination_reason": investigation_termination_reason,
+                    "generated_at": generated_at,
+                }
+
         return {
             "ok": True,
             "terminal_outcomes": terminal_outcomes,
+            "terminal_investigations": list(terminal_investigation_by_id.values()),
         }
 
     def _ensure_ack_ledger_exists(self, *, now_timestamp: float) -> None:

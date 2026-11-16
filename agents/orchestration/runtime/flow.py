@@ -136,6 +136,7 @@ async def monitor_movement(
     verification_feedback_publish_fn: Callable[[list[dict[str, Any]]], dict[str, int]] | None = None,
     verification_results_persist_fn: Callable[[list[dict[str, Any]]], None] | None = None,
     verification_submissions_persist_fn: Callable[[list[dict[str, Any]]], None] | None = None,
+    decision_ipc_fixture_cycle_fn: Callable[[], Awaitable[dict[str, Any]]] | None = None,
 ) -> None:
     address = [tracking_address[0], tracking_address[1]]
 
@@ -152,6 +153,7 @@ async def monitor_movement(
     )
     completed_agent_ops_cycles = 0
     agent_ops_cycle_task: asyncio.Task[dict[str, Any]] | None = None
+    decision_ipc_cycle_task: asyncio.Task[dict[str, Any]] | None = None
 
     try:
         while True:
@@ -235,6 +237,16 @@ async def monitor_movement(
                                 )
                 agent_ops_cycle_task = None
 
+            if decision_ipc_cycle_task is not None and decision_ipc_cycle_task.done():
+                try:
+                    decision_ipc_cycle_task.result()
+                except Exception as error:
+                    emit(
+                        "Tracking decision IPC cycle failed "
+                        f"({type(error).__name__}): {error}"
+                    )
+                decision_ipc_cycle_task = None
+
             try:
                 await run_tracking_cycle_fn(session, address)
             except Exception as error:
@@ -306,6 +318,9 @@ async def monitor_movement(
                         f"({type(error).__name__}): {error}"
                     )
 
+            if decision_ipc_fixture_cycle_fn is not None and decision_ipc_cycle_task is None:
+                decision_ipc_cycle_task = asyncio.create_task(decision_ipc_fixture_cycle_fn())
+
             elapsed = loop.time() - iteration_started_at
             await asyncio.sleep(max(0, analysis_interval_seconds - elapsed))
     finally:
@@ -313,5 +328,11 @@ async def monitor_movement(
             agent_ops_cycle_task.cancel()
             try:
                 await agent_ops_cycle_task
+            except asyncio.CancelledError:
+                pass
+        if decision_ipc_cycle_task is not None and not decision_ipc_cycle_task.done():
+            decision_ipc_cycle_task.cancel()
+            try:
+                await decision_ipc_cycle_task
             except asyncio.CancelledError:
                 pass

@@ -262,6 +262,7 @@ def make_monitor_movement(
         verification_feedback_publish_fn: Callable[[list[dict[str, Any]]], dict[str, int]] | None = None,
         verification_results_persist_fn: Callable[[list[dict[str, Any]]], None] | None = None,
         verification_submissions_persist_fn: Callable[[list[dict[str, Any]]], None] | None = None,
+        decision_ipc_fixture_cycle_fn: Callable[[], Awaitable[dict[str, Any]]] | None = None,
     ) -> None:
         async def _run_tracking_cycle(session_handle: ClientSession, address: list[Any]) -> None:
             await run_tracking_cycle_fn(
@@ -294,6 +295,7 @@ def make_monitor_movement(
             verification_feedback_publish_fn=verification_feedback_publish_fn,
             verification_results_persist_fn=verification_results_persist_fn,
             verification_submissions_persist_fn=verification_submissions_persist_fn,
+            decision_ipc_fixture_cycle_fn=decision_ipc_fixture_cycle_fn,
         )
 
     return _monitor_movement

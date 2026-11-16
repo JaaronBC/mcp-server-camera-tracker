@@ -246,6 +246,7 @@ def submit_tracking_runtime_candidates(
     frame: Any,
     detections: list[DetectionCandidate],
     event_reasons: list[str],
+    follow_up_context: dict[str, Any] | None = None,
     encode_frame: Callable[[Any], str],
     request_timeout_seconds: float = 1.0,
 ) -> bool:
@@ -265,6 +266,7 @@ def submit_tracking_runtime_candidates(
         frame_reference=frame_reference,
         detections=detections,
         event_reasons=submission_reasons,
+        follow_up_context=follow_up_context,
         request_timeout_seconds=request_timeout_seconds,
     )
 

@@ -1,10 +1,12 @@
 # Runtime entrypoint for initialization/bootstrap and runtime lifecycle wiring.
 import argparse
 import asyncio
+import inspect
 import json
 import math
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +18,7 @@ from agents.orchestration.runtime import config as runtime_config
 from agents.orchestration.runtime import core as runtime_agent
 from agents.orchestration.runtime import flow as runtime_flow
 from agents.orchestration.runtime.identity_reassociation_intents import IdentityReassociationIntentPublisher
+from agents.orchestration.runtime.tracking_decision_ipc import TrackingDecisionIpcTransport
 from agents.orchestration.runtime.verification_feedback import VerificationFeedbackPublisher
 from agents.orchestration.runtime.verification_queue import VerificationQueueManager
 
@@ -30,6 +33,14 @@ LATEST_VERIFICATION_QUEUE_SUBMISSIONS_PATH = PROJECT_ROOT / "captures" / "latest
 LATEST_OPERATOR_TRACKING_FEEDBACK_PATH = PROJECT_ROOT / "captures" / "operator_tracking_feedback.json"
 LATEST_IDENTITY_REASSOCIATION_INTENTS_PATH = PROJECT_ROOT / "captures" / "tracking_identity_reassociation_intents.json"
 LATEST_IDENTITY_REASSOCIATION_ACK_LEDGER_PATH = PROJECT_ROOT / "captures" / "tracking_identity_reassociation_ack_ledger.json"
+LATEST_TRACKING_DECISION_TOOL_REQUESTS_PATH = PROJECT_ROOT / "captures" / "tracking_decision_tool_requests.jsonl"
+LATEST_TRACKING_DECISION_TOOL_RESULTS_PATH = PROJECT_ROOT / "captures" / "tracking_decision_tool_results.jsonl"
+LATEST_TRACKING_DECISION_REQUEST_INDEX_PATH = PROJECT_ROOT / "captures" / "latest_tracking_decision_request_index.json"
+LATEST_TRACKING_DECISION_RESULT_INDEX_PATH = PROJECT_ROOT / "captures" / "latest_tracking_decision_result_index.json"
+TRACKING_DECISION_TOOL_ALLOWLIST = {
+    "get_identity_snapshot",
+    "get_track_evidence_history",
+}
 
 
 def _env_flag_enabled(name: str, default: bool = False) -> bool:
@@ -129,6 +140,461 @@ def _resolve_verification_artifact_paths() -> tuple[Path, Path, Path, Path, Path
         "PHASE2D_IDENTITY_REASSOCIATION_ACK_LEDGER_PATH",
     )
     return results_path, submissions_path, feedback_path, identity_intents_path, identity_intents_ack_ledger_path
+
+
+def _resolve_tracking_decision_ipc_artifact_paths() -> tuple[Path, Path, Path, Path]:
+    requests_path = _resolve_artifact_path(
+        LATEST_TRACKING_DECISION_TOOL_REQUESTS_PATH,
+        "PHASE2D_TRACKING_DECISION_TOOL_REQUESTS_PATH",
+    )
+    results_path = _resolve_artifact_path(
+        LATEST_TRACKING_DECISION_TOOL_RESULTS_PATH,
+        "PHASE2D_TRACKING_DECISION_TOOL_RESULTS_PATH",
+    )
+    request_index_path = _resolve_artifact_path(
+        LATEST_TRACKING_DECISION_REQUEST_INDEX_PATH,
+        "PHASE2D_TRACKING_DECISION_REQUEST_INDEX_PATH",
+    )
+    result_index_path = _resolve_artifact_path(
+        LATEST_TRACKING_DECISION_RESULT_INDEX_PATH,
+        "PHASE2D_TRACKING_DECISION_RESULT_INDEX_PATH",
+    )
+    return requests_path, results_path, request_index_path, result_index_path
+
+
+def _resolve_tracking_decision_ipc_max_requests_per_cycle(default: int = 8) -> int:
+    raw = os.getenv("PHASE2D_TRACKING_DECISION_IPC_MAX_REQUESTS_PER_CYCLE", str(default)).strip()
+    try:
+        parsed = int(float(raw))
+    except ValueError:
+        parsed = default
+    return max(1, min(64, parsed))
+
+
+def _resolve_tracking_decision_ipc_tool_timeout_seconds(default: float = 1.5) -> float:
+    raw = os.getenv("PHASE2D_TRACKING_DECISION_IPC_TOOL_TIMEOUT_SECONDS", str(default)).strip()
+    try:
+        parsed = float(raw)
+    except ValueError:
+        parsed = default
+    if not math.isfinite(parsed) or parsed <= 0:
+        parsed = default
+    return max(0.1, min(30.0, parsed))
+
+
+def _nonempty_str(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized if normalized else None
+
+
+def _extract_mcp_result_payload(result: Any) -> dict[str, Any] | None:
+    content = getattr(result, "content", None)
+    if not isinstance(content, list):
+        return None
+    for item in content:
+        for key in ("json", "data", "value"):
+            value = getattr(item, key, None)
+            if isinstance(value, dict):
+                return value
+        text = getattr(item, "text", None)
+        if not isinstance(text, str):
+            continue
+        raw_text = text.strip()
+        if not raw_text:
+            continue
+        try:
+            decoded = json.loads(raw_text)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(decoded, dict):
+            return decoded
+    return None
+
+
+def _validate_identity_snapshot_arguments(arguments: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    allowed_keys = {
+        "app_identity_id",
+        "detection_reference",
+        "include_history",
+        "max_history_entries",
+        "max_candidates",
+        "min_source_generation",
+        "min_source_version",
+        "stale_after_seconds",
+        "investigation_id",
+        "correlation_id",
+    }
+    unknown = [key for key in arguments.keys() if key not in allowed_keys]
+    if unknown:
+        errors.append("identity_snapshot_unknown_arguments")
+
+    app_identity_id = _nonempty_str(arguments.get("app_identity_id"))
+    detection_reference = _nonempty_str(arguments.get("detection_reference"))
+    if int(app_identity_id is not None) + int(detection_reference is not None) != 1:
+        errors.append("identity_snapshot_selector_required")
+
+    include_history = arguments.get("include_history")
+    if include_history is not None and not isinstance(include_history, bool):
+        errors.append("identity_snapshot_include_history_invalid")
+
+    for key in ("max_history_entries", "max_candidates"):
+        value = arguments.get(key)
+        if value is None:
+            continue
+        if not isinstance(value, int) or value <= 0:
+            errors.append(f"identity_snapshot_{key}_invalid")
+
+    for key in ("min_source_generation", "min_source_version"):
+        value = arguments.get(key)
+        if value is None:
+            continue
+        if not isinstance(value, int) or value < 0:
+            errors.append(f"identity_snapshot_{key}_invalid")
+
+    stale_after_seconds = arguments.get("stale_after_seconds")
+    if stale_after_seconds is not None and (
+        not isinstance(stale_after_seconds, (int, float)) or float(stale_after_seconds) <= 0
+    ):
+        errors.append("identity_snapshot_stale_after_seconds_invalid")
+
+    for key in ("investigation_id", "correlation_id"):
+        value = arguments.get(key)
+        if value is None:
+            continue
+        if _nonempty_str(value) is None:
+            errors.append(f"identity_snapshot_{key}_invalid")
+
+    return sorted(set(errors))
+
+
+def _validate_track_evidence_history_arguments(arguments: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    allowed_keys = {
+        "track_id",
+        "max_messages",
+        "max_history_records",
+        "max_scan_records",
+        "now_timestamp",
+        "investigation_id",
+        "correlation_id",
+    }
+    unknown = [key for key in arguments.keys() if key not in allowed_keys]
+    if unknown:
+        errors.append("track_evidence_history_unknown_arguments")
+
+    if _nonempty_str(arguments.get("track_id")) is None:
+        errors.append("track_evidence_history_track_id_required")
+
+    for key in ("max_messages", "max_history_records", "max_scan_records"):
+        value = arguments.get(key)
+        if value is None:
+            continue
+        if not isinstance(value, int) or value <= 0:
+            errors.append(f"track_evidence_history_{key}_invalid")
+
+    now_timestamp = arguments.get("now_timestamp")
+    if now_timestamp is not None and not isinstance(now_timestamp, (int, float)):
+        errors.append("track_evidence_history_now_timestamp_invalid")
+
+    for key in ("investigation_id", "correlation_id"):
+        value = arguments.get(key)
+        if value is None:
+            continue
+        if _nonempty_str(value) is None:
+            errors.append(f"track_evidence_history_{key}_invalid")
+
+    return sorted(set(errors))
+
+
+def _validate_tracking_decision_request_for_dispatch(request_event: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    tool_name = _nonempty_str(request_event.get("tool_name"))
+    arguments = request_event.get("arguments")
+
+    if tool_name not in TRACKING_DECISION_TOOL_ALLOWLIST:
+        errors.append("tool_name_not_allowed")
+    if not isinstance(arguments, dict):
+        errors.append("arguments_invalid")
+        arguments = {}
+
+    if tool_name == "get_identity_snapshot":
+        errors.extend(_validate_identity_snapshot_arguments(arguments))
+    elif tool_name == "get_track_evidence_history":
+        errors.extend(_validate_track_evidence_history_arguments(arguments))
+
+    request_id = _nonempty_str(request_event.get("request_id"))
+    investigation_id = _nonempty_str(request_event.get("investigation_id"))
+    iteration_index = request_event.get("iteration_index")
+    if request_id is None:
+        errors.append("request_id_required")
+    if investigation_id is None:
+        errors.append("investigation_id_required")
+    if not isinstance(iteration_index, int) or iteration_index < 1 or iteration_index > 2:
+        errors.append("iteration_index_invalid")
+
+    return sorted(set(errors))
+
+
+def _classify_tracking_decision_tool_result_status(
+    *,
+    tool_name: str,
+    payload: dict[str, Any],
+) -> tuple[str, str | None, str | None]:
+    if tool_name == "get_identity_snapshot":
+        available = bool(payload.get("available", False))
+        state = _nonempty_str(payload.get("state"))
+        stale_snapshot = bool(payload.get("stale_snapshot", False))
+        if available:
+            return "ok", None, None
+        if state == "incompatible_snapshot":
+            return "incompatible", "snapshot_incompatible", "snapshot_incompatible_with_minimum_requirements"
+        if state == "stale" or stale_snapshot:
+            return "stale", "snapshot_stale", "identity_snapshot_stale"
+        return "unavailable", _nonempty_str(payload.get("error")) or "identity_snapshot_unavailable", "identity_snapshot_unavailable"
+
+    if tool_name == "get_track_evidence_history":
+        available = bool(payload.get("available", False))
+        if available:
+            return "ok", None, None
+        return "unavailable", _nonempty_str(payload.get("error")) or "track_evidence_unavailable", "track_evidence_unavailable"
+
+    return "rejected", "tool_name_not_allowed", "tool_name_not_allowed"
+
+
+async def _run_tracking_decision_ipc_mcp_cycle(
+    *,
+    session: ClientSession,
+    transport: TrackingDecisionIpcTransport,
+    max_requests_per_cycle: int,
+    tool_timeout_seconds: float,
+) -> dict[str, Any]:
+    pending = transport.orchestration_poll_pending_requests(
+        max_requests=max_requests_per_cycle,
+    )
+    requests = pending.get("pending_requests")
+    if not isinstance(requests, list):
+        requests = []
+
+    published_count = 0
+    duplicate_count = 0
+    rejected_count = 0
+    timeout_count = 0
+    processed_investigations: set[str] = set()
+
+    def _persist_tool_budget_exhaustion_if_needed(
+        *,
+        investigation_id: str | None,
+        reason: str,
+    ) -> None:
+        if investigation_id is None:
+            return
+        try:
+            transport.mark_tool_budget_exhausted_investigation(
+                investigation_id=investigation_id,
+                reason=reason,
+            )
+        except Exception:
+            pass
+
+    for request in requests:
+        request_id = _nonempty_str(request.get("request_id"))
+        investigation_id = _nonempty_str(request.get("investigation_id"))
+        tool_name = _nonempty_str(request.get("tool_name"))
+
+        validation = transport.validate_pending_request_for_dispatch(request)
+        validation_errors = list(validation.get("errors", []))
+        if validation_errors:
+            publish = transport.orchestration_publish_fixture_result(
+                request_event=request,
+                status="rejected",
+                result_payload={"available": False, "errors": validation_errors},
+                error_code="invalid_request_event",
+                error="invalid_request_event",
+            )
+            if bool(publish.get("duplicate", False)):
+                duplicate_count += 1
+            elif bool(publish.get("published", False)):
+                rejected_count += 1
+            continue
+
+        request_errors = _validate_tracking_decision_request_for_dispatch(request)
+        if request_errors:
+            publish = transport.orchestration_publish_fixture_result(
+                request_event=request,
+                status="rejected",
+                result_payload={"available": False, "errors": request_errors},
+                error_code="invalid_tool_arguments",
+                error="invalid_tool_arguments",
+            )
+            if bool(publish.get("duplicate", False)):
+                duplicate_count += 1
+            elif bool(publish.get("published", False)):
+                rejected_count += 1
+            continue
+
+        if investigation_id is not None and investigation_id in processed_investigations:
+            publish = transport.orchestration_publish_fixture_result(
+                request_event=request,
+                status="rejected",
+                result_payload={
+                    "available": False,
+                    "error": "max_one_tool_call_per_investigation_per_cycle",
+                },
+                error_code="per_investigation_call_limit",
+                error="max_one_tool_call_per_investigation_per_cycle",
+            )
+            if bool(publish.get("duplicate", False)):
+                duplicate_count += 1
+            elif bool(publish.get("published", False)):
+                rejected_count += 1
+            continue
+
+        if investigation_id is not None:
+            processed_investigations.add(investigation_id)
+
+        if request_id is None or tool_name is None:
+            publish = transport.orchestration_publish_fixture_result(
+                request_event=request,
+                status="rejected",
+                result_payload={"available": False, "error": "invalid_request_identity"},
+                error_code="invalid_request_identity",
+                error="invalid_request_identity",
+            )
+            if bool(publish.get("duplicate", False)):
+                duplicate_count += 1
+            elif bool(publish.get("published", False)):
+                rejected_count += 1
+            continue
+
+        expires_at = request.get("expires_at")
+        if isinstance(expires_at, (int, float)) and float(expires_at) <= time.time():
+            publish = transport.orchestration_publish_fixture_result(
+                request_event=request,
+                status="expired",
+                result_payload={"available": False, "error": "request_expired_before_dispatch"},
+                error_code="request_expired",
+                error="request_expired_before_dispatch",
+            )
+            if bool(publish.get("duplicate", False)):
+                duplicate_count += 1
+            elif bool(publish.get("published", False)):
+                rejected_count += 1
+            continue
+
+        started_at = time.time()
+        try:
+            result = await asyncio.wait_for(
+                session.call_tool(tool_name, arguments=dict(request.get("arguments") or {})),
+                timeout=tool_timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            timeout_count += 1
+            publish = transport.orchestration_publish_fixture_result(
+                request_event=request,
+                status="timeout",
+                result_payload={
+                    "available": False,
+                    "error": "tool_timeout",
+                    "timeout_seconds": tool_timeout_seconds,
+                },
+                error_code="tool_timeout",
+                error="tool_timeout",
+                now_timestamp=time.time(),
+            )
+            _persist_tool_budget_exhaustion_if_needed(
+                investigation_id=investigation_id,
+                reason="tool_timeout",
+            )
+            if bool(publish.get("duplicate", False)):
+                duplicate_count += 1
+            continue
+        except Exception as error:
+            publish = transport.orchestration_publish_fixture_result(
+                request_event=request,
+                status="unavailable",
+                result_payload={
+                    "available": False,
+                    "error": "tool_execution_failed",
+                    "exception": type(error).__name__,
+                },
+                error_code="tool_execution_failed",
+                error="tool_execution_failed",
+                now_timestamp=time.time(),
+            )
+            _persist_tool_budget_exhaustion_if_needed(
+                investigation_id=investigation_id,
+                reason="tool_execution_failed",
+            )
+            if bool(publish.get("duplicate", False)):
+                duplicate_count += 1
+            elif bool(publish.get("published", False)):
+                rejected_count += 1
+            continue
+
+        payload = _extract_mcp_result_payload(result)
+        finished_at = time.time()
+        if not isinstance(payload, dict):
+            publish = transport.orchestration_publish_fixture_result(
+                request_event=request,
+                status="rejected",
+                result_payload={"available": False, "error": "malformed_tool_response"},
+                error_code="malformed_tool_response",
+                error="malformed_tool_response",
+                now_timestamp=finished_at,
+            )
+            _persist_tool_budget_exhaustion_if_needed(
+                investigation_id=investigation_id,
+                reason="malformed_tool_response",
+            )
+            if bool(publish.get("duplicate", False)):
+                duplicate_count += 1
+            elif bool(publish.get("published", False)):
+                rejected_count += 1
+            continue
+
+        status, error_code, error_message = _classify_tracking_decision_tool_result_status(
+            tool_name=tool_name,
+            payload=payload,
+        )
+        publish = transport.orchestration_publish_fixture_result(
+            request_event=request,
+            status=status,
+            result_payload={
+                **payload,
+                "request_id": request_id,
+                "tool_name": tool_name,
+                "started_at": started_at,
+                "finished_at": finished_at,
+                "execution_mode": "bounded_mcp_dispatch",
+            },
+            error_code=error_code,
+            error=error_message,
+            now_timestamp=finished_at,
+        )
+        if bool(publish.get("duplicate", False)):
+            duplicate_count += 1
+        elif bool(publish.get("published", False)):
+            published_count += 1
+            terminal_reason = error_code or status
+            _persist_tool_budget_exhaustion_if_needed(
+                investigation_id=investigation_id,
+                reason=terminal_reason,
+            )
+
+    return {
+        "pending_count": int(pending.get("pending_count", 0)),
+        "published_count": published_count,
+        "duplicate_count": duplicate_count,
+        "expired_count": int(pending.get("expired_count", 0)),
+        "terminal_rejections": int(pending.get("terminal_rejections", 0)),
+        "timeout_count": timeout_count,
+        "rejected_count": rejected_count,
+        "execution": "bounded_mcp_dispatch",
+        "tool_timeout_seconds": tool_timeout_seconds,
+    }
 
 def load_config(args: list[str] | None = None) -> runtime_app.RuntimeConfig:
     """Build runtime configuration from CLI args and environment defaults."""
@@ -271,10 +737,17 @@ async def monitor_movement(
     verification_manager: VerificationQueueManager | None = None
     verification_feedback_publisher: VerificationFeedbackPublisher | None = None
     identity_reassociation_intent_publisher: IdentityReassociationIntentPublisher | None = None
+    tracking_decision_ipc_transport: TrackingDecisionIpcTransport | None = None
     identity_reassociation_intent_enabled = _env_flag_enabled(
         "IDENTITY_REASSOCIATION_INTENT_ENABLED",
         False,
     )
+    tracking_decision_ipc_enabled = _env_flag_enabled(
+        "PHASE2D_TRACKING_DECISION_IPC_ENABLED",
+        False,
+    )
+    tracking_decision_ipc_max_requests_per_cycle = _resolve_tracking_decision_ipc_max_requests_per_cycle(8)
+    tracking_decision_ipc_tool_timeout_seconds = _resolve_tracking_decision_ipc_tool_timeout_seconds(1.5)
     if enable_visual_verification_queue:
         verification_manager = VerificationQueueManager(
             evidence_root_dir=PROJECT_ROOT / "captures" / "tracking_evidence",
@@ -300,6 +773,21 @@ async def monitor_movement(
             )
         await verification_manager.start(session=session)
 
+    if tracking_decision_ipc_enabled:
+        (
+            tracking_decision_requests_path,
+            tracking_decision_results_path,
+            tracking_decision_request_index_path,
+            tracking_decision_result_index_path,
+        ) = _resolve_tracking_decision_ipc_artifact_paths()
+        tracking_decision_ipc_transport = TrackingDecisionIpcTransport(
+            requests_path=tracking_decision_requests_path,
+            results_path=tracking_decision_results_path,
+            request_index_path=tracking_decision_request_index_path,
+            result_index_path=tracking_decision_result_index_path,
+            writer_role="orchestration",
+        )
+
     def publish_verification_outputs(recent_results: list[dict[str, Any]]) -> dict[str, Any]:
         summary: dict[str, Any] = {}
         if verification_feedback_publisher is not None:
@@ -310,37 +798,59 @@ async def monitor_movement(
             )
         return summary
 
+    async def run_tracking_decision_ipc_mcp_cycle() -> dict[str, Any]:
+        if tracking_decision_ipc_transport is None:
+            return {
+                "pending_count": 0,
+                "published_count": 0,
+                "duplicate_count": 0,
+                "expired_count": 0,
+                "terminal_rejections": 0,
+            }
+        return await _run_tracking_decision_ipc_mcp_cycle(
+            session=session,
+            transport=tracking_decision_ipc_transport,
+            max_requests_per_cycle=tracking_decision_ipc_max_requests_per_cycle,
+            tool_timeout_seconds=tracking_decision_ipc_tool_timeout_seconds,
+        )
+
     try:
-        await monitor_impl(
-            session,
-            enable_agent_ops_heartbeat=enable_agent_ops_heartbeat,
-            agent_ops_interval_seconds=agent_ops_interval_seconds,
-            agent_ops_max_tracks=agent_ops_max_tracks,
-            agent_ops_summary_every_cycles=agent_ops_summary_every_cycles,
-            agent_ops_summary_window_size=agent_ops_summary_window_size,
-            handoff_degraded_warn_rate=handoff_degraded_warn_rate,
-            handoff_degraded_critical_rate=handoff_degraded_critical_rate,
-            depth_coverage_summary_enabled=depth_coverage_summary_enabled,
-            depth_coverage_summary_every_cycles=depth_coverage_summary_every_cycles,
-            depth_coverage_sample_limit=depth_coverage_sample_limit,
-            verification_manager=verification_manager,
-            verification_request_source_fn=verification_request_source_fn,
-            verification_results_persist_fn=(
+        monitor_kwargs: dict[str, Any] = {
+            "enable_agent_ops_heartbeat": enable_agent_ops_heartbeat,
+            "agent_ops_interval_seconds": agent_ops_interval_seconds,
+            "agent_ops_max_tracks": agent_ops_max_tracks,
+            "agent_ops_summary_every_cycles": agent_ops_summary_every_cycles,
+            "agent_ops_summary_window_size": agent_ops_summary_window_size,
+            "handoff_degraded_warn_rate": handoff_degraded_warn_rate,
+            "handoff_degraded_critical_rate": handoff_degraded_critical_rate,
+            "depth_coverage_summary_enabled": depth_coverage_summary_enabled,
+            "depth_coverage_summary_every_cycles": depth_coverage_summary_every_cycles,
+            "depth_coverage_sample_limit": depth_coverage_sample_limit,
+            "verification_manager": verification_manager,
+            "verification_request_source_fn": verification_request_source_fn,
+            "verification_results_persist_fn": (
                 None
                 if verification_manager is None
                 else persist_results
             ),
-            verification_submissions_persist_fn=(
+            "verification_submissions_persist_fn": (
                 None
                 if verification_manager is None
                 else persist_submissions
             ),
-            verification_feedback_publish_fn=(
+            "verification_feedback_publish_fn": (
                 None
                 if verification_feedback_publisher is None and identity_reassociation_intent_publisher is None
                 else publish_verification_outputs
             ),
-        )
+        }
+        if "decision_ipc_fixture_cycle_fn" in inspect.signature(monitor_impl).parameters:
+            monitor_kwargs["decision_ipc_fixture_cycle_fn"] = (
+                run_tracking_decision_ipc_mcp_cycle
+                if tracking_decision_ipc_enabled
+                else None
+            )
+        await monitor_impl(session, **monitor_kwargs)
     finally:
         if verification_manager is not None:
             await verification_manager.stop()

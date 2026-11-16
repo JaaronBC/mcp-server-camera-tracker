@@ -14,6 +14,7 @@ from mcp.client.stdio import stdio_client
 from agents.contracts import VisualVerificationEnvelope
 from agents.observation.agent_observation import ObservationVisualVerificationError
 from agents.observation.tools import evidence as observation_evidence_tools
+from agents.observation.tools import track_evidence_history as observation_track_evidence_history_tools
 from agents.orchestration.tools import control as orchestration_control
 
 
@@ -354,6 +355,163 @@ class TestObservationMcpEvidenceTools(unittest.TestCase):
                 self.assertTrue(verify_result["available"])
                 self.assertEqual(verify_result["envelope"]["referenced_message_id"], "msg-1")
 
+    def test_get_track_evidence_history_valid_bounded(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            evidence_root = self._build_valid_store(Path(temp_dir), message_id="msg-a")
+            envelopes_dir = evidence_root / "envelopes"
+            refs_dir = evidence_root / "refs"
+
+            frame_id = "frame-def"
+            frame_reference = f"evidence://frame/{frame_id}"
+            frame_path = evidence_root / "frames" / f"{frame_id}.jpg"
+            frame_path.write_bytes(b"fake-jpeg-bytes-2")
+            _write_json(
+                refs_dir / f"{frame_id}.json",
+                {
+                    "kind": "frame",
+                    "id": frame_id,
+                    "reference": frame_reference,
+                    "timestamp": 1002.0,
+                    "created_at": 1002.0,
+                    "expires_at": 9999999999.0,
+                    "status": "available",
+                    "frame_path": str(frame_path),
+                    "width": 32,
+                    "height": 24,
+                },
+            )
+            det_ref_id = "detref-def"
+            detection_reference = f"evidence://detection/{det_ref_id}"
+            _write_json(
+                refs_dir / f"{det_ref_id}.json",
+                {
+                    "kind": "detection",
+                    "id": det_ref_id,
+                    "reference": detection_reference,
+                    "timestamp": 1002.0,
+                    "created_at": 1002.0,
+                    "expires_at": 9999999999.0,
+                    "track_id": "track-1",
+                    "detection_id": "det-2",
+                    "frame_reference": frame_reference,
+                    "pixel_bbox": {"x1": 10.0, "y1": 20.0, "x2": 30.0, "y2": 40.0},
+                },
+            )
+            _write_json(
+                envelopes_dir / "msg-b.json",
+                {
+                    "message_id": "msg-b",
+                    "stored_at": 1002.0,
+                    "validation": {
+                        "valid": True,
+                        "errors": [],
+                        "warnings": [],
+                        "message_id": "msg-b",
+                        "track_id": "track-1",
+                    },
+                    "envelope": _valid_envelope_payload(
+                        message_id="msg-b",
+                        frame_reference=frame_reference,
+                        detection_reference=detection_reference,
+                    ),
+                },
+            )
+
+            with patch.object(observation_track_evidence_history_tools, "EVIDENCE_ROOT_DIR", evidence_root):
+                result = observation_track_evidence_history_tools.get_track_evidence_history(
+                    "track-1",
+                    max_messages=1,
+                    max_history_records=1,
+                    max_scan_records=10,
+                )
+
+        self.assertTrue(result["available"])
+        self.assertEqual(result["state"], "recorded_observation")
+        self.assertEqual(result["message_count"], 1)
+        self.assertLessEqual(result["work"]["scanned_records"], 10)
+        self.assertEqual(len(result["messages"][0]["bounded_history"]), 1)
+
+    def test_get_track_evidence_history_invalid_and_missing_track(self) -> None:
+        invalid = observation_track_evidence_history_tools.get_track_evidence_history("   ")
+        self.assertFalse(invalid["available"])
+        self.assertEqual(invalid["state"], "invalid_request")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            evidence_root = self._build_valid_store(Path(temp_dir), message_id="msg-c")
+            with patch.object(observation_track_evidence_history_tools, "EVIDENCE_ROOT_DIR", evidence_root):
+                missing = observation_track_evidence_history_tools.get_track_evidence_history("track-does-not-exist")
+
+        self.assertTrue(missing["available"])
+        self.assertEqual(missing["state"], "no_recorded_observation")
+        self.assertEqual(missing["message_count"], 0)
+
+    def test_get_track_evidence_history_expired_and_missing_references(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            evidence_root = self._build_valid_store(Path(temp_dir), message_id="msg-expired")
+            refs_dir = evidence_root / "refs"
+
+            frame_ref_path = refs_dir / "frame-abc.json"
+            frame_payload = json.loads(frame_ref_path.read_text(encoding="utf-8"))
+            frame_payload["expires_at"] = 0.0
+            _write_json(frame_ref_path, frame_payload)
+
+            detection_ref_path = refs_dir / "detref-abc.json"
+            detection_ref_path.unlink(missing_ok=True)
+
+            with patch.object(observation_track_evidence_history_tools, "EVIDENCE_ROOT_DIR", evidence_root):
+                result = observation_track_evidence_history_tools.get_track_evidence_history(
+                    "track-1",
+                    now_timestamp=10_000.0,
+                )
+
+        self.assertTrue(result["available"])
+        self.assertIn(result["state"], {"expired_evidence", "missing_evidence", "expired_or_missing", "recorded_observation"})
+        self.assertEqual(result["message_count"], 1)
+        summary = result["messages"][0]["reference_statuses"]["summary"]
+        self.assertGreaterEqual(summary["expired_count"] + summary["missing_count"], 1)
+
+    def test_get_track_evidence_history_unavailable_storage_and_bounded_work(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            evidence_root = Path(temp_dir) / "missing-root"
+            with patch.object(observation_track_evidence_history_tools, "EVIDENCE_ROOT_DIR", evidence_root):
+                unavailable = observation_track_evidence_history_tools.get_track_evidence_history("track-1")
+
+        self.assertFalse(unavailable["available"])
+        self.assertEqual(unavailable["state"], "storage_unavailable")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            evidence_root = self._build_valid_store(Path(temp_dir), message_id="msg-limit")
+            envelopes_dir = evidence_root / "envelopes"
+            for index in range(25):
+                payload = {
+                    "message_id": f"other-{index}",
+                    "stored_at": 1100.0 + index,
+                    "validation": {
+                        "valid": True,
+                        "errors": [],
+                        "warnings": [],
+                        "message_id": f"other-{index}",
+                        "track_id": "track-other",
+                    },
+                    "envelope": _valid_envelope_payload(
+                        message_id=f"other-{index}",
+                        frame_reference="evidence://frame/frame-abc",
+                        detection_reference="evidence://detection/detref-abc",
+                    ),
+                }
+                payload["envelope"]["track_id"] = "track-other"
+                _write_json(envelopes_dir / f"other-{index}.json", payload)
+
+            with patch.object(observation_track_evidence_history_tools, "EVIDENCE_ROOT_DIR", evidence_root):
+                limited = observation_track_evidence_history_tools.get_track_evidence_history(
+                    "track-1",
+                    max_scan_records=3,
+                )
+
+        self.assertTrue(limited["available"])
+        self.assertLessEqual(limited["work"]["scanned_records"], 3)
+        self.assertTrue(limited["work"]["scan_limit_reached"])
+
 
 class TestObservationMcpToolDiscoverability(unittest.IsolatedAsyncioTestCase):
     async def test_observation_tools_discoverable_via_list_tools(self) -> None:
@@ -374,6 +532,8 @@ class TestObservationMcpToolDiscoverability(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("get_tracking_visual_evidence", names)
         self.assertIn("verify_tracking_visual_evidence", names)
+        self.assertIn("get_track_evidence_history", names)
+        self.assertIn("get_identity_snapshot", names)
 
         self.assertIn("simulate_observation_summary", names)
         self.assertIn("simulate_reasoning_assessment", names)

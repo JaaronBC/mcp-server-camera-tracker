@@ -77,6 +77,12 @@ class SharedDashboardState:
         self.tracking_stable_identity_visualization_enabled: bool = False
         self.latest_tracking_display_identity_by_track: dict[str, dict[str, Any]] = {}
         self.latest_tracking_display_identity_summary: dict[str, Any] | None = None
+        self.tracking_decision_ipc_enabled: bool = False
+        self.tracking_decision_ipc_transport: Any | None = None
+        self.latest_tracking_decision_ipc_summary: dict[str, Any] | None = None
+        self.tracking_decision_investigations: dict[str, dict[str, Any]] = {}
+        self.tracking_decision_consumed_result_keys: set[str] = set()
+        self.tracking_decision_followup_result_keys: set[str] = set()
 
         self.selected_track_id: str | None = None
         self.show_tracking_debug_details = False

@@ -263,6 +263,7 @@ class TrackingAgentObservation:
     uncertainties: list[str] = field(default_factory=list)
     observation_id: str | None = None
     llm_correlation_id: str | None = None
+    decision: dict[str, Any] | None = None
 
     def to_dict(self) -> dict:
         # Performs to dict logic.
@@ -276,6 +277,7 @@ class TrackingAgentObservation:
             "uncertainties": self.uncertainties,
             "observation_id": self.observation_id,
             "llm_correlation_id": self.llm_correlation_id,
+            "decision": self.decision,
         }
 
 
@@ -873,6 +875,10 @@ class TrackingObservationFeedbackRecord:
     finished_at: float | None
     published_at: float
     expires_at: float
+    investigation_id: str | None = None
+    investigation_state: str | None = None
+    verification_outcome: str | None = None
+    investigation_termination_reason: str | None = None
     provenance: dict[str, str] = field(default_factory=dict)
     details: dict[str, Any] = field(default_factory=dict)
 
@@ -897,6 +903,10 @@ class TrackingObservationFeedbackRecord:
             "finished_at": self.finished_at,
             "published_at": self.published_at,
             "expires_at": self.expires_at,
+            "investigation_id": self.investigation_id,
+            "investigation_state": self.investigation_state,
+            "verification_outcome": self.verification_outcome,
+            "investigation_termination_reason": self.investigation_termination_reason,
             "provenance": self.provenance,
             "details": self.details,
         }
@@ -937,6 +947,30 @@ class TrackingObservationFeedbackRecord:
             ),
             published_at=float(payload.get("published_at", 0.0)),
             expires_at=float(payload.get("expires_at", 0.0)),
+            investigation_id=(
+                str(payload.get("investigation_id"))
+                if isinstance(payload.get("investigation_id"), str)
+                and str(payload.get("investigation_id")).strip()
+                else None
+            ),
+            investigation_state=(
+                str(payload.get("investigation_state"))
+                if isinstance(payload.get("investigation_state"), str)
+                and str(payload.get("investigation_state")).strip()
+                else None
+            ),
+            verification_outcome=(
+                str(payload.get("verification_outcome"))
+                if isinstance(payload.get("verification_outcome"), str)
+                and str(payload.get("verification_outcome")).strip()
+                else None
+            ),
+            investigation_termination_reason=(
+                str(payload.get("investigation_termination_reason"))
+                if isinstance(payload.get("investigation_termination_reason"), str)
+                and str(payload.get("investigation_termination_reason")).strip()
+                else None
+            ),
             provenance={
                 str(key): str(value)
                 for key, value in provenance_payload.items()

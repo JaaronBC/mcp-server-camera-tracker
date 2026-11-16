@@ -301,6 +301,7 @@ class AgentCoordinator:
         proposal_latency_ms: float | None,
         observation_id: str | None = None,
         llm_correlation_id: str | None = None,
+        decision: dict[str, Any] | None = None,
         source_agent: str = "visual_tracking",
         additional_uncertainties: list[str] | None = None,
     ) -> TrackingAgentObservation:
@@ -336,6 +337,7 @@ class AgentCoordinator:
             uncertainties=[] if additional_uncertainties is None else list(additional_uncertainties),
             observation_id=observation_id,
             llm_correlation_id=llm_correlation_id,
+            decision=(dict(decision) if isinstance(decision, dict) else None),
         )
 
     @staticmethod

@@ -26,8 +26,9 @@ from agents.tracking.frame_transformer import build_tracking_frame_outputs
 from agents.tracking.observation_feedback import TrackingObservationFeedbackConsumer
 from agents.tracking.runtime_support import (
     apply_tracking_agent_metric_update_to_state,
+    apply_tracking_observation_update,
     commit_live_tracking_frame_state,
-    collect_tracking_runtime_observation_update,
+    summarize_tracking_agent_observation_metrics,
     submit_tracking_runtime_candidates,
 )
 from agents.tracking.identity_registry import PersistentIdentityRegistry
@@ -36,6 +37,7 @@ from agents.tracking.state_publisher import (
     publish_tracking_frame_message,
     write_json_payload,
 )
+from agents.orchestration.runtime.tracking_decision_ipc import TrackingDecisionIpcTransport
 from .identity_reassociation_consumer import IdentityReassociationIntentConsumer
 
 from .config import (
@@ -44,6 +46,12 @@ from .config import (
     LATEST_TRACKING_FRAME_PATH,
     LATEST_OPERATOR_TRACKING_FEEDBACK_PATH,
     TRACKING_FEEDBACK_CONSUMER_DECISIONS_PATH,
+    TRACKING_DECISION_IPC_ENABLED,
+    TRACKING_DECISION_TOOL_REQUESTS_PATH,
+    TRACKING_DECISION_TOOL_RESULTS_PATH,
+    LATEST_TRACKING_DECISION_REQUEST_INDEX_PATH,
+    LATEST_TRACKING_DECISION_RESULT_INDEX_PATH,
+    TRACKING_DECISION_IPC_MAX_RESULTS_PER_POLL,
     MAX_GROUND_X,
     MAX_GROUND_Z,
     TRACKING_AGENT_REQUEST_TIMEOUT_SECONDS,
@@ -69,6 +77,126 @@ from .config import (
 from .state import SharedDashboardState
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+FOLLOW_UP_INVESTIGATION_PREFIX = "followup_investigation_id:"
+FOLLOW_UP_REQUEST_PREFIX = "followup_request_id:"
+FOLLOW_UP_RESULT_KEY_PREFIX = "followup_result_key:"
+FOLLOW_UP_RESULT_STATUS_PREFIX = "followup_result_status:"
+UNSUCCESSFUL_DECISION_RESULT_STATUSES = {
+    "timeout",
+    "unavailable",
+    "stale",
+    "incompatible",
+    "expired",
+    "terminal",
+    "rejected",
+}
+
+
+def _nonempty_str(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized if normalized else None
+
+
+def _extract_follow_up_metadata_from_observation(observation: Any) -> dict[str, str | None]:
+    uncertainties = getattr(observation, "uncertainties", None)
+    if not isinstance(uncertainties, list):
+        uncertainties = []
+
+    investigation_id = None
+    request_id = None
+    result_key = None
+    result_status = None
+
+    for item in uncertainties:
+        if not isinstance(item, str):
+            continue
+        if item.startswith(FOLLOW_UP_INVESTIGATION_PREFIX):
+            investigation_id = _nonempty_str(item[len(FOLLOW_UP_INVESTIGATION_PREFIX):])
+        elif item.startswith(FOLLOW_UP_REQUEST_PREFIX):
+            request_id = _nonempty_str(item[len(FOLLOW_UP_REQUEST_PREFIX):])
+        elif item.startswith(FOLLOW_UP_RESULT_KEY_PREFIX):
+            result_key = _nonempty_str(item[len(FOLLOW_UP_RESULT_KEY_PREFIX):])
+        elif item.startswith(FOLLOW_UP_RESULT_STATUS_PREFIX):
+            result_status = _nonempty_str(item[len(FOLLOW_UP_RESULT_STATUS_PREFIX):])
+
+    return {
+        "investigation_id": investigation_id,
+        "request_id": request_id,
+        "result_key": result_key,
+        "result_status": result_status,
+    }
+
+
+def _build_inconclusive_follow_up_decision(
+    *,
+    investigation_id: str,
+    reason: str,
+    correlation_id: str | None,
+    request_id: str | None,
+    result_key: str | None,
+    initial_decision: dict[str, Any] | None,
+    evidence_references: dict[str, Any] | None,
+    result_payload: dict[str, Any] | None,
+) -> dict[str, Any]:
+    decision: dict[str, Any] = {
+        "action": "inconclusive",
+        "investigation_id": investigation_id,
+        "reason": reason,
+        "follow_up": {
+            "status": "failed",
+            "request_id": request_id,
+            "result_key": result_key,
+        },
+    }
+    if correlation_id is not None:
+        decision["correlation_id"] = correlation_id
+    if isinstance(initial_decision, dict):
+        decision["initial_decision"] = dict(initial_decision)
+    if isinstance(evidence_references, dict):
+        decision["evidence_references"] = dict(evidence_references)
+    if isinstance(result_payload, dict):
+        decision["mcp_result"] = dict(result_payload)
+    return decision
+
+
+def _snapshot_constraints_satisfied(
+    *,
+    tool_name: str,
+    result_payload: dict[str, Any],
+    initial_decision: dict[str, Any] | None,
+) -> tuple[bool, str | None]:
+    if tool_name != "get_identity_snapshot":
+        return True, None
+
+    if bool(result_payload.get("stale_snapshot", False)):
+        return False, "identity_snapshot_stale"
+
+    compatibility = result_payload.get("compatibility")
+    if isinstance(compatibility, dict) and compatibility.get("compatible") is False:
+        return False, "snapshot_incompatible_with_minimum_requirements"
+
+    constraints = None
+    if isinstance(initial_decision, dict):
+        constraints = initial_decision.get("snapshot_constraints")
+    if not isinstance(constraints, dict):
+        return True, None
+
+    min_generation = constraints.get("min_source_generation")
+    min_version = constraints.get("min_source_version")
+    source_generation = result_payload.get("source_generation")
+    source_version = result_payload.get("source_version")
+
+    if isinstance(min_generation, int):
+        if not isinstance(source_generation, int) or source_generation < min_generation:
+            return False, "snapshot_generation_mismatch"
+
+    if isinstance(min_version, int):
+        if not isinstance(source_version, int) or source_version < min_version:
+            return False, "snapshot_version_mismatch"
+
+    return True, None
 
 
 def resolve_model_path() -> str:
@@ -148,13 +276,156 @@ def _apply_tracking_agent_runtime_cycle(
 
     with state.lock:
         track_trails_snapshot = dict(state.track_trails)
-    tracking_agent_observation, metric_update = collect_tracking_runtime_observation_update(
-        runtime=tracking_runtime,
-        tracks=tracks,
-        track_trails=track_trails_snapshot,
-        trail_length=RADAR_TRAIL_LENGTH,
-    )
-    if tracking_agent_observation is not None and metric_update is not None:
+    tracking_agent_observation = tracking_runtime.poll_latest_observation()
+    if tracking_agent_observation is not None:
+        follow_up_meta = _extract_follow_up_metadata_from_observation(tracking_agent_observation)
+        follow_up_investigation_id = _nonempty_str(follow_up_meta.get("investigation_id"))
+        follow_up_request_id = _nonempty_str(follow_up_meta.get("request_id"))
+        follow_up_result_key = _nonempty_str(follow_up_meta.get("result_key"))
+
+        should_apply_updates = True
+        if follow_up_investigation_id is not None:
+            with state.lock:
+                investigation_state = state.tracking_decision_investigations.get(follow_up_investigation_id)
+
+            if not isinstance(investigation_state, dict):
+                should_apply_updates = False
+            else:
+                expected_request_id = _nonempty_str(investigation_state.get("request_id"))
+                expected_result_key = _nonempty_str(investigation_state.get("result_key"))
+                is_terminal = bool(investigation_state.get("terminal", False))
+
+                if is_terminal:
+                    should_apply_updates = False
+                elif (
+                    follow_up_request_id is not None
+                    and expected_request_id is not None
+                    and follow_up_request_id != expected_request_id
+                ):
+                    should_apply_updates = False
+                elif (
+                    follow_up_result_key is not None
+                    and expected_result_key is not None
+                    and follow_up_result_key != expected_result_key
+                ):
+                    should_apply_updates = False
+
+            if should_apply_updates:
+                decision_payload = getattr(tracking_agent_observation, "decision", None)
+                if isinstance(decision_payload, dict):
+                    action = _nonempty_str(decision_payload.get("action"))
+                    has_tool_requests = isinstance(decision_payload.get("tool_requests"), list) and bool(
+                        decision_payload.get("tool_requests")
+                    )
+                    if action in {"request_identity_snapshot", "request_additional_tracking_evidence"} or has_tool_requests:
+                        should_apply_updates = False
+
+        update_summary = {
+            "accepted": 0,
+            "rejected": 0,
+            "unmatched": 0,
+            "fallback_used": 0,
+            "llm_applied": 0,
+        }
+        if should_apply_updates:
+            update_summary = apply_tracking_observation_update(
+                tracks,
+                tracking_agent_observation,
+                track_trails=track_trails_snapshot,
+            )
+            metric_update = summarize_tracking_agent_observation_metrics(
+                tracking_agent_observation,
+                update_summary,
+            )
+        else:
+            metric_update = summarize_tracking_agent_observation_metrics(
+                tracking_agent_observation,
+                update_summary,
+            )
+
+        if follow_up_investigation_id is not None:
+            with state.lock:
+                investigation_state = state.tracking_decision_investigations.get(follow_up_investigation_id)
+                if isinstance(investigation_state, dict):
+                    final_decision_payload = (
+                        dict(getattr(tracking_agent_observation, "decision", {}))
+                        if isinstance(getattr(tracking_agent_observation, "decision", None), dict)
+                        else None
+                    )
+                    if isinstance(final_decision_payload, dict):
+                        action = _nonempty_str(final_decision_payload.get("action"))
+                        has_tool_requests = isinstance(final_decision_payload.get("tool_requests"), list) and bool(
+                            final_decision_payload.get("tool_requests")
+                        )
+                        if action in {"request_identity_snapshot", "request_additional_tracking_evidence"} or has_tool_requests:
+                            final_decision_payload = _build_inconclusive_follow_up_decision(
+                                investigation_id=follow_up_investigation_id,
+                                reason="follow_up_tool_request_not_allowed",
+                                correlation_id=_nonempty_str(investigation_state.get("correlation_id")),
+                                request_id=follow_up_request_id,
+                                result_key=follow_up_result_key,
+                                initial_decision=(
+                                    dict(investigation_state.get("initial_decision"))
+                                    if isinstance(investigation_state.get("initial_decision"), dict)
+                                    else None
+                                ),
+                                evidence_references=(
+                                    dict(investigation_state.get("evidence_references"))
+                                    if isinstance(investigation_state.get("evidence_references"), dict)
+                                    else None
+                                ),
+                                result_payload=(
+                                    dict(investigation_state.get("result_payload"))
+                                    if isinstance(investigation_state.get("result_payload"), dict)
+                                    else None
+                                ),
+                            )
+                            should_apply_updates = False
+
+                    if final_decision_payload is None:
+                        if update_summary.get("llm_applied", 0) > 0:
+                            final_decision_payload = {
+                                "action": "propose_identity_association",
+                                "investigation_id": follow_up_investigation_id,
+                                "follow_up": {
+                                    "status": "completed",
+                                    "request_id": follow_up_request_id,
+                                    "result_key": follow_up_result_key,
+                                },
+                            }
+                            correlation_id = _nonempty_str(investigation_state.get("correlation_id"))
+                            if correlation_id is not None:
+                                final_decision_payload["correlation_id"] = correlation_id
+                        else:
+                            final_decision_payload = _build_inconclusive_follow_up_decision(
+                                investigation_id=follow_up_investigation_id,
+                                reason="follow_up_no_supported_association",
+                                correlation_id=_nonempty_str(investigation_state.get("correlation_id")),
+                                request_id=follow_up_request_id,
+                                result_key=follow_up_result_key,
+                                initial_decision=(
+                                    dict(investigation_state.get("initial_decision"))
+                                    if isinstance(investigation_state.get("initial_decision"), dict)
+                                    else None
+                                ),
+                                evidence_references=(
+                                    dict(investigation_state.get("evidence_references"))
+                                    if isinstance(investigation_state.get("evidence_references"), dict)
+                                    else None
+                                ),
+                                result_payload=(
+                                    dict(investigation_state.get("result_payload"))
+                                    if isinstance(investigation_state.get("result_payload"), dict)
+                                    else None
+                                ),
+                            )
+
+                    investigation_state["terminal"] = True
+                    investigation_state["follow_up_completed"] = True
+                    investigation_state["follow_up_submitted"] = True
+                    investigation_state["final_decision"] = final_decision_payload
+                    investigation_state["updated_at"] = now
+
         apply_tracking_agent_metric_update_to_state(
             state=state,
             metric_update=metric_update,
@@ -517,6 +788,375 @@ def _consume_identity_reassociation_if_enabled(
 
     with state.lock:
         state.latest_tracking_identity_reassociation_summary = summary
+
+
+def _submit_tracking_decision_request_if_enabled(
+    *,
+    state: SharedDashboardState,
+    tracking_agent_observation,
+    now: float,
+) -> None:
+    with state.lock:
+        transport = state.tracking_decision_ipc_transport
+        enabled = bool(state.tracking_decision_ipc_enabled)
+
+    if not enabled or transport is None or tracking_agent_observation is None:
+        return
+
+    decision_payload = getattr(tracking_agent_observation, "decision", None)
+    if not isinstance(decision_payload, dict):
+        return
+
+    follow_up_meta = _extract_follow_up_metadata_from_observation(tracking_agent_observation)
+    follow_up_investigation_id = _nonempty_str(follow_up_meta.get("investigation_id"))
+    is_follow_up_observation = follow_up_investigation_id is not None
+
+    if is_follow_up_observation:
+        action = _nonempty_str(decision_payload.get("action"))
+        has_tool_requests = isinstance(decision_payload.get("tool_requests"), list) and bool(
+            decision_payload.get("tool_requests")
+        )
+        if action in {"request_identity_snapshot", "request_additional_tracking_evidence"} or has_tool_requests:
+            with state.lock:
+                investigation_state = state.tracking_decision_investigations.get(follow_up_investigation_id)
+                if isinstance(investigation_state, dict):
+                    investigation_state["terminal"] = True
+                    investigation_state["follow_up_completed"] = True
+                    investigation_state["final_decision"] = _build_inconclusive_follow_up_decision(
+                        investigation_id=follow_up_investigation_id,
+                        reason="follow_up_tool_request_not_allowed",
+                        correlation_id=_nonempty_str(investigation_state.get("correlation_id")),
+                        request_id=_nonempty_str(follow_up_meta.get("request_id")),
+                        result_key=_nonempty_str(follow_up_meta.get("result_key")),
+                        initial_decision=(
+                            dict(investigation_state.get("initial_decision"))
+                            if isinstance(investigation_state.get("initial_decision"), dict)
+                            else None
+                        ),
+                        evidence_references=(
+                            dict(investigation_state.get("evidence_references"))
+                            if isinstance(investigation_state.get("evidence_references"), dict)
+                            else None
+                        ),
+                        result_payload=(
+                            dict(investigation_state.get("result_payload"))
+                            if isinstance(investigation_state.get("result_payload"), dict)
+                            else None
+                        ),
+                    )
+                    investigation_state["updated_at"] = now
+            return
+
+    try:
+        summary = transport.dashboard_submit_decision_request(
+            decision=decision_payload,
+            llm_correlation_id=getattr(tracking_agent_observation, "llm_correlation_id", None),
+            now_timestamp=now,
+        )
+    except Exception:
+        summary = {
+            "accepted": False,
+            "duplicate": False,
+            "rejected": True,
+            "reason": "decision_ipc_request_submit_failed",
+        }
+
+    if bool(summary.get("accepted", False)) or bool(summary.get("duplicate", False)):
+        investigation_id = _nonempty_str(decision_payload.get("investigation_id"))
+        tool_requests = decision_payload.get("tool_requests")
+        tool_request = tool_requests[0] if isinstance(tool_requests, list) and tool_requests else None
+        request_id = _nonempty_str(tool_request.get("request_id")) if isinstance(tool_request, dict) else None
+        tool_name = _nonempty_str(tool_request.get("tool_name")) if isinstance(tool_request, dict) else None
+        if investigation_id is not None and request_id is not None and tool_name is not None and not is_follow_up_observation:
+            with state.lock:
+                existing = state.tracking_decision_investigations.get(investigation_id)
+                investigation_state = existing if isinstance(existing, dict) else {}
+                investigation_state.update(
+                    {
+                        "investigation_id": investigation_id,
+                        "request_id": request_id,
+                        "tool_name": tool_name,
+                        "correlation_id": _nonempty_str(decision_payload.get("correlation_id"))
+                        or _nonempty_str(getattr(tracking_agent_observation, "llm_correlation_id", None)),
+                        "initial_decision": dict(decision_payload),
+                        "evidence_references": (
+                            dict(decision_payload.get("evidence_references"))
+                            if isinstance(decision_payload.get("evidence_references"), dict)
+                            else {}
+                        ),
+                        "tool_calls": 1,
+                        "iterations": 1,
+                        "terminal": False,
+                        "follow_up_submitted": False,
+                        "follow_up_completed": False,
+                        "updated_at": now,
+                    }
+                )
+                state.tracking_decision_investigations[investigation_id] = investigation_state
+
+    with state.lock:
+        state.latest_tracking_decision_ipc_summary = {
+            "request": summary,
+            "results": None,
+            "updated_at": now,
+        }
+
+
+def _consume_tracking_decision_results_if_enabled(
+    *,
+    state: SharedDashboardState,
+    tracking_runtime: AsyncVisualTrackingRuntime,
+    frame,
+    tracking_candidates,
+    now: float,
+) -> None:
+    with state.lock:
+        transport = state.tracking_decision_ipc_transport
+        enabled = bool(state.tracking_decision_ipc_enabled)
+
+    if not enabled or transport is None:
+        return
+
+    try:
+        results_summary = transport.dashboard_poll_results(now_timestamp=now)
+    except Exception:
+        results_summary = {
+            "available": False,
+            "result_count": 0,
+            "results": [],
+            "error": "decision_ipc_result_poll_failed",
+        }
+
+    processed_count = 0
+    duplicate_count = 0
+    mismatch_count = 0
+    follow_up_submitted_count = 0
+    failed_count = 0
+    terminal_count = 0
+
+    result_items = results_summary.get("results") if isinstance(results_summary, dict) else None
+    if not isinstance(result_items, list):
+        result_items = []
+
+    for result_event in result_items:
+        if not isinstance(result_event, dict):
+            continue
+
+        idempotency_key = _nonempty_str(result_event.get("idempotency_key"))
+        investigation_id = _nonempty_str(result_event.get("investigation_id"))
+        request_id = _nonempty_str(result_event.get("request_id"))
+        tool_name = _nonempty_str(result_event.get("tool_name"))
+        status = _nonempty_str(result_event.get("status")) or "rejected"
+        result_payload = result_event.get("result_payload")
+        if not isinstance(result_payload, dict):
+            result_payload = {}
+
+        with state.lock:
+            if idempotency_key is not None and idempotency_key in state.tracking_decision_consumed_result_keys:
+                duplicate_count += 1
+                continue
+
+            investigation_state = (
+                state.tracking_decision_investigations.get(investigation_id)
+                if investigation_id is not None
+                else None
+            )
+            if not isinstance(investigation_state, dict):
+                mismatch_count += 1
+                if idempotency_key is not None:
+                    state.tracking_decision_consumed_result_keys.add(idempotency_key)
+                continue
+
+            expected_request_id = _nonempty_str(investigation_state.get("request_id"))
+            expected_tool_name = _nonempty_str(investigation_state.get("tool_name"))
+            if (
+                expected_request_id is None
+                or request_id is None
+                or expected_request_id != request_id
+                or expected_tool_name is None
+                or tool_name is None
+                or expected_tool_name != tool_name
+            ):
+                mismatch_count += 1
+                if idempotency_key is not None:
+                    state.tracking_decision_consumed_result_keys.add(idempotency_key)
+                continue
+
+            if idempotency_key is not None:
+                state.tracking_decision_consumed_result_keys.add(idempotency_key)
+
+            if bool(investigation_state.get("terminal", False)):
+                terminal_count += 1
+                continue
+
+            investigation_state["result_status"] = status
+            investigation_state["result_payload"] = dict(result_payload)
+            investigation_state["result_key"] = idempotency_key
+            investigation_state["updated_at"] = now
+
+        if status in UNSUCCESSFUL_DECISION_RESULT_STATUSES:
+            with state.lock:
+                active_state = state.tracking_decision_investigations.get(investigation_id)
+                if isinstance(active_state, dict):
+                    active_state["terminal"] = True
+                    active_state["follow_up_completed"] = True
+                    active_state["final_decision"] = _build_inconclusive_follow_up_decision(
+                        investigation_id=investigation_id,
+                        reason=f"tool_result_{status}",
+                        correlation_id=_nonempty_str(active_state.get("correlation_id")),
+                        request_id=request_id,
+                        result_key=idempotency_key,
+                        initial_decision=(
+                            dict(active_state.get("initial_decision"))
+                            if isinstance(active_state.get("initial_decision"), dict)
+                            else None
+                        ),
+                        evidence_references=(
+                            dict(active_state.get("evidence_references"))
+                            if isinstance(active_state.get("evidence_references"), dict)
+                            else None
+                        ),
+                        result_payload=dict(result_payload),
+                    )
+                    active_state["updated_at"] = now
+            failed_count += 1
+            processed_count += 1
+            continue
+
+        with state.lock:
+            active_state = state.tracking_decision_investigations.get(investigation_id)
+            if not isinstance(active_state, dict):
+                mismatch_count += 1
+                continue
+            if bool(active_state.get("follow_up_submitted", False)):
+                duplicate_count += 1
+                continue
+
+            already_used_tool_calls = int(active_state.get("tool_calls", 0))
+            already_used_iterations = int(active_state.get("iterations", 1))
+            if already_used_tool_calls > 1 or already_used_iterations >= 2:
+                active_state["terminal"] = True
+                active_state["follow_up_completed"] = True
+                active_state["final_decision"] = _build_inconclusive_follow_up_decision(
+                    investigation_id=investigation_id,
+                    reason="follow_up_iteration_or_tool_limit_reached",
+                    correlation_id=_nonempty_str(active_state.get("correlation_id")),
+                    request_id=request_id,
+                    result_key=idempotency_key,
+                    initial_decision=(
+                        dict(active_state.get("initial_decision"))
+                        if isinstance(active_state.get("initial_decision"), dict)
+                        else None
+                    ),
+                    evidence_references=(
+                        dict(active_state.get("evidence_references"))
+                        if isinstance(active_state.get("evidence_references"), dict)
+                        else None
+                    ),
+                    result_payload=dict(result_payload),
+                )
+                active_state["updated_at"] = now
+                failed_count += 1
+                processed_count += 1
+                continue
+
+            constraints_ok, constraint_reason = _snapshot_constraints_satisfied(
+                tool_name=tool_name or "",
+                result_payload=result_payload,
+                initial_decision=(
+                    dict(active_state.get("initial_decision"))
+                    if isinstance(active_state.get("initial_decision"), dict)
+                    else None
+                ),
+            )
+            if not constraints_ok:
+                active_state["terminal"] = True
+                active_state["follow_up_completed"] = True
+                active_state["final_decision"] = _build_inconclusive_follow_up_decision(
+                    investigation_id=investigation_id,
+                    reason=constraint_reason or "snapshot_constraints_not_satisfied",
+                    correlation_id=_nonempty_str(active_state.get("correlation_id")),
+                    request_id=request_id,
+                    result_key=idempotency_key,
+                    initial_decision=(
+                        dict(active_state.get("initial_decision"))
+                        if isinstance(active_state.get("initial_decision"), dict)
+                        else None
+                    ),
+                    evidence_references=(
+                        dict(active_state.get("evidence_references"))
+                        if isinstance(active_state.get("evidence_references"), dict)
+                        else None
+                    ),
+                    result_payload=dict(result_payload),
+                )
+                active_state["updated_at"] = now
+                failed_count += 1
+                processed_count += 1
+                continue
+
+            follow_up_context = {
+                "investigation_id": investigation_id,
+                "request_id": request_id,
+                "idempotency_key": idempotency_key,
+                "result_status": status,
+                "tool_name": tool_name,
+                "correlation_id": _nonempty_str(active_state.get("correlation_id")),
+                "initial_decision": (
+                    dict(active_state.get("initial_decision"))
+                    if isinstance(active_state.get("initial_decision"), dict)
+                    else {}
+                ),
+                "evidence_references": (
+                    dict(active_state.get("evidence_references"))
+                    if isinstance(active_state.get("evidence_references"), dict)
+                    else {}
+                ),
+                "mcp_result": dict(result_payload),
+            }
+
+        did_submit = submit_tracking_runtime_candidates(
+            runtime=tracking_runtime,
+            now=now,
+            frame=frame,
+            detections=tracking_candidates,
+            event_reasons=["tracking_decision_follow_up"],
+            follow_up_context=follow_up_context,
+            encode_frame=encode_frame_as_data_url,
+            request_timeout_seconds=TRACKING_AGENT_REQUEST_TIMEOUT_SECONDS,
+        )
+
+        with state.lock:
+            active_state = state.tracking_decision_investigations.get(investigation_id)
+            if isinstance(active_state, dict):
+                if did_submit:
+                    active_state["follow_up_submitted"] = True
+                    active_state["iterations"] = int(active_state.get("iterations", 1)) + 1
+                    active_state["updated_at"] = now
+                else:
+                    active_state["follow_up_submit_pending"] = True
+                    active_state["updated_at"] = now
+
+        if did_submit:
+            follow_up_submitted_count += 1
+        processed_count += 1
+
+    with state.lock:
+        prior = state.latest_tracking_decision_ipc_summary
+        prior_request = prior.get("request") if isinstance(prior, dict) else None
+        state.latest_tracking_decision_ipc_summary = {
+            "request": prior_request,
+            "results": {
+                **(results_summary if isinstance(results_summary, dict) else {}),
+                "processed_count": processed_count,
+                "duplicate_count": duplicate_count,
+                "mismatch_count": mismatch_count,
+                "failed_count": failed_count,
+                "terminal_count": terminal_count,
+                "follow_up_submitted_count": follow_up_submitted_count,
+            },
+            "updated_at": now,
+        }
 
 
 def _consume_tracking_observation_feedback(
@@ -919,6 +1559,14 @@ def _initialize_tracking_runtime(
             max_ack_entries=TRACKING_IDENTITY_REASSOCIATION_MAX_ACK_ENTRIES,
             min_poll_interval_seconds=TRACKING_IDENTITY_REASSOCIATION_POLL_INTERVAL_SECONDS,
         )
+        decision_transport = TrackingDecisionIpcTransport(
+            requests_path=TRACKING_DECISION_TOOL_REQUESTS_PATH,
+            results_path=TRACKING_DECISION_TOOL_RESULTS_PATH,
+            request_index_path=LATEST_TRACKING_DECISION_REQUEST_INDEX_PATH,
+            result_index_path=LATEST_TRACKING_DECISION_RESULT_INDEX_PATH,
+            max_dashboard_results_per_poll=TRACKING_DECISION_IPC_MAX_RESULTS_PER_POLL,
+            writer_role="dashboard",
+        )
         with state.lock:
             state.tracking_agent_model = tracking_agent.model
             state.tracking_evidence_store = evidence_store
@@ -942,6 +1590,12 @@ def _initialize_tracking_runtime(
             )
             state.latest_tracking_display_identity_by_track = {}
             state.latest_tracking_display_identity_summary = None
+            state.tracking_decision_ipc_enabled = TRACKING_DECISION_IPC_ENABLED
+            state.tracking_decision_ipc_transport = decision_transport
+            state.latest_tracking_decision_ipc_summary = None
+            state.tracking_decision_investigations = {}
+            state.tracking_decision_consumed_result_keys = set()
+            state.tracking_decision_followup_result_keys = set()
             state.tracking_missing_track_grace_seconds = min(
                 10.0,
                 max(0.1, TRACKING_MISSING_TRACK_GRACE_SECONDS),
@@ -1065,6 +1719,20 @@ def run_live_tracking_loop(
                 selected_event_reasons=selected_event_reasons,
             )
 
+            _submit_tracking_decision_request_if_enabled(
+                state=state,
+                tracking_agent_observation=tracking_agent_observation,
+                now=now,
+            )
+
+            _consume_tracking_decision_results_if_enabled(
+                state=state,
+                tracking_runtime=tracking_runtime,
+                frame=frame,
+                tracking_candidates=tracking_candidates,
+                now=now,
+            )
+
             _package_tracking_evidence_if_enabled(
                 state=state,
                 frame=frame,
@@ -1139,6 +1807,12 @@ def run_live_tracking_loop(
             state.tracking_stable_identity_visualization_enabled = False
             state.latest_tracking_display_identity_by_track = {}
             state.latest_tracking_display_identity_summary = None
+            state.tracking_decision_ipc_enabled = False
+            state.tracking_decision_ipc_transport = None
+            state.latest_tracking_decision_ipc_summary = None
+            state.tracking_decision_investigations = {}
+            state.tracking_decision_consumed_result_keys = set()
+            state.tracking_decision_followup_result_keys = set()
         if evidence_store is not None:
             evidence_store.shutdown()
         try:

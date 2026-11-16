@@ -35,6 +35,13 @@ class _FakeClient:
         self.chat = SimpleNamespace(completions=completions)
 
 
+class _RuntimeErrorWithTelemetry(RuntimeError):
+    def __init__(self, message: str, *, code: str | None = None, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+        self.status_code = status_code
+
+
 def _make_detection(detection_id: str) -> DetectionCandidate:
     return DetectionCandidate(
         detection_id=detection_id,
@@ -163,6 +170,7 @@ class TestTrackingVlmAttemptDiagnostics(unittest.TestCase):
             self.assertEqual(record["attempt_id"], "attempt-success")
             self.assertEqual(record["llm_correlation_id"], "tracking-llm-correlation-success")
             self.assertEqual(record["provider_outcome"], "ok")
+            self.assertEqual(record["finish_reason"], "stop")
             self.assertEqual(record["parse_status"], "parsed")
             self.assertIsNone(record["parse_error_code"])
             self.assertEqual(record["schema_status"], "complete")
@@ -206,11 +214,50 @@ class TestTrackingVlmAttemptDiagnostics(unittest.TestCase):
             self.assertEqual(result.error, "vlm_invalid_json_response")
             record = _read_single_jsonl(diagnostics_path)
             self.assertEqual(record["provider_outcome"], "ok")
+            self.assertEqual(record["finish_reason"], "stop")
             self.assertEqual(record["parse_status"], "parse_failed")
             self.assertEqual(record["parse_error_code"], "vlm_invalid_json_response")
             self.assertEqual(record["schema_status"], "invalid")
             self.assertFalse(record["result_available"])
             self.assertEqual(record["result_error_code"], "vlm_invalid_json_response")
+
+    def test_truncation_records_length_finish_reason(self) -> None:
+        agent = LLMVisualTrackingAgent(client=_FakeClient(_FakeCompletions(content='{"proposals":[]}', finish_reason="length")))
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            diagnostics_path = Path(temp_dir) / "tracking_vlm_attempt_diagnostics.jsonl"
+            with patch.dict(
+                os.environ,
+                {
+                    "TRACKING_VLM_ATTEMPT_DIAGNOSTICS_PATH": str(diagnostics_path),
+                    "TRACKING_IDENTITY_EVIDENCE_ENABLED": "0",
+                },
+                clear=False,
+            ), patch(
+                "agents.tracking.agent_tracking.provider_call_budget.reserve_or_raise",
+                return_value=_reservation("attempt-truncated"),
+            ), patch(
+                "agents.tracking.agent_tracking.provider_call_budget.finalize_provider_call_attempt",
+                return_value=None,
+            ), patch(
+                "agents.tracking.agent_tracking.latency_instrumentation.new_correlation_id",
+                return_value="tracking-llm-correlation-truncated",
+            ):
+                result = asyncio.run(
+                    agent.propose_associations(
+                        frame_reference=None,
+                        detections=[_make_detection("d1")],
+                        event_reasons=["possible_id_switch"],
+                        request_timeout_seconds=1.0,
+                    )
+                )
+
+            self.assertFalse(result.available)
+            self.assertEqual(result.error, "vlm_output_truncated")
+            record = _read_single_jsonl(diagnostics_path)
+            self.assertEqual(record["provider_outcome"], "ok")
+            self.assertEqual(record["finish_reason"], "length")
+            self.assertEqual(record["parse_error_code"], "vlm_output_truncated")
 
     def test_provider_runtime_error_is_distinguished_from_parse_failure(self) -> None:
         agent = LLMVisualTrackingAgent(client=_FakeClient(_FakeCompletions(error=RuntimeError("provider down"))))
@@ -252,6 +299,111 @@ class TestTrackingVlmAttemptDiagnostics(unittest.TestCase):
             self.assertEqual(record["schema_status"], "unknown")
             self.assertFalse(record["result_available"])
             self.assertEqual(record["result_error_code"], "vlm_unavailable")
+            self.assertEqual(record["runtime_exception_class"], "runtimeerror")
+            self.assertEqual(record["runtime_exception_category"], "runtime_exception")
+
+    def test_invalid_decision_contract_persists_exact_validation_error_codes(self) -> None:
+        invalid_decision_payload = json.dumps(
+            {
+                "proposals": [],
+                "uncertainty_flags": [],
+                "supporting_evidence": [],
+                "decision": {
+                    "action": "request_additional_tracking_evidence",
+                    "tool_requests": [
+                        {
+                            "request_id": "req-1",
+                            "tool_name": "get_track_evidence_history",
+                            "arguments": {},
+                        }
+                    ],
+                },
+            }
+        )
+        agent = LLMVisualTrackingAgent(client=_FakeClient(_FakeCompletions(content=invalid_decision_payload)))
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            diagnostics_path = Path(temp_dir) / "tracking_vlm_attempt_diagnostics.jsonl"
+            with patch.dict(
+                os.environ,
+                {
+                    "TRACKING_VLM_ATTEMPT_DIAGNOSTICS_PATH": str(diagnostics_path),
+                    "TRACKING_IDENTITY_EVIDENCE_ENABLED": "0",
+                    "TRACKING_AGENT_COMPACT_DECISION_MODE": "1",
+                },
+                clear=False,
+            ), patch(
+                "agents.tracking.agent_tracking.provider_call_budget.reserve_or_raise",
+                return_value=_reservation("attempt-invalid-decision"),
+            ), patch(
+                "agents.tracking.agent_tracking.provider_call_budget.finalize_provider_call_attempt",
+                return_value=None,
+            ), patch(
+                "agents.tracking.agent_tracking.latency_instrumentation.new_correlation_id",
+                return_value="tracking-llm-correlation-invalid-decision",
+            ):
+                result = asyncio.run(
+                    agent.propose_associations(
+                        frame_reference=None,
+                        detections=[_make_detection("d1")],
+                        event_reasons=["possible_id_switch"],
+                        request_timeout_seconds=1.0,
+                    )
+                )
+
+            self.assertFalse(result.available)
+            self.assertEqual(result.error, "vlm_invalid_decision_contract")
+            self.assertIn("decision_track_history_track_id_required", result.uncertainty_flags)
+
+            record = _read_single_jsonl(diagnostics_path)
+            self.assertEqual(record["parse_error_code"], "vlm_invalid_decision_contract")
+            self.assertEqual(
+                record["decision_validation_error_codes"],
+                ["decision_track_history_track_id_required"],
+            )
+
+    def test_runtime_exception_persists_sanitized_exception_metadata(self) -> None:
+        runtime_error = _RuntimeErrorWithTelemetry(
+            "provider temporarily unavailable",
+            code="UPSTREAM-503/UNAVAILABLE",
+            status_code=503,
+        )
+        agent = LLMVisualTrackingAgent(client=_FakeClient(_FakeCompletions(error=runtime_error)))
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            diagnostics_path = Path(temp_dir) / "tracking_vlm_attempt_diagnostics.jsonl"
+            with patch.dict(
+                os.environ,
+                {
+                    "TRACKING_VLM_ATTEMPT_DIAGNOSTICS_PATH": str(diagnostics_path),
+                    "TRACKING_IDENTITY_EVIDENCE_ENABLED": "0",
+                },
+                clear=False,
+            ), patch(
+                "agents.tracking.agent_tracking.provider_call_budget.reserve_or_raise",
+                return_value=_reservation("attempt-runtime-telemetry"),
+            ), patch(
+                "agents.tracking.agent_tracking.provider_call_budget.finalize_provider_call_attempt",
+                return_value=None,
+            ), patch(
+                "agents.tracking.agent_tracking.latency_instrumentation.new_correlation_id",
+                return_value="tracking-llm-correlation-runtime-telemetry",
+            ):
+                result = asyncio.run(
+                    agent.propose_associations(
+                        frame_reference=None,
+                        detections=[_make_detection("d1")],
+                        event_reasons=["possible_id_switch"],
+                        request_timeout_seconds=1.0,
+                    )
+                )
+
+            self.assertFalse(result.available)
+            self.assertEqual(result.error, "vlm_unavailable")
+
+            record = _read_single_jsonl(diagnostics_path)
+            self.assertEqual(record["runtime_exception_class"], "runtimeerrorwithtelemetry")
+            self.assertEqual(record["runtime_exception_category"], "provider_server_error")
 
     def test_rejected_identity_candidates_counted_separately_from_absent_candidates(self) -> None:
         payload = json.dumps(

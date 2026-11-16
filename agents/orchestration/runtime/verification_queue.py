@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import time
 import uuid
@@ -18,6 +19,64 @@ from agents.observation.evidence_consumption import load_validated_envelope_by_m
 from agents.tracking.evidence_protection import acquire_verification_evidence_lease, release_verification_evidence_lease
 
 
+VALID_INVESTIGATION_STATES = {
+    "open",
+    "awaiting_evidence",
+    "verifying",
+    "awaiting_reassociation",
+    "resolved",
+    "closed",
+}
+VALID_VERIFICATION_OUTCOMES = {"supported", "contradicted", "inconclusive"}
+ACTIVE_INVESTIGATION_STATES = {
+    "open",
+    "awaiting_evidence",
+    "verifying",
+    "awaiting_reassociation",
+}
+TERMINAL_INVESTIGATION_STATES = {"resolved", "closed"}
+
+
+def _normalized_optional_string(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized if normalized else None
+
+
+def _normalized_investigation_state(value: Any) -> str | None:
+    normalized = _normalized_optional_string(value)
+    if normalized in VALID_INVESTIGATION_STATES:
+        return normalized
+    return None
+
+
+def _normalized_verification_outcome(value: Any) -> str | None:
+    normalized = _normalized_optional_string(value)
+    if normalized in VALID_VERIFICATION_OUTCOMES:
+        return normalized
+    return None
+
+
+def _derive_investigation_id(
+    *,
+    cycle_id: str | None,
+    track_id: str | None,
+    trigger_event_id: str | None,
+) -> str | None:
+    normalized_track = _normalized_optional_string(track_id)
+    if normalized_track is None:
+        return None
+    fingerprint = "|".join(
+        [
+            _normalized_optional_string(cycle_id) or "unknown-cycle",
+            normalized_track,
+            _normalized_optional_string(trigger_event_id) or "unknown-event",
+        ]
+    )
+    return f"inv-{hashlib.sha1(fingerprint.encode('utf-8')).hexdigest()[:20]}"
+
+
 @dataclass(slots=True)
 class VerificationQueueRequest:
     request_id: str
@@ -29,6 +88,8 @@ class VerificationQueueRequest:
     trigger_timestamp: float | None = None
     correlation_id: str | None = None
     cycle_id: str | None = None
+    investigation_id: str | None = None
+    investigation_state: str | None = None
     enqueued_at_perf: float | None = None
 
 
@@ -62,6 +123,10 @@ class VerificationQueueRecord:
     error: str | None
     details: dict[str, Any]
     run_id: str | None
+    investigation_id: str | None = None
+    investigation_state: str | None = None
+    verification_outcome: str | None = None
+    investigation_termination_reason: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -81,6 +146,10 @@ class VerificationQueueRecord:
             "error": self.error,
             "details": self.details,
             "run_id": self.run_id,
+            "investigation_id": self.investigation_id,
+            "investigation_state": self.investigation_state,
+            "verification_outcome": self.verification_outcome,
+            "investigation_termination_reason": self.investigation_termination_reason,
         }
 
 
@@ -95,6 +164,8 @@ class VerificationSubmissionRecord:
     status: str
     reason: str | None
     run_id: str | None
+    investigation_id: str | None = None
+    investigation_state: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -107,6 +178,8 @@ class VerificationSubmissionRecord:
             "status": self.status,
             "reason": self.reason,
             "run_id": self.run_id,
+            "investigation_id": self.investigation_id,
+            "investigation_state": self.investigation_state,
         }
 
 
@@ -163,6 +236,12 @@ class VerificationQueueManager:
         self._pending_lease_release_request_ids: set[str] = set()
         self._lease_release_retry_attempts_by_request_id: dict[str, int] = {}
         self._max_lease_release_retries = 2
+        self._continuity_investigation_id_by_key: dict[str, str] = {}
+        self._continuity_keys_by_investigation_id: dict[str, set[str]] = {}
+        self._terminal_investigation_ids_order: deque[str] = deque(maxlen=max(256, self._result_registry_capacity))
+        self._terminal_investigation_id_set: set[str] = set()
+        self._terminal_investigation_state_by_id: dict[str, str] = {}
+        self._terminal_investigation_reason_by_id: dict[str, str] = {}
 
     async def start(self, *, session: ClientSession) -> None:
         if self._workers:
@@ -215,6 +294,8 @@ class VerificationQueueManager:
 
     def submit_request(self, request: VerificationQueueRequest) -> dict[str, Any]:
         self._retry_pending_lease_releases(max_passes=1)
+        investigation_id = _normalized_optional_string(request.investigation_id)
+        investigation_state = _normalized_investigation_state(request.investigation_state)
 
         def _emit_submission(status: str, accepted: bool, reason: str | None = None, message_id: str | None = None) -> None:
             latency_instrumentation.emit_event(
@@ -229,6 +310,8 @@ class VerificationQueueManager:
                 accepted=accepted,
                 status=status,
                 reason=reason,
+                investigation_id=investigation_id,
+                investigation_state=investigation_state,
             )
 
         if self._shutdown:
@@ -243,6 +326,8 @@ class VerificationQueueManager:
                     status="manager_shutdown",
                     reason="manager_shutdown",
                     run_id=self._run_id,
+                    investigation_id=investigation_id,
+                    investigation_state=investigation_state,
                 )
             )
             _emit_submission("manager_shutdown", False, "manager_shutdown", request.message_id)
@@ -263,6 +348,8 @@ class VerificationQueueManager:
                     status="invalid_track_id",
                     reason="invalid_track_id",
                     run_id=self._run_id,
+                    investigation_id=investigation_id,
+                    investigation_state=investigation_state,
                 )
             )
             _emit_submission("invalid_track_id", False, "invalid_track_id", message_id)
@@ -365,6 +452,8 @@ class VerificationQueueManager:
                         status=status,
                         reason=status,
                         run_id=self._run_id,
+                        investigation_id=investigation_id,
+                        investigation_state=investigation_state,
                     )
                 )
                 self._store_record(
@@ -407,6 +496,8 @@ class VerificationQueueManager:
                     status=status,
                     reason=status,
                     run_id=self._run_id,
+                    investigation_id=investigation_id,
+                    investigation_state=investigation_state,
                 )
             )
             self._store_record(
@@ -451,6 +542,8 @@ class VerificationQueueManager:
                     status=status,
                     reason=status,
                     run_id=self._run_id,
+                    investigation_id=investigation_id,
+                    investigation_state=investigation_state,
                 )
             )
             _emit_submission(status, False, status, message_id)
@@ -468,6 +561,8 @@ class VerificationQueueManager:
             trigger_timestamp=request.trigger_timestamp,
             correlation_id=request.correlation_id,
             cycle_id=request.cycle_id,
+            investigation_id=investigation_id,
+            investigation_state=investigation_state,
             enqueued_at_perf=latency_instrumentation.now_perf_counter(),
         )
         try:
@@ -485,6 +580,8 @@ class VerificationQueueManager:
                     status="queue_enqueue_failed",
                     reason="queue_enqueue_failed",
                     run_id=self._run_id,
+                    investigation_id=investigation_id,
+                    investigation_state=investigation_state,
                 )
             )
             _emit_submission("queue_enqueue_failed", False, "queue_enqueue_failed", message_id)
@@ -501,6 +598,8 @@ class VerificationQueueManager:
                 status="queued",
                 reason=None,
                 run_id=self._run_id,
+                investigation_id=investigation_id,
+                investigation_state=investigation_state,
             )
         )
         _emit_submission("queued", True, None, message_id)
@@ -612,6 +711,7 @@ class VerificationQueueManager:
                 (latency_instrumentation.now_perf_counter() - processing_started_perf) * 1000.0,
                 3,
             )
+            record = self._annotate_investigation_record(record=record, request=request)
             self._store_record(record)
             latency_instrumentation.emit_event(
                 "verification_queue_completion",
@@ -627,6 +727,10 @@ class VerificationQueueManager:
                 completion_status=record.status,
                 validation_outcome=record.validation_outcome,
                 error_code=record.error_code,
+                investigation_id=record.investigation_id,
+                investigation_state=record.investigation_state,
+                verification_outcome=record.verification_outcome,
+                investigation_termination_reason=record.investigation_termination_reason,
             )
             self._completed_message_ids.add(message_id)
             self._inflight_message_ids.discard(message_id)
@@ -959,6 +1063,196 @@ class VerificationQueueManager:
                 return decoded
         return None
 
+    def _annotate_investigation_record(
+        self,
+        *,
+        record: VerificationQueueRecord,
+        request: VerificationQueueRequest,
+    ) -> VerificationQueueRecord:
+        details = dict(record.details) if isinstance(record.details, dict) else {}
+        investigation_id = (
+            _normalized_optional_string(request.investigation_id)
+            or _normalized_optional_string(record.investigation_id)
+            or _normalized_optional_string(details.get("investigation_id"))
+        )
+        if investigation_id is None:
+            return record
+
+        continuity_keys = self._derive_investigation_continuity_keys(
+            request=request,
+            record=record,
+            details=details,
+        )
+        for continuity_key in continuity_keys:
+            existing_investigation_id = self._continuity_investigation_id_by_key.get(continuity_key)
+            if (
+                isinstance(existing_investigation_id, str)
+                and existing_investigation_id
+                and existing_investigation_id not in self._terminal_investigation_id_set
+            ):
+                investigation_id = existing_investigation_id
+                break
+
+        state = _normalized_investigation_state(record.investigation_state)
+        request_state = _normalized_investigation_state(request.investigation_state)
+        verification_outcome = _normalized_verification_outcome(
+            record.verification_outcome or details.get("verification_status")
+        )
+        identity_consistency = _normalized_optional_string(details.get("identity_consistency"))
+        termination_reason = _normalized_optional_string(record.investigation_termination_reason)
+
+        terminal_state = self._terminal_investigation_state_by_id.get(investigation_id)
+        terminal_reason = self._terminal_investigation_reason_by_id.get(investigation_id)
+
+        if investigation_id in self._terminal_investigation_id_set:
+            state = terminal_state if terminal_state in TERMINAL_INVESTIGATION_STATES else "closed"
+            termination_reason = termination_reason or terminal_reason or "investigation_already_terminal"
+        else:
+            if record.status in {"rejected", "failed", "timed_out", "cancelled"}:
+                state = "closed"
+                termination_reason = (
+                    termination_reason
+                    or _normalized_optional_string(record.error_code)
+                    or _normalized_optional_string(record.validation_outcome)
+                )
+            elif record.status == "completed":
+                if record.current_applicability != "current" or record.stale_for_current_decisions:
+                    state = "resolved"
+                    termination_reason = termination_reason or "verification_not_current"
+                elif verification_outcome in {"contradicted", "inconclusive"}:
+                    state = "resolved"
+                    termination_reason = termination_reason or f"verification_{verification_outcome}"
+                elif verification_outcome == "supported" and identity_consistency == "consistent":
+                    if state not in TERMINAL_INVESTIGATION_STATES:
+                        state = "awaiting_reassociation"
+                else:
+                    state = "resolved"
+                    termination_reason = termination_reason or "verification_not_usable"
+            if state is None:
+                state = request_state
+
+        details["investigation_id"] = investigation_id
+        if state is not None:
+            details["investigation_state"] = state
+        if verification_outcome is not None:
+            details["verification_outcome"] = verification_outcome
+        if termination_reason is not None:
+            details["investigation_termination_reason"] = termination_reason
+
+        if state in ACTIVE_INVESTIGATION_STATES:
+            self._register_investigation_continuity(
+                investigation_id=investigation_id,
+                continuity_keys=continuity_keys,
+            )
+        elif state in TERMINAL_INVESTIGATION_STATES:
+            self._remove_investigation_continuity(investigation_id=investigation_id)
+            self._mark_investigation_terminal(
+                investigation_id=investigation_id,
+                state=state,
+                reason=termination_reason,
+            )
+
+        record.details = details
+        record.investigation_id = investigation_id
+        record.investigation_state = state
+        record.verification_outcome = verification_outcome
+        record.investigation_termination_reason = termination_reason
+        return record
+
+    def _derive_investigation_continuity_keys(
+        self,
+        *,
+        request: VerificationQueueRequest,
+        record: VerificationQueueRecord,
+        details: dict[str, Any],
+    ) -> list[str]:
+        claim_id = _normalized_optional_string(details.get("identity_claim_id"))
+        app_identity_id = _normalized_optional_string(details.get("referenced_proposed_app_identity_id"))
+        detection_reference = _normalized_optional_string(details.get("referenced_detection_reference"))
+        snapshot_generation = details.get("referenced_identity_snapshot_generation")
+        snapshot_version = details.get("referenced_identity_snapshot_version")
+        verification_message_id = _normalized_optional_string(details.get("verification_referenced_message_id"))
+        source = _normalized_optional_string(record.source or request.source) or "unknown"
+
+        keys: list[str] = []
+
+        if (
+            claim_id is not None
+            and app_identity_id is not None
+            and isinstance(snapshot_generation, int)
+            and isinstance(snapshot_version, int)
+        ):
+            keys.append(
+                f"claim:{source}:{claim_id}:{app_identity_id}:{snapshot_generation}:{snapshot_version}"
+            )
+
+        if (
+            app_identity_id is not None
+            and detection_reference is not None
+            and isinstance(snapshot_generation, int)
+            and isinstance(snapshot_version, int)
+        ):
+            keys.append(
+                f"candidate:{source}:{app_identity_id}:{detection_reference}:{snapshot_generation}:{snapshot_version}"
+            )
+
+        if claim_id is not None and verification_message_id is not None:
+            keys.append(f"message_claim:{source}:{verification_message_id}:{claim_id}")
+
+        return keys
+
+    def _register_investigation_continuity(
+        self,
+        *,
+        investigation_id: str,
+        continuity_keys: list[str],
+    ) -> None:
+        if investigation_id in self._terminal_investigation_id_set:
+            return
+
+        investigation_keys = self._continuity_keys_by_investigation_id.setdefault(investigation_id, set())
+        for continuity_key in continuity_keys:
+            normalized_key = _normalized_optional_string(continuity_key)
+            if normalized_key is None:
+                continue
+            self._continuity_investigation_id_by_key[normalized_key] = investigation_id
+            investigation_keys.add(normalized_key)
+
+    def _remove_investigation_continuity(self, *, investigation_id: str) -> None:
+        continuity_keys = self._continuity_keys_by_investigation_id.pop(investigation_id, set())
+        for continuity_key in continuity_keys:
+            linked_investigation_id = self._continuity_investigation_id_by_key.get(continuity_key)
+            if linked_investigation_id == investigation_id:
+                self._continuity_investigation_id_by_key.pop(continuity_key, None)
+
+    def _mark_investigation_terminal(
+        self,
+        *,
+        investigation_id: str,
+        state: str,
+        reason: str | None,
+    ) -> None:
+        if investigation_id in self._terminal_investigation_id_set:
+            if reason is not None:
+                self._terminal_investigation_reason_by_id[investigation_id] = reason
+            if state in TERMINAL_INVESTIGATION_STATES:
+                self._terminal_investigation_state_by_id[investigation_id] = state
+            return
+
+        if len(self._terminal_investigation_ids_order) == self._terminal_investigation_ids_order.maxlen:
+            evicted = self._terminal_investigation_ids_order.popleft()
+            self._terminal_investigation_id_set.discard(evicted)
+            self._terminal_investigation_state_by_id.pop(evicted, None)
+            self._terminal_investigation_reason_by_id.pop(evicted, None)
+
+        self._terminal_investigation_ids_order.append(investigation_id)
+        self._terminal_investigation_id_set.add(investigation_id)
+        self._terminal_investigation_state_by_id[investigation_id] = (
+            state if state in TERMINAL_INVESTIGATION_STATES else "closed"
+        )
+        if reason is not None:
+            self._terminal_investigation_reason_by_id[investigation_id] = reason
+
     def _rejected_record(
         self,
         request: VerificationQueueRequest,
@@ -1251,6 +1545,8 @@ def extract_submission_decisions_from_cycle_payload(payload: dict[str, Any]) -> 
             if isinstance(cycle_id_value, str) and cycle_id_value.strip()
             else None
         )
+        investigation_id = _normalized_optional_string(event.get("investigation_id"))
+        investigation_state = _normalized_investigation_state(event.get("investigation_state"))
         event_origin_value = event.get("event_origin")
         event_origin: str | None
         invalid_event_origin = False
@@ -1339,6 +1635,15 @@ def extract_submission_decisions_from_cycle_payload(payload: dict[str, Any]) -> 
             )
             continue
 
+        if investigation_id is None:
+            investigation_id = _derive_investigation_id(
+                cycle_id=cycle_id,
+                track_id=track_id,
+                trigger_event_id=trigger_event_id,
+            )
+        if investigation_state is None and evidence_requested:
+            investigation_state = "awaiting_evidence"
+
         if evidence_message_id is not None:
             request = build_request_from_message_id(track_id, evidence_message_id, source="production_monitor")
         else:
@@ -1347,6 +1652,8 @@ def extract_submission_decisions_from_cycle_payload(payload: dict[str, Any]) -> 
         request.trigger_event_id = trigger_event_id
         request.correlation_id = correlation_id
         request.cycle_id = cycle_id
+        request.investigation_id = investigation_id
+        request.investigation_state = investigation_state
         event_timestamp = event.get("timestamp")
         if isinstance(event_timestamp, (int, float)):
             request.trigger_timestamp = float(event_timestamp)
@@ -1383,6 +1690,8 @@ def extract_track_requests_from_cycle_payload(payload: dict[str, Any]) -> Iterab
                 requested_at=request.requested_at,
                 trigger_event_id=request.trigger_event_id,
                 trigger_timestamp=request.trigger_timestamp,
+                investigation_id=request.investigation_id,
+                investigation_state=request.investigation_state,
             )
         )
     return requests

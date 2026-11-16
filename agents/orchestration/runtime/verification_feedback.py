@@ -20,6 +20,14 @@ MAX_FINDING_PROVENANCE_KEYS = 16
 MAX_FINDING_PROVENANCE_KEY_LENGTH = 64
 MAX_FINDING_PROVENANCE_VALUE_LENGTH = 128
 VALID_VERIFICATION_STATUSES = {"supported", "contradicted", "inconclusive"}
+VALID_INVESTIGATION_STATES = {
+    "open",
+    "awaiting_evidence",
+    "verifying",
+    "awaiting_reassociation",
+    "resolved",
+    "closed",
+}
 VALID_IDENTITY_CONSISTENCY = {"consistent", "inconsistent", "unknown"}
 VALID_VISIBILITY_STATUSES = {
     "visible",
@@ -30,6 +38,27 @@ VALID_VISIBILITY_STATUSES = {
 }
 MIN_CONFIDENCE = 0.0
 MAX_CONFIDENCE = 1.0
+
+
+def _optional_string(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized if normalized else None
+
+
+def _optional_investigation_state(value: Any) -> str | None:
+    normalized = _optional_string(value)
+    if normalized in VALID_INVESTIGATION_STATES:
+        return normalized
+    return None
+
+
+def _optional_verification_outcome(value: Any) -> str | None:
+    normalized = _optional_string(value)
+    if normalized in VALID_VERIFICATION_STATUSES:
+        return normalized
+    return None
 
 
 class VerificationFeedbackPublisher:
@@ -198,6 +227,45 @@ class VerificationFeedbackPublisher:
         stale_for_current_decisions = bool(result.get("stale_for_current_decisions", False))
         historical_observation = applicability == "historical" or stale_for_current_decisions
 
+        investigation_id = _optional_string(result.get("investigation_id"))
+        investigation_state = _optional_investigation_state(result.get("investigation_state"))
+        verification_outcome = _optional_verification_outcome(result.get("verification_outcome"))
+        investigation_termination_reason = _optional_string(
+            result.get("investigation_termination_reason")
+        )
+
+        if investigation_id is None:
+            investigation_id = _optional_string(details.get("investigation_id"))
+        if investigation_state is None:
+            investigation_state = _optional_investigation_state(details.get("investigation_state"))
+        if verification_outcome is None:
+            verification_outcome = _optional_verification_outcome(
+                details.get("verification_outcome")
+            )
+        if investigation_termination_reason is None:
+            investigation_termination_reason = _optional_string(
+                details.get("investigation_termination_reason")
+            )
+
+        if verification_outcome is None:
+            verification_outcome = _optional_verification_outcome(findings.get("verification_status"))
+
+        if investigation_id is not None and investigation_state is None:
+            identity_consistency = _optional_string(findings.get("identity_consistency"))
+            if applicability != "current" or stale_for_current_decisions:
+                investigation_state = "resolved"
+                investigation_termination_reason = investigation_termination_reason or "verification_not_current"
+            elif verification_outcome == "supported" and identity_consistency == "consistent":
+                investigation_state = "awaiting_reassociation"
+            elif verification_outcome in {"contradicted", "inconclusive"}:
+                investigation_state = "resolved"
+                investigation_termination_reason = (
+                    investigation_termination_reason or f"verification_{verification_outcome}"
+                )
+            else:
+                investigation_state = "resolved"
+                investigation_termination_reason = investigation_termination_reason or "verification_not_usable"
+
         submitted_at = result.get("submitted_at")
         started_at = result.get("started_at")
         finished_at = result.get("finished_at")
@@ -222,6 +290,10 @@ class VerificationFeedbackPublisher:
             finished_at=(float(finished_at) if isinstance(finished_at, (int, float)) else None),
             published_at=now_timestamp,
             expires_at=now_timestamp + self._record_ttl_seconds,
+            investigation_id=investigation_id,
+            investigation_state=investigation_state,
+            verification_outcome=verification_outcome,
+            investigation_termination_reason=investigation_termination_reason,
             provenance={
                 "publisher": "verification_queue",
                 "source": source,

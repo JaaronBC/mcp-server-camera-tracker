@@ -24,6 +24,7 @@ import agents.orchestration.runtime.verification_queue as verification_queue_run
 
 from agents.orchestration.runtime.verification_queue import (
     VerificationQueueManager,
+    VerificationQueueRecord,
     VerificationQueueRequest,
     extract_submission_decisions_from_cycle_payload,
 )
@@ -214,6 +215,356 @@ class TestVerificationQueueRuntime(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(decision.queue_request)
         self.assertEqual(decision.queue_request.correlation_id, "corr-track-1")
         self.assertEqual(decision.queue_request.cycle_id, "cycle-xyz")
+
+    def test_extract_submission_decisions_propagates_investigation_fields(self) -> None:
+        payload = {
+            "events": [
+                {
+                    "event_origin": "production_monitor",
+                    "event_id": "evt-99",
+                    "track_id": "track-9",
+                    "timestamp": 1000.0,
+                    "evidence_requested": True,
+                    "evidence_message_id": "msg-9",
+                    "investigation_id": "inv-custom-9",
+                    "investigation_state": "awaiting_evidence",
+                }
+            ]
+        }
+
+        decisions = extract_submission_decisions_from_cycle_payload(payload)
+        self.assertEqual(len(decisions), 1)
+        decision = decisions[0]
+        self.assertTrue(decision.submission_eligibility)
+        self.assertIsNotNone(decision.queue_request)
+        assert decision.queue_request is not None
+        self.assertEqual(decision.queue_request.investigation_id, "inv-custom-9")
+        self.assertEqual(decision.queue_request.investigation_state, "awaiting_evidence")
+
+    def test_extract_submission_decisions_generates_unique_investigation_ids_for_multiple_tracks(self) -> None:
+        payload = {
+            "events": [
+                {
+                    "event_origin": "production_monitor",
+                    "event_id": "evt-a",
+                    "track_id": "track-a",
+                    "timestamp": 1000.0,
+                    "evidence_requested": True,
+                    "evidence_message_id": "msg-a",
+                    "cycle_id": "cycle-1",
+                },
+                {
+                    "event_origin": "production_monitor",
+                    "event_id": "evt-b",
+                    "track_id": "track-b",
+                    "timestamp": 1000.1,
+                    "evidence_requested": True,
+                    "evidence_message_id": "msg-b",
+                    "cycle_id": "cycle-1",
+                },
+            ]
+        }
+
+        decisions = extract_submission_decisions_from_cycle_payload(payload)
+        ids = [
+            decision.queue_request.investigation_id
+            for decision in decisions
+            if decision.queue_request is not None
+        ]
+        self.assertEqual(len(ids), 2)
+        self.assertEqual(len(set(ids)), 2)
+
+    def test_extract_submission_decisions_changes_investigation_id_across_cycles_for_same_track(self) -> None:
+        payload = {
+            "events": [
+                {
+                    "event_origin": "production_monitor",
+                    "event_id": "evt-1",
+                    "track_id": "track-same",
+                    "timestamp": 1000.0,
+                    "evidence_requested": True,
+                    "evidence_message_id": "msg-1",
+                    "cycle_id": "cycle-1",
+                },
+                {
+                    "event_origin": "production_monitor",
+                    "event_id": "evt-2",
+                    "track_id": "track-same",
+                    "timestamp": 1001.0,
+                    "evidence_requested": True,
+                    "evidence_message_id": "msg-2",
+                    "cycle_id": "cycle-2",
+                },
+            ]
+        }
+
+        decisions = extract_submission_decisions_from_cycle_payload(payload)
+        ids = [
+            decision.queue_request.investigation_id
+            for decision in decisions
+            if decision.queue_request is not None
+        ]
+        self.assertEqual(len(ids), 2)
+        self.assertNotEqual(ids[0], ids[1])
+
+    def test_annotate_investigation_record_marks_contradicted_as_resolved(self) -> None:
+        manager = VerificationQueueManager(evidence_root_dir=Path("/tmp"))
+        request = VerificationQueueRequest(
+            request_id="req-contradicted",
+            track_id="track-1",
+            message_id="msg-1",
+            source="test",
+            requested_at=1000.0,
+            investigation_id="inv-1",
+            investigation_state=None,
+        )
+        record = VerificationQueueRecord(
+            request_id="req-contradicted",
+            source="test",
+            track_id="track-1",
+            evidence_message_id="msg-1",
+            status="completed",
+            validation_outcome="accepted",
+            submitted_at=1000.0,
+            started_at=1000.1,
+            finished_at=1000.2,
+            current_applicability="current",
+            stale_for_current_decisions=False,
+            coordinator_valid=True,
+            error_code=None,
+            error=None,
+            details={
+                "verification_status": "contradicted",
+                "identity_consistency": "inconsistent",
+            },
+            run_id="run-test",
+        )
+
+        annotated = manager._annotate_investigation_record(record=record, request=request)
+        self.assertEqual(annotated.investigation_id, "inv-1")
+        self.assertEqual(annotated.investigation_state, "resolved")
+        self.assertEqual(annotated.verification_outcome, "contradicted")
+        self.assertEqual(annotated.investigation_termination_reason, "verification_contradicted")
+
+    def test_annotate_investigation_record_marks_timeout_as_closed(self) -> None:
+        manager = VerificationQueueManager(evidence_root_dir=Path("/tmp"))
+        request = VerificationQueueRequest(
+            request_id="req-timeout",
+            track_id="track-1",
+            message_id="msg-1",
+            source="test",
+            requested_at=1000.0,
+            investigation_id="inv-timeout",
+            investigation_state=None,
+        )
+        record = VerificationQueueRecord(
+            request_id="req-timeout",
+            source="test",
+            track_id="track-1",
+            evidence_message_id="msg-1",
+            status="timed_out",
+            validation_outcome="operator_timeout",
+            submitted_at=1000.0,
+            started_at=1000.1,
+            finished_at=1000.2,
+            current_applicability="unknown",
+            stale_for_current_decisions=False,
+            coordinator_valid=False,
+            error_code="operator_timeout",
+            error="Operator request timeout exceeded",
+            details={},
+            run_id="run-test",
+        )
+
+        annotated = manager._annotate_investigation_record(record=record, request=request)
+        self.assertEqual(annotated.investigation_state, "closed")
+        self.assertEqual(annotated.investigation_termination_reason, "operator_timeout")
+
+    def test_annotate_investigation_record_terminal_precedence_overrides_request_state(self) -> None:
+        manager = VerificationQueueManager(evidence_root_dir=Path("/tmp"))
+        request = VerificationQueueRequest(
+            request_id="req-preserve-state",
+            track_id="track-1",
+            message_id="msg-1",
+            source="test",
+            requested_at=1000.0,
+            investigation_id="inv-preserve-state",
+            investigation_state="verifying",
+        )
+        record = VerificationQueueRecord(
+            request_id="req-preserve-state",
+            source="test",
+            track_id="track-1",
+            evidence_message_id="msg-1",
+            status="timed_out",
+            validation_outcome="operator_timeout",
+            submitted_at=1000.0,
+            started_at=1000.1,
+            finished_at=1000.2,
+            current_applicability="unknown",
+            stale_for_current_decisions=False,
+            coordinator_valid=False,
+            error_code="operator_timeout",
+            error="Operator request timeout exceeded",
+            details={},
+            run_id="run-test",
+        )
+
+        annotated = manager._annotate_investigation_record(record=record, request=request)
+        self.assertEqual(annotated.investigation_state, "closed")
+        self.assertEqual(annotated.investigation_termination_reason, "operator_timeout")
+
+    def test_annotate_investigation_record_reuses_continuity_investigation_id(self) -> None:
+        manager = VerificationQueueManager(evidence_root_dir=Path("/tmp"))
+
+        first_request = VerificationQueueRequest(
+            request_id="req-continuity-1",
+            track_id="track-1",
+            message_id="msg-1",
+            source="test",
+            requested_at=1000.0,
+            investigation_id="inv-primary",
+            investigation_state="verifying",
+        )
+        first_record = VerificationQueueRecord(
+            request_id="req-continuity-1",
+            source="test",
+            track_id="track-1",
+            evidence_message_id="msg-1",
+            status="completed",
+            validation_outcome="accepted",
+            submitted_at=1000.0,
+            started_at=1000.1,
+            finished_at=1000.2,
+            current_applicability="current",
+            stale_for_current_decisions=False,
+            coordinator_valid=True,
+            error_code=None,
+            error=None,
+            details={
+                "verification_status": "supported",
+                "identity_consistency": "consistent",
+                "identity_claim_id": "claim-1",
+                "referenced_proposed_app_identity_id": "app-1",
+                "referenced_detection_reference": "evidence://detection/d1",
+                "referenced_identity_snapshot_generation": 1,
+                "referenced_identity_snapshot_version": 2,
+                "verification_referenced_message_id": "msg-1",
+            },
+            run_id="run-test",
+        )
+        manager._annotate_investigation_record(record=first_record, request=first_request)
+
+        second_request = VerificationQueueRequest(
+            request_id="req-continuity-2",
+            track_id="track-2",
+            message_id="msg-2",
+            source="test",
+            requested_at=1001.0,
+            investigation_id="inv-secondary",
+            investigation_state="verifying",
+        )
+        second_record = VerificationQueueRecord(
+            request_id="req-continuity-2",
+            source="test",
+            track_id="track-2",
+            evidence_message_id="msg-2",
+            status="completed",
+            validation_outcome="accepted",
+            submitted_at=1001.0,
+            started_at=1001.1,
+            finished_at=1001.2,
+            current_applicability="current",
+            stale_for_current_decisions=False,
+            coordinator_valid=True,
+            error_code=None,
+            error=None,
+            details={
+                "verification_status": "supported",
+                "identity_consistency": "consistent",
+                "identity_claim_id": "claim-1",
+                "referenced_proposed_app_identity_id": "app-1",
+                "referenced_detection_reference": "evidence://detection/d1",
+                "referenced_identity_snapshot_generation": 1,
+                "referenced_identity_snapshot_version": 2,
+                "verification_referenced_message_id": "msg-2",
+            },
+            run_id="run-test",
+        )
+
+        annotated = manager._annotate_investigation_record(record=second_record, request=second_request)
+        self.assertEqual(annotated.investigation_id, "inv-primary")
+        self.assertEqual(annotated.investigation_state, "awaiting_reassociation")
+
+    def test_annotate_investigation_record_does_not_reopen_terminal_investigation(self) -> None:
+        manager = VerificationQueueManager(evidence_root_dir=Path("/tmp"))
+
+        terminal_request = VerificationQueueRequest(
+            request_id="req-terminal-1",
+            track_id="track-1",
+            message_id="msg-1",
+            source="test",
+            requested_at=1000.0,
+            investigation_id="inv-terminal",
+            investigation_state="verifying",
+        )
+        terminal_record = VerificationQueueRecord(
+            request_id="req-terminal-1",
+            source="test",
+            track_id="track-1",
+            evidence_message_id="msg-1",
+            status="completed",
+            validation_outcome="accepted",
+            submitted_at=1000.0,
+            started_at=1000.1,
+            finished_at=1000.2,
+            current_applicability="current",
+            stale_for_current_decisions=False,
+            coordinator_valid=True,
+            error_code=None,
+            error=None,
+            details={
+                "verification_status": "contradicted",
+                "identity_consistency": "inconsistent",
+            },
+            run_id="run-test",
+        )
+        manager._annotate_investigation_record(record=terminal_record, request=terminal_request)
+
+        late_request = VerificationQueueRequest(
+            request_id="req-terminal-2",
+            track_id="track-1",
+            message_id="msg-2",
+            source="test",
+            requested_at=1001.0,
+            investigation_id="inv-terminal",
+            investigation_state="awaiting_reassociation",
+        )
+        late_record = VerificationQueueRecord(
+            request_id="req-terminal-2",
+            source="test",
+            track_id="track-1",
+            evidence_message_id="msg-2",
+            status="completed",
+            validation_outcome="accepted",
+            submitted_at=1001.0,
+            started_at=1001.1,
+            finished_at=1001.2,
+            current_applicability="current",
+            stale_for_current_decisions=False,
+            coordinator_valid=True,
+            error_code=None,
+            error=None,
+            details={
+                "verification_status": "supported",
+                "identity_consistency": "consistent",
+            },
+            run_id="run-test",
+        )
+
+        annotated = manager._annotate_investigation_record(record=late_record, request=late_request)
+        self.assertEqual(annotated.investigation_state, "resolved")
+        self.assertEqual(annotated.investigation_termination_reason, "verification_contradicted")
 
 
     def test_extract_submission_decisions_rejects_invalid_nonempty_event_origin(self) -> None:
