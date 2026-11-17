@@ -30,6 +30,19 @@ class _FakeCompletions:
         return SimpleNamespace(choices=[choice], usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15})
 
 
+class _SlowCompletions:
+    def __init__(self, *, sleep_seconds: float) -> None:
+        self._sleep_seconds = sleep_seconds
+
+    async def create(self, **kwargs):
+        await asyncio.sleep(self._sleep_seconds)
+        choice = SimpleNamespace(
+            message=SimpleNamespace(content='{"proposals":[],"uncertainty_flags":[],"supporting_evidence":[]}'),
+            finish_reason="stop",
+        )
+        return SimpleNamespace(choices=[choice], usage={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2})
+
+
 class _FakeClient:
     def __init__(self, completions: _FakeCompletions) -> None:
         self.chat = SimpleNamespace(completions=completions)
@@ -77,6 +90,14 @@ def _read_single_jsonl(path: Path) -> dict:
     lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
     assert len(lines) == 1
     return json.loads(lines[0])
+
+
+def _read_jsonl_records(path: Path) -> list[dict]:
+    return [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
 
 
 class TestTrackingVlmAttemptDiagnostics(unittest.TestCase):
@@ -178,6 +199,179 @@ class TestTrackingVlmAttemptDiagnostics(unittest.TestCase):
             self.assertIsNone(record["result_error_code"])
             self.assertEqual(record["raw_identity_candidate_count"], 1)
             self.assertEqual(record["normalized_identity_candidate_count"], 1)
+            metadata = record.get("request_metadata")
+            self.assertIsInstance(metadata, dict)
+            assert isinstance(metadata, dict)
+            self.assertEqual(metadata.get("model_identifier"), agent.model)
+            self.assertEqual(metadata.get("image_count"), 0)
+            self.assertEqual(metadata.get("detection_count"), 1)
+            self.assertEqual(metadata.get("configured_timeout_seconds"), 1.0)
+            self.assertEqual(metadata.get("output_token_limit"), 384)
+            self.assertIsInstance(metadata.get("request_size_estimate_bytes"), int)
+            for forbidden_key in (
+                "api_key",
+                "authorization",
+                "headers",
+                "messages",
+                "prompt",
+                "system_prompt",
+                "request_kwargs",
+                "full_request_payload",
+                "image_url",
+                "frame_reference",
+            ):
+                self.assertNotIn(forbidden_key, metadata)
+
+            serialized_record = json.dumps(record)
+            for forbidden_fragment in (
+                "OPENROUTER_API_KEY",
+                "authorization",
+                "image_url",
+                "Structured input",
+            ):
+                self.assertNotIn(forbidden_fragment, serialized_record)
+
+            timing = record.get("timing_markers")
+            self.assertIsInstance(timing, dict)
+            assert isinstance(timing, dict)
+            self.assertIsNone(timing.get("runtime_candidate_submitted_at"))
+            self.assertIsNone(timing.get("runtime_worker_started_at"))
+            self.assertIsInstance(timing.get("provider_request_started_at"), float)
+            self.assertIsInstance(timing.get("provider_response_completed_at"), float)
+            self.assertIsNone(timing.get("provider_timeout_at"))
+
+    def test_timeout_emits_timing_markers_without_budget_retry_side_effects(self) -> None:
+        agent = LLMVisualTrackingAgent(client=_FakeClient(_SlowCompletions(sleep_seconds=0.05)))
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            diagnostics_path = Path(temp_dir) / "tracking_vlm_attempt_diagnostics.jsonl"
+            with patch.dict(
+                os.environ,
+                {
+                    "TRACKING_VLM_ATTEMPT_DIAGNOSTICS_PATH": str(diagnostics_path),
+                    "TRACKING_IDENTITY_EVIDENCE_ENABLED": "0",
+                },
+                clear=False,
+            ), patch(
+                "agents.tracking.agent_tracking.provider_call_budget.reserve_or_raise",
+                return_value=_reservation("attempt-timeout"),
+            ) as reserve_mock, patch(
+                "agents.tracking.agent_tracking.provider_call_budget.finalize_provider_call_attempt",
+                return_value=None,
+            ) as finalize_mock, patch(
+                "agents.tracking.agent_tracking.latency_instrumentation.new_correlation_id",
+                return_value="tracking-llm-correlation-timeout",
+            ):
+                result = asyncio.run(
+                    agent.propose_associations(
+                        frame_reference=None,
+                        detections=[_make_detection("d1")],
+                        event_reasons=["possible_id_switch"],
+                        request_timeout_seconds=0.01,
+                    )
+                )
+
+            self.assertFalse(result.available)
+            self.assertEqual(result.error, "vlm_timeout")
+            self.assertEqual(reserve_mock.call_count, 1)
+            self.assertEqual(finalize_mock.call_count, 1)
+            finalize_kwargs = finalize_mock.call_args.kwargs
+            self.assertEqual(finalize_kwargs.get("outcome"), "error")
+            self.assertEqual(finalize_kwargs.get("error_code"), "timeout")
+
+            record = _read_single_jsonl(diagnostics_path)
+            self.assertEqual(record["attempt_id"], "attempt-timeout")
+            self.assertEqual(record["provider_outcome"], "error")
+            self.assertEqual(record["parse_status"], "not_attempted")
+            self.assertEqual(record["result_error_code"], "vlm_timeout")
+
+            timing = record.get("timing_markers")
+            self.assertIsInstance(timing, dict)
+            assert isinstance(timing, dict)
+            self.assertIsInstance(timing.get("provider_request_started_at"), float)
+            self.assertIsNone(timing.get("provider_response_completed_at"))
+            self.assertIsInstance(timing.get("provider_timeout_at"), float)
+
+    def test_follow_up_metadata_is_persisted_without_sensitive_payload_fields(self) -> None:
+        proposal_payload = json.dumps(
+            {
+                "proposals": [],
+                "uncertainty_flags": ["schema_complete_response"],
+                "supporting_evidence": ["follow_up_processed"],
+            }
+        )
+        agent = LLMVisualTrackingAgent(client=_FakeClient(_FakeCompletions(content=proposal_payload)))
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            diagnostics_path = Path(temp_dir) / "tracking_vlm_attempt_diagnostics.jsonl"
+            with patch.dict(
+                os.environ,
+                {
+                    "TRACKING_VLM_ATTEMPT_DIAGNOSTICS_PATH": str(diagnostics_path),
+                    "TRACKING_IDENTITY_EVIDENCE_ENABLED": "0",
+                    "OPENROUTER_API_KEY": "super-secret-test-token",
+                },
+                clear=False,
+            ), patch(
+                "agents.tracking.agent_tracking.provider_call_budget.reserve_or_raise",
+                return_value=_reservation("attempt-follow-up-metadata"),
+            ), patch(
+                "agents.tracking.agent_tracking.provider_call_budget.finalize_provider_call_attempt",
+                return_value=None,
+            ), patch(
+                "agents.tracking.agent_tracking.latency_instrumentation.new_correlation_id",
+                return_value="tracking-llm-correlation-follow-up-metadata",
+            ):
+                result = asyncio.run(
+                    agent.propose_associations(
+                        frame_reference="data:image/jpeg;base64,AAAABBBBCCCC",
+                        detections=[_make_detection("d1")],
+                        event_reasons=["tracking_decision_follow_up"],
+                        follow_up_context={
+                            "investigation_id": "inv-follow-up-1",
+                            "request_id": "req-follow-up-1",
+                            "result_status": "ok",
+                            "mcp_result": {"available": True, "state": "observed"},
+                            "evidence_references": {
+                                "frame_reference": "evidence://frame/f-1",
+                                "detection_reference": "evidence://detection/d-1",
+                            },
+                        },
+                        request_timeout_seconds=1.0,
+                    )
+                )
+
+            self.assertTrue(result.available)
+            records = _read_jsonl_records(diagnostics_path)
+            self.assertEqual(len(records), 1)
+            record = records[0]
+            metadata = record.get("request_metadata")
+            self.assertIsInstance(metadata, dict)
+            assert isinstance(metadata, dict)
+            self.assertEqual(metadata.get("follow_up_investigation_id"), "inv-follow-up-1")
+            self.assertEqual(metadata.get("follow_up_request_id"), "req-follow-up-1")
+            self.assertEqual(metadata.get("follow_up_result_status"), "ok")
+            self.assertTrue(metadata.get("follow_up_mcp_result_present"))
+            self.assertTrue(metadata.get("follow_up_evidence_refs_present"))
+
+            for forbidden_key in (
+                "messages",
+                "prompt",
+                "system_prompt",
+                "image_url",
+                "frame_reference",
+                "authorization",
+                "api_key",
+                "headers",
+                "request_kwargs",
+                "full_request_payload",
+            ):
+                self.assertNotIn(forbidden_key, metadata)
+
+            serialized = json.dumps(record)
+            self.assertNotIn("super-secret-test-token", serialized)
+            self.assertNotIn("Structured input", serialized)
+            self.assertNotIn("data:image/jpeg;base64", serialized)
 
     def test_parse_failure_emits_parse_failed_not_provider_error(self) -> None:
         agent = LLMVisualTrackingAgent(client=_FakeClient(_FakeCompletions(content="not-json")))

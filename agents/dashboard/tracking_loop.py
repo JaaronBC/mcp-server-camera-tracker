@@ -17,6 +17,7 @@ from agents.coordinator import AgentCoordinator
 from agents.tracking.agent_tracking import (
     AsyncVisualTrackingRuntime,
     LLMVisualTrackingAgent,
+    _validate_tracking_decision_payload,
     encode_frame_as_data_url,
 )
 from agents.tracking.evidence_packaging import TrackingEvidencePackager
@@ -49,6 +50,7 @@ from .config import (
     TRACKING_DECISION_IPC_ENABLED,
     TRACKING_DECISION_TOOL_REQUESTS_PATH,
     TRACKING_DECISION_TOOL_RESULTS_PATH,
+    TRACKING_TERMINAL_FOLLOW_UP_DECISIONS_PATH,
     LATEST_TRACKING_DECISION_REQUEST_INDEX_PATH,
     LATEST_TRACKING_DECISION_RESULT_INDEX_PATH,
     TRACKING_DECISION_IPC_MAX_RESULTS_PER_POLL,
@@ -90,6 +92,7 @@ UNSUCCESSFUL_DECISION_RESULT_STATUSES = {
     "terminal",
     "rejected",
 }
+FOLLOW_UP_TIMEOUT_GRACE_SECONDS = max(5.0, float(TRACKING_AGENT_REQUEST_TIMEOUT_SECONDS) * 2.0)
 
 
 def _nonempty_str(value: Any) -> str | None:
@@ -161,6 +164,76 @@ def _build_inconclusive_follow_up_decision(
     return decision
 
 
+def _append_jsonl_record(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, separators=(",", ":")) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def _persist_terminal_follow_up_decision_event(
+    *,
+    now: float,
+    observation: Any,
+    follow_up_meta: dict[str, str | None],
+    decision_payload: dict[str, Any] | None,
+    validation_errors: list[str],
+    status: str,
+    reason: str,
+    investigation_state: dict[str, Any] | None,
+) -> None:
+    record: dict[str, Any] = {
+        "schema_version": "1.0",
+        "event_type": "tracking_terminal_follow_up_decision",
+        "timestamp": float(now),
+        "status": status,
+        "reason": reason,
+        "observation_id": _nonempty_str(getattr(observation, "observation_id", None)),
+        "llm_correlation_id": _nonempty_str(getattr(observation, "llm_correlation_id", None)),
+        "investigation_id": _nonempty_str(follow_up_meta.get("investigation_id")),
+        "request_id": _nonempty_str(follow_up_meta.get("request_id")),
+        "result_key": _nonempty_str(follow_up_meta.get("result_key")),
+        "result_status": _nonempty_str(follow_up_meta.get("result_status")),
+        "validation": {
+            "valid": len(validation_errors) == 0,
+            "errors": list(validation_errors),
+        },
+    }
+
+    if isinstance(decision_payload, dict):
+        record["decision"] = dict(decision_payload)
+        record["action"] = _nonempty_str(decision_payload.get("action"))
+        record["decision_reason"] = _nonempty_str(decision_payload.get("reason"))
+        uncertainty = decision_payload.get("uncertainty")
+        if isinstance(uncertainty, list):
+            record["decision_uncertainty"] = [
+                str(item) for item in uncertainty if isinstance(item, (str, int, float, bool)) or item is None
+            ]
+        provenance = decision_payload.get("provenance")
+        if isinstance(provenance, dict):
+            attempt_id = _nonempty_str(provenance.get("attempt_id"))
+            if attempt_id is not None:
+                record["llm_attempt_id"] = attempt_id
+        evidence_references = decision_payload.get("evidence_references")
+        if isinstance(evidence_references, dict):
+            record["evidence_references"] = dict(evidence_references)
+
+    if isinstance(investigation_state, dict):
+        if "evidence_references" not in record and isinstance(investigation_state.get("evidence_references"), dict):
+            record["evidence_references"] = dict(investigation_state.get("evidence_references"))
+        if record.get("request_id") is None:
+            record["request_id"] = _nonempty_str(investigation_state.get("request_id"))
+        if record.get("result_key") is None:
+            record["result_key"] = _nonempty_str(investigation_state.get("result_key"))
+        if record.get("investigation_id") is None:
+            record["investigation_id"] = _nonempty_str(investigation_state.get("investigation_id"))
+        if record.get("llm_correlation_id") is None:
+            record["llm_correlation_id"] = _nonempty_str(investigation_state.get("correlation_id"))
+
+    _append_jsonl_record(TRACKING_TERMINAL_FOLLOW_UP_DECISIONS_PATH, record)
+
+
 def _snapshot_constraints_satisfied(
     *,
     tool_name: str,
@@ -197,6 +270,126 @@ def _snapshot_constraints_satisfied(
             return False, "snapshot_version_mismatch"
 
     return True, None
+
+
+def _pending_investigation_follow_up_context_locked(
+    state: SharedDashboardState,
+    *,
+    now: float,
+) -> tuple[str | None, dict[str, Any] | None]:
+    selected_id: str | None = None
+    selected_state: dict[str, Any] | None = None
+
+    for investigation_id, investigation_state in state.tracking_decision_investigations.items():
+        if not isinstance(investigation_state, dict):
+            continue
+        if bool(investigation_state.get("terminal", False)):
+            continue
+
+        result_status = _nonempty_str(investigation_state.get("result_status"))
+        follow_up_completed = bool(investigation_state.get("follow_up_completed", False))
+        follow_up_submitted = bool(investigation_state.get("follow_up_submitted", False))
+
+        if result_status is None or follow_up_completed or follow_up_submitted:
+            continue
+
+        selected_id = _nonempty_str(investigation_id)
+        selected_state = investigation_state
+        break
+
+    if selected_id is None or not isinstance(selected_state, dict):
+        return None, None
+
+    result_payload = selected_state.get("result_payload")
+    if not isinstance(result_payload, dict):
+        result_payload = {}
+
+    return selected_id, {
+        "investigation_id": selected_id,
+        "request_id": _nonempty_str(selected_state.get("request_id")),
+        "idempotency_key": _nonempty_str(selected_state.get("result_key")),
+        "result_status": _nonempty_str(selected_state.get("result_status")),
+        "tool_name": _nonempty_str(selected_state.get("tool_name")),
+        "correlation_id": _nonempty_str(selected_state.get("correlation_id")),
+        "initial_decision": (
+            dict(selected_state.get("initial_decision"))
+            if isinstance(selected_state.get("initial_decision"), dict)
+            else {}
+        ),
+        "evidence_references": (
+            dict(selected_state.get("evidence_references"))
+            if isinstance(selected_state.get("evidence_references"), dict)
+            else {}
+        ),
+        "mcp_result": dict(result_payload),
+    }
+
+
+def _enforce_investigation_follow_up_timeout_locked(
+    state: SharedDashboardState,
+    *,
+    now: float,
+) -> None:
+    for investigation_id, investigation_state in state.tracking_decision_investigations.items():
+        if not isinstance(investigation_state, dict):
+            continue
+        if bool(investigation_state.get("terminal", False)):
+            continue
+
+        result_status = _nonempty_str(investigation_state.get("result_status"))
+        follow_up_completed = bool(investigation_state.get("follow_up_completed", False))
+        if follow_up_completed:
+            continue
+
+        updated_at = investigation_state.get("updated_at")
+        if not isinstance(updated_at, (int, float)):
+            continue
+
+        if (float(now) - float(updated_at)) < FOLLOW_UP_TIMEOUT_GRACE_SECONDS:
+            continue
+
+        timeout_reason = "follow_up_timeout"
+        if result_status is None:
+            timeout_reason = "mcp_result_timeout"
+
+        investigation_state["terminal"] = True
+        investigation_state["follow_up_completed"] = True
+        investigation_state["final_decision"] = _build_inconclusive_follow_up_decision(
+            investigation_id=_nonempty_str(investigation_id) or str(investigation_id),
+            reason=timeout_reason,
+            correlation_id=_nonempty_str(investigation_state.get("correlation_id")),
+            request_id=_nonempty_str(investigation_state.get("request_id")),
+            result_key=_nonempty_str(investigation_state.get("result_key")),
+            initial_decision=(
+                dict(investigation_state.get("initial_decision"))
+                if isinstance(investigation_state.get("initial_decision"), dict)
+                else None
+            ),
+            evidence_references=(
+                dict(investigation_state.get("evidence_references"))
+                if isinstance(investigation_state.get("evidence_references"), dict)
+                else None
+            ),
+            result_payload=(
+                dict(investigation_state.get("result_payload"))
+                if isinstance(investigation_state.get("result_payload"), dict)
+                else None
+            ),
+        )
+        investigation_state["updated_at"] = now
+
+
+def _active_nonterminal_investigation_locked(state: SharedDashboardState) -> tuple[str | None, dict[str, Any] | None]:
+    for investigation_id, investigation_state in state.tracking_decision_investigations.items():
+        if not isinstance(investigation_state, dict):
+            continue
+        if bool(investigation_state.get("terminal", False)):
+            continue
+
+        selected_id = _nonempty_str(investigation_id)
+        if selected_id is not None:
+            return selected_id, investigation_state
+    return None, None
 
 
 def resolve_model_path() -> str:
@@ -261,23 +454,13 @@ def _apply_tracking_agent_runtime_cycle(
     tracking_candidates,
     selected_event_reasons,
 ) -> object | None:
-    did_submit = submit_tracking_runtime_candidates(
-        runtime=tracking_runtime,
-        now=now,
-        frame=frame,
-        detections=tracking_candidates,
-        event_reasons=selected_event_reasons,
-        encode_frame=encode_frame_as_data_url,
-        request_timeout_seconds=TRACKING_AGENT_REQUEST_TIMEOUT_SECONDS,
-    )
-    if did_submit:
-        with state.lock:
-            state.tracking_agent_submissions += 1
-
+    did_submit = False
+    suppress_generic_submit_for_cycle = False
     with state.lock:
         track_trails_snapshot = dict(state.track_trails)
     tracking_agent_observation = tracking_runtime.poll_latest_observation()
     if tracking_agent_observation is not None:
+        follow_up_terminalization_blocked = False
         follow_up_meta = _extract_follow_up_metadata_from_observation(tracking_agent_observation)
         follow_up_investigation_id = _nonempty_str(follow_up_meta.get("investigation_id"))
         follow_up_request_id = _nonempty_str(follow_up_meta.get("request_id"))
@@ -290,6 +473,7 @@ def _apply_tracking_agent_runtime_cycle(
 
             if not isinstance(investigation_state, dict):
                 should_apply_updates = False
+                follow_up_terminalization_blocked = True
             else:
                 expected_request_id = _nonempty_str(investigation_state.get("request_id"))
                 expected_result_key = _nonempty_str(investigation_state.get("result_key"))
@@ -297,18 +481,21 @@ def _apply_tracking_agent_runtime_cycle(
 
                 if is_terminal:
                     should_apply_updates = False
+                    follow_up_terminalization_blocked = True
                 elif (
                     follow_up_request_id is not None
                     and expected_request_id is not None
                     and follow_up_request_id != expected_request_id
                 ):
                     should_apply_updates = False
+                    follow_up_terminalization_blocked = True
                 elif (
                     follow_up_result_key is not None
                     and expected_result_key is not None
                     and follow_up_result_key != expected_result_key
                 ):
                     should_apply_updates = False
+                    follow_up_terminalization_blocked = True
 
             if should_apply_updates:
                 decision_payload = getattr(tracking_agent_observation, "decision", None)
@@ -319,6 +506,15 @@ def _apply_tracking_agent_runtime_cycle(
                     )
                     if action in {"request_identity_snapshot", "request_additional_tracking_evidence"} or has_tool_requests:
                         should_apply_updates = False
+        else:
+            decision_payload = getattr(tracking_agent_observation, "decision", None)
+            if isinstance(decision_payload, dict):
+                action = _nonempty_str(decision_payload.get("action"))
+                has_tool_requests = isinstance(decision_payload.get("tool_requests"), list) and bool(
+                    decision_payload.get("tool_requests")
+                )
+                if action in {"request_identity_snapshot", "request_additional_tracking_evidence"} or has_tool_requests:
+                    suppress_generic_submit_for_cycle = True
 
         update_summary = {
             "accepted": 0,
@@ -343,7 +539,7 @@ def _apply_tracking_agent_runtime_cycle(
                 update_summary,
             )
 
-        if follow_up_investigation_id is not None:
+        if follow_up_investigation_id is not None and not follow_up_terminalization_blocked:
             with state.lock:
                 investigation_state = state.tracking_decision_investigations.get(follow_up_investigation_id)
                 if isinstance(investigation_state, dict):
@@ -420,6 +616,44 @@ def _apply_tracking_agent_runtime_cycle(
                                 ),
                             )
 
+                    validated_terminal_decision, terminal_decision_errors = _validate_tracking_decision_payload(
+                        final_decision_payload
+                    )
+                    terminal_action = (
+                        _nonempty_str(validated_terminal_decision.get("action"))
+                        if isinstance(validated_terminal_decision, dict)
+                        else None
+                    )
+                    if terminal_action not in {"inconclusive", "propose_identity_association"}:
+                        final_decision_payload = _build_inconclusive_follow_up_decision(
+                            investigation_id=follow_up_investigation_id,
+                            reason=(
+                                "follow_up_invalid_terminal_decision"
+                                if terminal_decision_errors
+                                else "follow_up_invalid_terminal_action"
+                            ),
+                            correlation_id=_nonempty_str(investigation_state.get("correlation_id")),
+                            request_id=follow_up_request_id,
+                            result_key=follow_up_result_key,
+                            initial_decision=(
+                                dict(investigation_state.get("initial_decision"))
+                                if isinstance(investigation_state.get("initial_decision"), dict)
+                                else None
+                            ),
+                            evidence_references=(
+                                dict(investigation_state.get("evidence_references"))
+                                if isinstance(investigation_state.get("evidence_references"), dict)
+                                else None
+                            ),
+                            result_payload=(
+                                dict(investigation_state.get("result_payload"))
+                                if isinstance(investigation_state.get("result_payload"), dict)
+                                else None
+                            ),
+                        )
+                    else:
+                        final_decision_payload = validated_terminal_decision
+
                     investigation_state["terminal"] = True
                     investigation_state["follow_up_completed"] = True
                     investigation_state["follow_up_submitted"] = True
@@ -430,6 +664,60 @@ def _apply_tracking_agent_runtime_cycle(
             state=state,
             metric_update=metric_update,
         )
+
+        _submit_tracking_decision_request_if_enabled(
+            state=state,
+            tracking_agent_observation=tracking_agent_observation,
+            now=now,
+        )
+
+    with state.lock:
+        _enforce_investigation_follow_up_timeout_locked(state, now=now)
+        active_investigation_id, active_investigation_state = _active_nonterminal_investigation_locked(state)
+        pending_investigation_id, pending_follow_up_context = _pending_investigation_follow_up_context_locked(
+            state,
+            now=now,
+        )
+
+    if isinstance(pending_follow_up_context, dict):
+        did_submit = submit_tracking_runtime_candidates(
+            runtime=tracking_runtime,
+            now=now,
+            frame=frame,
+            detections=tracking_candidates,
+            event_reasons=["tracking_decision_follow_up"],
+            follow_up_context=pending_follow_up_context,
+            encode_frame=encode_frame_as_data_url,
+            request_timeout_seconds=TRACKING_AGENT_REQUEST_TIMEOUT_SECONDS,
+        )
+        if did_submit and pending_investigation_id is not None:
+            with state.lock:
+                investigation_state = state.tracking_decision_investigations.get(pending_investigation_id)
+                if isinstance(investigation_state, dict):
+                    investigation_state["follow_up_submitted"] = True
+                    investigation_state["follow_up_submit_pending"] = False
+                    investigation_state["iterations"] = int(investigation_state.get("iterations", 1)) + 1
+                    result_key = _nonempty_str(investigation_state.get("result_key"))
+                    if result_key is not None:
+                        state.tracking_decision_followup_result_keys.add(result_key)
+                    investigation_state["updated_at"] = now
+    elif active_investigation_id is not None and isinstance(active_investigation_state, dict):
+        did_submit = False
+    elif suppress_generic_submit_for_cycle:
+        did_submit = False
+    else:
+        did_submit = submit_tracking_runtime_candidates(
+            runtime=tracking_runtime,
+            now=now,
+            frame=frame,
+            detections=tracking_candidates,
+            event_reasons=selected_event_reasons,
+            encode_frame=encode_frame_as_data_url,
+            request_timeout_seconds=TRACKING_AGENT_REQUEST_TIMEOUT_SECONDS,
+        )
+    if did_submit:
+        with state.lock:
+            state.tracking_agent_submissions += 1
 
     return tracking_agent_observation
 
@@ -812,39 +1100,165 @@ def _submit_tracking_decision_request_if_enabled(
     is_follow_up_observation = follow_up_investigation_id is not None
 
     if is_follow_up_observation:
-        action = _nonempty_str(decision_payload.get("action"))
-        has_tool_requests = isinstance(decision_payload.get("tool_requests"), list) and bool(
-            decision_payload.get("tool_requests")
+        with state.lock:
+            investigation_state = state.tracking_decision_investigations.get(follow_up_investigation_id)
+
+        if not isinstance(investigation_state, dict):
+            _persist_terminal_follow_up_decision_event(
+                now=now,
+                observation=tracking_agent_observation,
+                follow_up_meta=follow_up_meta,
+                decision_payload=(dict(decision_payload) if isinstance(decision_payload, dict) else None),
+                validation_errors=[],
+                status="rejected",
+                reason="unknown_follow_up_investigation",
+                investigation_state=None,
+            )
+            return
+
+        if bool(investigation_state.get("terminal", False)) and bool(
+            investigation_state.get("terminal_follow_up_persisted", False)
+        ):
+            _persist_terminal_follow_up_decision_event(
+                now=now,
+                observation=tracking_agent_observation,
+                follow_up_meta=follow_up_meta,
+                decision_payload=(dict(decision_payload) if isinstance(decision_payload, dict) else None),
+                validation_errors=[],
+                status="rejected",
+                reason="late_follow_up_after_investigation_closed",
+                investigation_state=investigation_state,
+            )
+            return
+
+        expected_request_id = _nonempty_str(investigation_state.get("request_id"))
+        expected_result_key = _nonempty_str(investigation_state.get("result_key"))
+        follow_up_request_id = _nonempty_str(follow_up_meta.get("request_id"))
+        follow_up_result_key = _nonempty_str(follow_up_meta.get("result_key"))
+        if (
+            (expected_request_id is not None and follow_up_request_id is not None and expected_request_id != follow_up_request_id)
+            or (expected_result_key is not None and follow_up_result_key is not None and expected_result_key != follow_up_result_key)
+        ):
+            _persist_terminal_follow_up_decision_event(
+                now=now,
+                observation=tracking_agent_observation,
+                follow_up_meta=follow_up_meta,
+                decision_payload=(dict(decision_payload) if isinstance(decision_payload, dict) else None),
+                validation_errors=[],
+                status="rejected",
+                reason="follow_up_context_mismatch",
+                investigation_state=investigation_state,
+            )
+            return
+
+        terminal_candidate = (
+            dict(decision_payload)
+            if isinstance(decision_payload, dict)
+            else (
+                dict(investigation_state.get("final_decision"))
+                if isinstance(investigation_state.get("final_decision"), dict)
+                else None
+            )
         )
-        if action in {"request_identity_snapshot", "request_additional_tracking_evidence"} or has_tool_requests:
+        validated_terminal_decision, terminal_decision_errors = _validate_tracking_decision_payload(terminal_candidate)
+        terminal_action = (
+            _nonempty_str(validated_terminal_decision.get("action"))
+            if isinstance(validated_terminal_decision, dict)
+            else None
+        )
+        if terminal_action not in {"inconclusive", "propose_identity_association"}:
+            fallback_inconclusive = _build_inconclusive_follow_up_decision(
+                investigation_id=follow_up_investigation_id,
+                reason=(
+                    "follow_up_invalid_terminal_decision"
+                    if terminal_decision_errors
+                    else "follow_up_invalid_terminal_action"
+                ),
+                correlation_id=_nonempty_str(investigation_state.get("correlation_id")),
+                request_id=follow_up_request_id,
+                result_key=follow_up_result_key,
+                initial_decision=(
+                    dict(investigation_state.get("initial_decision"))
+                    if isinstance(investigation_state.get("initial_decision"), dict)
+                    else None
+                ),
+                evidence_references=(
+                    dict(investigation_state.get("evidence_references"))
+                    if isinstance(investigation_state.get("evidence_references"), dict)
+                    else None
+                ),
+                result_payload=(
+                    dict(investigation_state.get("result_payload"))
+                    if isinstance(investigation_state.get("result_payload"), dict)
+                    else None
+                ),
+            )
             with state.lock:
-                investigation_state = state.tracking_decision_investigations.get(follow_up_investigation_id)
-                if isinstance(investigation_state, dict):
-                    investigation_state["terminal"] = True
-                    investigation_state["follow_up_completed"] = True
-                    investigation_state["final_decision"] = _build_inconclusive_follow_up_decision(
-                        investigation_id=follow_up_investigation_id,
-                        reason="follow_up_tool_request_not_allowed",
-                        correlation_id=_nonempty_str(investigation_state.get("correlation_id")),
-                        request_id=_nonempty_str(follow_up_meta.get("request_id")),
-                        result_key=_nonempty_str(follow_up_meta.get("result_key")),
-                        initial_decision=(
-                            dict(investigation_state.get("initial_decision"))
-                            if isinstance(investigation_state.get("initial_decision"), dict)
-                            else None
-                        ),
-                        evidence_references=(
-                            dict(investigation_state.get("evidence_references"))
-                            if isinstance(investigation_state.get("evidence_references"), dict)
-                            else None
-                        ),
-                        result_payload=(
-                            dict(investigation_state.get("result_payload"))
-                            if isinstance(investigation_state.get("result_payload"), dict)
-                            else None
-                        ),
-                    )
-                    investigation_state["updated_at"] = now
+                active_state = state.tracking_decision_investigations.get(follow_up_investigation_id)
+                if isinstance(active_state, dict):
+                    active_state["terminal"] = True
+                    active_state["follow_up_completed"] = True
+                    active_state["final_decision"] = fallback_inconclusive
+                    active_state["updated_at"] = now
+                    active_state["terminal_follow_up_persisted"] = True
+            _persist_terminal_follow_up_decision_event(
+                now=now,
+                observation=tracking_agent_observation,
+                follow_up_meta=follow_up_meta,
+                decision_payload=fallback_inconclusive,
+                validation_errors=(
+                    terminal_decision_errors
+                    if isinstance(terminal_decision_errors, list)
+                    else ["follow_up_invalid_terminal_decision"]
+                ),
+                status="accepted",
+                reason="terminal_follow_up_normalized_to_inconclusive",
+                investigation_state=investigation_state,
+            )
+            return
+
+        with state.lock:
+            active_state = state.tracking_decision_investigations.get(follow_up_investigation_id)
+            if isinstance(active_state, dict):
+                active_state["terminal"] = True
+                active_state["follow_up_completed"] = True
+                active_state["final_decision"] = dict(validated_terminal_decision)
+                active_state["updated_at"] = now
+                active_state["terminal_follow_up_persisted"] = True
+        _persist_terminal_follow_up_decision_event(
+            now=now,
+            observation=tracking_agent_observation,
+            follow_up_meta=follow_up_meta,
+            decision_payload=dict(validated_terminal_decision),
+            validation_errors=[],
+            status="accepted",
+            reason="terminal_follow_up_persisted",
+            investigation_state=investigation_state,
+        )
+        return
+
+    if not is_follow_up_observation:
+        investigation_id = _nonempty_str(decision_payload.get("investigation_id"))
+        with state.lock:
+            active_investigation_id, _ = _active_nonterminal_investigation_locked(state)
+        if (
+            active_investigation_id is not None
+            and investigation_id is not None
+            and investigation_id != active_investigation_id
+        ):
+            with state.lock:
+                state.latest_tracking_decision_ipc_summary = {
+                    "request": {
+                        "accepted": False,
+                        "duplicate": False,
+                        "rejected": True,
+                        "reason": "non_selected_investigation_rejected",
+                        "selected_investigation_id": active_investigation_id,
+                        "rejected_investigation_id": investigation_id,
+                    },
+                    "results": None,
+                    "updated_at": now,
+                }
             return
 
     try:
@@ -987,6 +1401,10 @@ def _consume_tracking_decision_results_if_enabled(
 
             if bool(investigation_state.get("terminal", False)):
                 terminal_count += 1
+                continue
+
+            if idempotency_key is not None and idempotency_key in state.tracking_decision_followup_result_keys:
+                duplicate_count += 1
                 continue
 
             investigation_state["result_status"] = status
@@ -1138,6 +1556,9 @@ def _consume_tracking_decision_results_if_enabled(
                     active_state["updated_at"] = now
 
         if did_submit:
+            if idempotency_key is not None:
+                with state.lock:
+                    state.tracking_decision_followup_result_keys.add(idempotency_key)
             follow_up_submitted_count += 1
         processed_count += 1
 
@@ -1709,6 +2130,14 @@ def run_live_tracking_loop(
                 tracking_candidates=tracking_candidates,
             )
 
+            _consume_tracking_decision_results_if_enabled(
+                state=state,
+                tracking_runtime=tracking_runtime,
+                frame=frame,
+                tracking_candidates=tracking_candidates,
+                now=now,
+            )
+
             tracking_agent_observation = _apply_tracking_agent_runtime_cycle(
                 state=state,
                 tracking_runtime=tracking_runtime,
@@ -1717,20 +2146,6 @@ def run_live_tracking_loop(
                 tracks=tracks,
                 tracking_candidates=tracking_candidates,
                 selected_event_reasons=selected_event_reasons,
-            )
-
-            _submit_tracking_decision_request_if_enabled(
-                state=state,
-                tracking_agent_observation=tracking_agent_observation,
-                now=now,
-            )
-
-            _consume_tracking_decision_results_if_enabled(
-                state=state,
-                tracking_runtime=tracking_runtime,
-                frame=frame,
-                tracking_candidates=tracking_candidates,
-                now=now,
             )
 
             _package_tracking_evidence_if_enabled(

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import tempfile
 import time
@@ -101,6 +102,62 @@ class _CapturingClient:
         self.chat = SimpleNamespace(completions=completions)
 
 
+class _LoopTrackingCompletions:
+    def __init__(self, *, sleep_seconds: float = 0.0, fail_on_call_number: int | None = None) -> None:
+        self.call_count = 0
+        self._sleep_seconds = sleep_seconds
+        self._fail_on_call_number = fail_on_call_number
+        self.loop_ids: list[int] = []
+        self.follow_up_markers: list[bool] = []
+        self.payload_texts: list[str] = []
+        self._active_calls = 0
+        self.max_active_calls = 0
+
+    async def create(self, **kwargs):
+        self.call_count += 1
+        self._active_calls += 1
+        self.max_active_calls = max(self.max_active_calls, self._active_calls)
+        try:
+            self.loop_ids.append(id(asyncio.get_running_loop()))
+            messages = kwargs.get("messages")
+            text_payload = ""
+            if isinstance(messages, list) and len(messages) >= 2 and isinstance(messages[1], dict):
+                content = messages[1].get("content")
+                if isinstance(content, list) and content and isinstance(content[0], dict):
+                    text = content[0].get("text")
+                    if isinstance(text, str):
+                        text_payload = text
+            self.payload_texts.append(text_payload)
+            self.follow_up_markers.append('"investigation_follow_up"' in text_payload)
+
+            if self._fail_on_call_number is not None and self.call_count == self._fail_on_call_number:
+                raise RuntimeError("synthetic_runtime_error")
+            if self._sleep_seconds > 0:
+                await asyncio.sleep(self._sleep_seconds)
+
+            class _Message:
+                content = '{"proposals":[],"uncertainty_flags":[],"supporting_evidence":[]}'
+
+            class _Choice:
+                message = _Message()
+                finish_reason = "stop"
+
+            return SimpleNamespace(choices=[_Choice()], usage=None)
+        finally:
+            self._active_calls = max(0, self._active_calls - 1)
+
+
+class _LoopTrackingClient:
+    def __init__(self, completions: _LoopTrackingCompletions) -> None:
+        self.chat = SimpleNamespace(completions=completions)
+        self.close_calls = 0
+        self.close_loop_ids: list[int] = []
+
+    async def aclose(self) -> None:
+        self.close_calls += 1
+        self.close_loop_ids.append(id(asyncio.get_running_loop()))
+
+
 def make_detection(relative_depth: float | None = None) -> DetectionCandidate:
     # Performs make detection logic.
     return DetectionCandidate(
@@ -119,6 +176,15 @@ def make_detection(relative_depth: float | None = None) -> DetectionCandidate:
         position_kind="relative_ground_estimate",
         motion_history=[],
     )
+
+
+def _wait_for_observation(runtime: AsyncVisualTrackingRuntime, timeout_seconds: float = 1.0):
+    observation = None
+    deadline = time.time() + timeout_seconds
+    while observation is None and time.time() < deadline:
+        observation = runtime.poll_latest_observation()
+        time.sleep(0.01)
+    return observation
 
 
 class TestVisualTrackingRuntime(unittest.TestCase):
@@ -979,6 +1045,291 @@ class TestVisualTrackingRuntime(unittest.TestCase):
         self.assertTrue(bool(observation.llm_correlation_id))
         self.assertIsInstance(observation.observation_id, str)
         self.assertTrue(bool(observation.observation_id))
+
+    def test_runtime_reuses_single_worker_event_loop_for_initial_and_followup_calls(self) -> None:
+        completions = _LoopTrackingCompletions()
+        client = _LoopTrackingClient(completions)
+        agent = LLMVisualTrackingAgent(client=client)
+        runtime = AsyncVisualTrackingRuntime(AgentCoordinator(), agent, min_invoke_interval_seconds=0.0)
+        detection = make_detection()
+
+        started_first = runtime.submit_if_needed(
+            now=time.time(),
+            frame_reference=None,
+            detections=[detection],
+            event_reasons=["possible_id_switch"],
+        )
+        self.assertTrue(started_first)
+        first_observation = _wait_for_observation(runtime)
+        self.assertIsNotNone(first_observation)
+
+        started_second = runtime.submit_if_needed(
+            now=time.time(),
+            frame_reference=None,
+            detections=[detection],
+            event_reasons=["possible_id_switch"],
+            follow_up_context={
+                "investigation_id": "inv-runtime-loop",
+                "request_id": "req-runtime-loop",
+            },
+        )
+        self.assertTrue(started_second)
+        second_observation = _wait_for_observation(runtime)
+        runtime.shutdown()
+
+        self.assertIsNotNone(second_observation)
+        self.assertEqual(completions.call_count, 2)
+        self.assertEqual(len(completions.loop_ids), 2)
+        self.assertEqual(len(set(completions.loop_ids)), 1)
+        self.assertEqual(completions.follow_up_markers, [False, True])
+
+    def test_runtime_does_not_issue_concurrent_provider_calls(self) -> None:
+        completions = _LoopTrackingCompletions(sleep_seconds=0.05)
+        client = _LoopTrackingClient(completions)
+        agent = LLMVisualTrackingAgent(client=client)
+        runtime = AsyncVisualTrackingRuntime(AgentCoordinator(), agent, min_invoke_interval_seconds=0.0)
+        detection = make_detection()
+
+        started_first = runtime.submit_if_needed(
+            now=time.time(),
+            frame_reference=None,
+            detections=[detection],
+            event_reasons=["initial"],
+        )
+        self.assertTrue(started_first)
+
+        started_second = runtime.submit_if_needed(
+            now=time.time(),
+            frame_reference=None,
+            detections=[detection],
+            event_reasons=["second"],
+        )
+        self.assertFalse(started_second)
+        self.assertIsNotNone(_wait_for_observation(runtime))
+        runtime.shutdown()
+
+        self.assertEqual(completions.call_count, 1)
+        self.assertEqual(completions.max_active_calls, 1)
+
+    def test_runtime_surfaces_runtime_error_as_vlm_unavailable_observation(self) -> None:
+        completions = _LoopTrackingCompletions(fail_on_call_number=2)
+        client = _LoopTrackingClient(completions)
+        agent = LLMVisualTrackingAgent(client=client)
+        runtime = AsyncVisualTrackingRuntime(AgentCoordinator(), agent, min_invoke_interval_seconds=0.0)
+        detection = make_detection()
+
+        runtime.submit_if_needed(
+            now=time.time(),
+            frame_reference=None,
+            detections=[detection],
+            event_reasons=["initial"],
+        )
+        self.assertIsNotNone(_wait_for_observation(runtime))
+
+        runtime.submit_if_needed(
+            now=time.time(),
+            frame_reference=None,
+            detections=[detection],
+            event_reasons=["follow_up"],
+            follow_up_context={
+                "investigation_id": "inv-runtime-error",
+                "request_id": "req-runtime-error",
+            },
+        )
+        observation = _wait_for_observation(runtime)
+        runtime.shutdown()
+
+        self.assertIsNotNone(observation)
+        assert observation is not None
+        self.assertIn("vlm_unavailable", observation.uncertainties)
+
+    def test_runtime_shutdown_closes_cached_client_on_worker_loop(self) -> None:
+        completions = _LoopTrackingCompletions()
+        client = _LoopTrackingClient(completions)
+        agent = LLMVisualTrackingAgent(client=client)
+        runtime = AsyncVisualTrackingRuntime(AgentCoordinator(), agent, min_invoke_interval_seconds=0.0)
+        detection = make_detection()
+
+        runtime.submit_if_needed(
+            now=time.time(),
+            frame_reference=None,
+            detections=[detection],
+            event_reasons=["initial"],
+        )
+        self.assertIsNotNone(_wait_for_observation(runtime))
+        runtime.shutdown()
+
+        self.assertEqual(client.close_calls, 1)
+        self.assertEqual(len(client.close_loop_ids), 1)
+        self.assertEqual(len(completions.loop_ids), 1)
+        self.assertEqual(client.close_loop_ids[0], completions.loop_ids[0])
+        self.assertIsNone(agent._client)
+
+    def test_runtime_does_not_submit_after_shutdown(self) -> None:
+        completions = _LoopTrackingCompletions()
+        client = _LoopTrackingClient(completions)
+        agent = LLMVisualTrackingAgent(client=client)
+        runtime = AsyncVisualTrackingRuntime(AgentCoordinator(), agent, min_invoke_interval_seconds=0.0)
+        detection = make_detection()
+
+        runtime.shutdown()
+        started = runtime.submit_if_needed(
+            now=time.time(),
+            frame_reference=None,
+            detections=[detection],
+            event_reasons=["should_not_run"],
+        )
+
+        self.assertFalse(started)
+        self.assertEqual(completions.call_count, 0)
+
+    def test_second_provider_payload_contains_trusted_mcp_follow_up_context(self) -> None:
+        completions = _LoopTrackingCompletions()
+        client = _LoopTrackingClient(completions)
+        agent = LLMVisualTrackingAgent(client=client)
+        runtime = AsyncVisualTrackingRuntime(AgentCoordinator(), agent, min_invoke_interval_seconds=0.0)
+        detection = make_detection()
+
+        first_started = runtime.submit_if_needed(
+            now=time.time(),
+            frame_reference=None,
+            detections=[detection],
+            event_reasons=["initial"],
+        )
+        self.assertTrue(first_started)
+        self.assertIsNotNone(_wait_for_observation(runtime))
+
+        follow_up_context = {
+            "investigation_id": "inv-synth-followup-1",
+            "request_id": "req-synth-followup-1",
+            "idempotency_key": "inv-synth-followup-1:req-synth-followup-1:get_track_evidence_history",
+            "result_status": "ok",
+            "tool_name": "get_track_evidence_history",
+            "correlation_id": "corr-synth-followup-1",
+            "initial_decision": {
+                "action": "request_additional_tracking_evidence",
+                "investigation_id": "inv-synth-followup-1",
+            },
+            "evidence_references": {
+                "frame_reference": "evidence://frame/f-1",
+                "detection_reference": "evidence://detection/d-1",
+            },
+            "mcp_result": {
+                "available": True,
+                "state": "no_recorded_observation",
+                "track_id": "track-1",
+                "messages": [],
+            },
+        }
+
+        second_started = runtime.submit_if_needed(
+            now=time.time(),
+            frame_reference=None,
+            detections=[detection],
+            event_reasons=["tracking_decision_follow_up"],
+            follow_up_context=follow_up_context,
+        )
+        self.assertTrue(second_started)
+        self.assertIsNotNone(_wait_for_observation(runtime))
+        runtime.shutdown()
+
+        self.assertEqual(completions.call_count, 2)
+        self.assertEqual(completions.follow_up_markers, [False, True])
+        second_payload_text = completions.payload_texts[1]
+        self.assertIn('"investigation_follow_up"', second_payload_text)
+        self.assertIn('"investigation_id": "inv-synth-followup-1"', second_payload_text)
+        self.assertIn('"request_id": "req-synth-followup-1"', second_payload_text)
+        self.assertIn('"correlation_id": "corr-synth-followup-1"', second_payload_text)
+        self.assertIn('"mcp_result"', second_payload_text)
+        self.assertIn('"tool_name": "get_track_evidence_history"', second_payload_text)
+
+    def test_runtime_emits_observation_published_diagnostic_with_runtime_markers(self) -> None:
+        completions = _LoopTrackingCompletions()
+        client = _LoopTrackingClient(completions)
+        agent = LLMVisualTrackingAgent(client=client)
+        runtime = AsyncVisualTrackingRuntime(AgentCoordinator(), agent, min_invoke_interval_seconds=0.0)
+        detection = make_detection()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            diagnostics_path = Path(temp_dir) / "tracking_vlm_attempt_diagnostics.jsonl"
+            with patch.dict(
+                os.environ,
+                {
+                    "TRACKING_VLM_ATTEMPT_DIAGNOSTICS_PATH": str(diagnostics_path),
+                    "PROVIDER_CALL_BUDGET_ENABLED": "0",
+                    "TRACKING_IDENTITY_EVIDENCE_ENABLED": "0",
+                },
+                clear=False,
+            ):
+                started = runtime.submit_if_needed(
+                    now=time.time(),
+                    frame_reference=None,
+                    detections=[detection],
+                    event_reasons=["initial"],
+                )
+                self.assertTrue(started)
+                self.assertIsNotNone(_wait_for_observation(runtime))
+                runtime.shutdown()
+
+            records = [
+                json.loads(line)
+                for line in diagnostics_path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+
+        observation_records = [
+            record
+            for record in records
+            if record.get("event_type") == "tracking_vlm_observation_published"
+        ]
+        attempt_records = [
+            record
+            for record in records
+            if record.get("event_type") == "tracking_vlm_attempt_completed"
+        ]
+        self.assertTrue(attempt_records)
+        self.assertTrue(observation_records)
+        attempt_record = attempt_records[-1]
+        observation_record = observation_records[-1]
+
+        self.assertEqual(observation_record.get("attempt_id"), attempt_record.get("attempt_id"))
+        self.assertEqual(observation_record.get("llm_correlation_id"), attempt_record.get("llm_correlation_id"))
+
+        attempt_timing = attempt_record.get("timing_markers")
+        self.assertIsInstance(attempt_timing, dict)
+        assert isinstance(attempt_timing, dict)
+
+        timing_markers = observation_records[-1].get("timing_markers")
+        self.assertIsInstance(timing_markers, dict)
+        assert isinstance(timing_markers, dict)
+        runtime_candidate_submitted_at = timing_markers.get("runtime_candidate_submitted_at")
+        runtime_worker_started_at = timing_markers.get("runtime_worker_started_at")
+        provider_request_started_at = timing_markers.get("provider_request_started_at")
+        provider_response_completed_at = timing_markers.get("provider_response_completed_at")
+        observation_published_at = timing_markers.get("observation_published_at")
+
+        self.assertIsInstance(runtime_candidate_submitted_at, float)
+        self.assertIsInstance(runtime_worker_started_at, float)
+        self.assertIsInstance(provider_request_started_at, float)
+        self.assertIsInstance(provider_response_completed_at, float)
+        self.assertIsInstance(observation_published_at, float)
+        self.assertIsNone(timing_markers.get("provider_timeout_at"))
+
+        assert isinstance(runtime_candidate_submitted_at, float)
+        assert isinstance(runtime_worker_started_at, float)
+        assert isinstance(provider_request_started_at, float)
+        assert isinstance(provider_response_completed_at, float)
+        assert isinstance(observation_published_at, float)
+        self.assertLessEqual(runtime_candidate_submitted_at, runtime_worker_started_at)
+        self.assertLessEqual(runtime_worker_started_at, provider_request_started_at)
+        self.assertLessEqual(provider_request_started_at, provider_response_completed_at)
+        self.assertLessEqual(provider_response_completed_at, observation_published_at)
+
+        self.assertEqual(timing_markers.get("provider_request_started_at"), attempt_timing.get("provider_request_started_at"))
+        self.assertEqual(
+            timing_markers.get("provider_response_completed_at"),
+            attempt_timing.get("provider_response_completed_at"),
+        )
 
 
 if __name__ == "__main__":

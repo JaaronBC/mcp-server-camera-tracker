@@ -536,6 +536,76 @@ def _sanitize_validation_error_codes(error_codes: list[str] | None) -> list[str]
     return output
 
 
+def _coerce_timestamp(value: Any) -> float | None:
+    if not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def _sanitize_timing_markers(payload: dict[str, Any] | None) -> dict[str, float | None] | None:
+    if not isinstance(payload, dict):
+        return None
+
+    output: dict[str, float | None] = {}
+    for key in (
+        "runtime_candidate_submitted_at",
+        "runtime_worker_started_at",
+        "provider_request_started_at",
+        "provider_response_completed_at",
+        "provider_timeout_at",
+        "provider_error_at",
+        "observation_published_at",
+    ):
+        output[key] = _coerce_timestamp(payload.get(key))
+
+    if any(value is not None for value in output.values()):
+        return output
+    return None
+
+
+def _sanitize_request_metadata(payload: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+
+    output: dict[str, Any] = {}
+    model_identifier = payload.get("model_identifier")
+    if isinstance(model_identifier, str) and model_identifier.strip():
+        output["model_identifier"] = model_identifier.strip()
+
+    for key in (
+        "image_count",
+        "detection_count",
+        "output_token_limit",
+        "request_size_estimate_bytes",
+    ):
+        value = payload.get(key)
+        if isinstance(value, int):
+            output[key] = value
+
+    configured_timeout_seconds = payload.get("configured_timeout_seconds")
+    if isinstance(configured_timeout_seconds, (int, float)):
+        output["configured_timeout_seconds"] = float(configured_timeout_seconds)
+
+    for key in (
+        "follow_up_mcp_result_present",
+        "follow_up_evidence_refs_present",
+    ):
+        value = payload.get(key)
+        if isinstance(value, bool):
+            output[key] = value
+
+    for key in (
+        "follow_up_investigation_id",
+        "follow_up_request_id",
+        "follow_up_result_status",
+    ):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            output[key] = value.strip()
+
+    return output if output else None
+
+
 def _emit_tracking_vlm_attempt_diagnostic(
     *,
     attempt_id: str | None,
@@ -554,6 +624,8 @@ def _emit_tracking_vlm_attempt_diagnostic(
     decision_validation_error_codes: list[str] | None = None,
     runtime_exception_class: str | None = None,
     runtime_exception_category: str | None = None,
+    timing_markers: dict[str, Any] | None = None,
+    request_metadata: dict[str, Any] | None = None,
 ) -> None:
     identity_metrics = _collect_identity_diagnostic_details(
         raw_proposals=raw_proposals,
@@ -586,6 +658,30 @@ def _emit_tracking_vlm_attempt_diagnostic(
         "usable_identity_proposal_count": identity_metrics["usable_identity_proposal_count"],
         "rejected_identity_candidate_count": identity_metrics["rejected_identity_candidate_count"],
         "rejection_reasons": identity_metrics["rejection_reasons"],
+        "timing_markers": _sanitize_timing_markers(timing_markers),
+        "request_metadata": _sanitize_request_metadata(request_metadata),
+    }
+    try:
+        _append_tracking_vlm_attempt_diagnostic_record(payload)
+    except Exception:
+        return
+
+
+def _emit_tracking_vlm_observation_timing_diagnostic(
+    *,
+    attempt_id: str | None,
+    llm_correlation_id: str | None,
+    timing_markers: dict[str, Any] | None,
+    request_metadata: dict[str, Any] | None,
+) -> None:
+    payload: dict[str, object] = {
+        "schema_version": "1.0",
+        "event_type": "tracking_vlm_observation_published",
+        "timestamp": time.time(),
+        "attempt_id": attempt_id,
+        "llm_correlation_id": llm_correlation_id,
+        "timing_markers": _sanitize_timing_markers(timing_markers),
+        "request_metadata": _sanitize_request_metadata(request_metadata),
     }
     try:
         _append_tracking_vlm_attempt_diagnostic_record(payload)
@@ -603,6 +699,9 @@ class VisualTrackingAgentResult:
     error: str | None = None
     llm_correlation_id: str | None = None
     decision: dict[str, Any] | None = None
+    attempt_id: str | None = None
+    timing_markers: dict[str, float | None] | None = None
+    request_metadata: dict[str, Any] | None = None
 
 
 class VisualTrackingAgentProtocol(Protocol):
@@ -614,6 +713,7 @@ class VisualTrackingAgentProtocol(Protocol):
         detections: list[DetectionCandidate],
         event_reasons: list[str] | None = None,
         follow_up_context: dict[str, Any] | None = None,
+        runtime_timing: dict[str, Any] | None = None,
         request_timeout_seconds: float = 2.0,
     # Implements propose associations behavior for this module.
     ) -> VisualTrackingAgentResult: ...
@@ -646,6 +746,7 @@ class LLMVisualTrackingAgent:
         detections: list[DetectionCandidate],
         event_reasons: list[str] | None = None,
         follow_up_context: dict[str, Any] | None = None,
+        runtime_timing: dict[str, Any] | None = None,
         request_timeout_seconds: float = 2.0,
     ) -> VisualTrackingAgentResult:
         # Implements propose associations behavior for this module.
@@ -749,6 +850,53 @@ class LLMVisualTrackingAgent:
         if frame_reference:
             user_content.append({"type": "image_url", "image_url": {"url": frame_reference}})
 
+        max_output_tokens = _resolve_tracking_max_output_tokens()
+        request_size_estimate_bytes = (
+            len(self._system_prompt.encode("utf-8"))
+            + len(json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+            + (len(frame_reference.encode("utf-8")) if isinstance(frame_reference, str) else 0)
+        )
+        request_metadata = {
+            "model_identifier": self.model,
+            "image_count": 1 if isinstance(frame_reference, str) and frame_reference else 0,
+            "detection_count": len(detections),
+            "configured_timeout_seconds": float(request_timeout_seconds),
+            "output_token_limit": max_output_tokens,
+            "request_size_estimate_bytes": request_size_estimate_bytes,
+        }
+        if isinstance(follow_up_context, dict):
+            follow_up_investigation_id = _nonempty_str(follow_up_context.get("investigation_id"))
+            if follow_up_investigation_id is not None:
+                request_metadata["follow_up_investigation_id"] = follow_up_investigation_id
+            follow_up_request_id = _nonempty_str(follow_up_context.get("request_id"))
+            if follow_up_request_id is not None:
+                request_metadata["follow_up_request_id"] = follow_up_request_id
+            follow_up_result_status = _nonempty_str(follow_up_context.get("result_status"))
+            if follow_up_result_status is not None:
+                request_metadata["follow_up_result_status"] = follow_up_result_status
+            request_metadata["follow_up_mcp_result_present"] = isinstance(follow_up_context.get("mcp_result"), dict)
+            request_metadata["follow_up_evidence_refs_present"] = isinstance(
+                follow_up_context.get("evidence_references"),
+                dict,
+            )
+        timing_markers: dict[str, float | None] = {
+            "runtime_candidate_submitted_at": _coerce_timestamp(
+                runtime_timing.get("runtime_candidate_submitted_at")
+                if isinstance(runtime_timing, dict)
+                else None
+            ),
+            "runtime_worker_started_at": _coerce_timestamp(
+                runtime_timing.get("runtime_worker_started_at")
+                if isinstance(runtime_timing, dict)
+                else None
+            ),
+            "provider_request_started_at": None,
+            "provider_response_completed_at": None,
+            "provider_timeout_at": None,
+            "provider_error_at": None,
+            "observation_published_at": None,
+        }
+
         try:
             reservation = provider_call_budget.reserve_or_raise(provider_call_budget.ROLE_TRACKING_VLM)
         except provider_call_budget.ProviderCallBudgetExceeded:
@@ -779,7 +927,6 @@ class LLMVisualTrackingAgent:
             frame_reference_present=bool(frame_reference),
         )
         try:
-            max_output_tokens = _resolve_tracking_max_output_tokens()
             request_kwargs: dict[str, object] = {
                 "model": self.model,
                 "messages": [
@@ -792,10 +939,12 @@ class LLMVisualTrackingAgent:
             }
             if max_output_tokens is not None:
                 request_kwargs["max_tokens"] = max_output_tokens
+            timing_markers["provider_request_started_at"] = time.time()
             response = await asyncio.wait_for(
                 self._client.chat.completions.create(**request_kwargs),
                 timeout=request_timeout_seconds,
             )
+            timing_markers["provider_response_completed_at"] = time.time()
             usage_payload = llm_call.extract_usage_dict(response)
             provider_call_budget.finalize_provider_call_attempt(
                 reservation,
@@ -819,6 +968,7 @@ class LLMVisualTrackingAgent:
                 usage=usage_payload,
             )
         except asyncio.TimeoutError:
+            timing_markers["provider_timeout_at"] = time.time()
             provider_call_budget.finalize_provider_call_attempt(
                 reservation,
                 outcome="error",
@@ -854,6 +1004,8 @@ class LLMVisualTrackingAgent:
                 usage=None,
                 raw_proposals=None,
                 normalized_proposals=None,
+                timing_markers=timing_markers,
+                request_metadata=request_metadata,
             )
             return VisualTrackingAgentResult(
                 available=False,
@@ -863,8 +1015,12 @@ class LLMVisualTrackingAgent:
                 latency_ms=(time.perf_counter() - started) * 1000.0,
                 error="vlm_timeout",
                 llm_correlation_id=request_correlation_id,
+                attempt_id=attempt_id,
+                timing_markers=dict(timing_markers),
+                request_metadata=dict(request_metadata),
             )
         except Exception as error:
+            timing_markers["provider_error_at"] = time.time()
             provider_call_budget.finalize_provider_call_attempt(
                 reservation,
                 outcome="error",
@@ -907,6 +1063,8 @@ class LLMVisualTrackingAgent:
                 normalized_proposals=None,
                 runtime_exception_class=_sanitize_runtime_exception_class_name(error),
                 runtime_exception_category=_classify_runtime_exception_category(error),
+                timing_markers=timing_markers,
+                request_metadata=request_metadata,
             )
             return VisualTrackingAgentResult(
                 available=False,
@@ -916,6 +1074,9 @@ class LLMVisualTrackingAgent:
                 latency_ms=(time.perf_counter() - started) * 1000.0,
                 error="vlm_unavailable",
                 llm_correlation_id=request_correlation_id,
+                attempt_id=attempt_id,
+                timing_markers=dict(timing_markers),
+                request_metadata=dict(request_metadata),
             )
 
         latency_ms = (time.perf_counter() - started) * 1000.0
@@ -936,6 +1097,8 @@ class LLMVisualTrackingAgent:
                 usage=usage_payload,
                 raw_proposals=None,
                 normalized_proposals=None,
+                timing_markers=timing_markers,
+                request_metadata=request_metadata,
             )
             return VisualTrackingAgentResult(
                 available=False,
@@ -945,6 +1108,9 @@ class LLMVisualTrackingAgent:
                 latency_ms=latency_ms,
                 error="vlm_empty_response",
                 llm_correlation_id=request_correlation_id,
+                attempt_id=attempt_id,
+                timing_markers=dict(timing_markers),
+                request_metadata=dict(request_metadata),
             )
 
         content = response.choices[0].message.content or ""
@@ -963,6 +1129,8 @@ class LLMVisualTrackingAgent:
                 usage=usage_payload,
                 raw_proposals=None,
                 normalized_proposals=None,
+                timing_markers=timing_markers,
+                request_metadata=request_metadata,
             )
             return VisualTrackingAgentResult(
                 available=False,
@@ -972,6 +1140,9 @@ class LLMVisualTrackingAgent:
                 latency_ms=latency_ms,
                 error="vlm_output_truncated",
                 llm_correlation_id=request_correlation_id,
+                attempt_id=attempt_id,
+                timing_markers=dict(timing_markers),
+                request_metadata=dict(request_metadata),
             )
         parsed = _extract_json_object(content)
         if parsed is None:
@@ -989,6 +1160,8 @@ class LLMVisualTrackingAgent:
                 usage=usage_payload,
                 raw_proposals=None,
                 normalized_proposals=None,
+                timing_markers=timing_markers,
+                request_metadata=request_metadata,
             )
             return VisualTrackingAgentResult(
                 available=False,
@@ -998,6 +1171,9 @@ class LLMVisualTrackingAgent:
                 latency_ms=latency_ms,
                 error="vlm_invalid_json_response",
                 llm_correlation_id=request_correlation_id,
+                attempt_id=attempt_id,
+                timing_markers=dict(timing_markers),
+                request_metadata=dict(request_metadata),
             )
 
         if _tracking_compact_decision_mode_enabled():
@@ -1041,6 +1217,8 @@ class LLMVisualTrackingAgent:
                 raw_proposals=raw_proposals,
                 normalized_proposals=None,
                 decision_validation_error_codes=decision_errors,
+                timing_markers=timing_markers,
+                request_metadata=request_metadata,
             )
             return VisualTrackingAgentResult(
                 available=False,
@@ -1051,6 +1229,9 @@ class LLMVisualTrackingAgent:
                 error="vlm_invalid_decision_contract",
                 llm_correlation_id=request_correlation_id,
                 decision=None,
+                attempt_id=attempt_id,
+                timing_markers=dict(timing_markers),
+                request_metadata=dict(request_metadata),
             )
 
         if decision_payload is not None and _decision_disallows_actionable_proposals(decision_payload, raw_proposals):
@@ -1068,6 +1249,8 @@ class LLMVisualTrackingAgent:
                 usage=usage_payload,
                 raw_proposals=raw_proposals,
                 normalized_proposals=None,
+                timing_markers=timing_markers,
+                request_metadata=request_metadata,
             )
             return VisualTrackingAgentResult(
                 available=False,
@@ -1078,6 +1261,9 @@ class LLMVisualTrackingAgent:
                 error="vlm_decision_proposal_conflict",
                 llm_correlation_id=request_correlation_id,
                 decision=None,
+                attempt_id=attempt_id,
+                timing_markers=dict(timing_markers),
+                request_metadata=dict(request_metadata),
             )
 
         normalized_proposals: list[VisualAssociationProposal] = []
@@ -1154,6 +1340,8 @@ class LLMVisualTrackingAgent:
             usage=usage_payload,
             raw_proposals=raw_proposals,
             normalized_proposals=normalized_proposals,
+            timing_markers=timing_markers,
+            request_metadata=request_metadata,
         )
 
         return VisualTrackingAgentResult(
@@ -1164,7 +1352,26 @@ class LLMVisualTrackingAgent:
             latency_ms=latency_ms,
             llm_correlation_id=request_correlation_id,
             decision=decision_payload,
+            attempt_id=attempt_id,
+            timing_markers=dict(timing_markers),
+            request_metadata=dict(request_metadata),
         )
+
+    async def aclose(self) -> None:
+        client = self._client
+        self._client = None
+        if client is None:
+            return
+
+        close_method = getattr(client, "aclose", None)
+        if close_method is None:
+            close_method = getattr(client, "close", None)
+        if close_method is None or not callable(close_method):
+            return
+
+        close_result = close_method()
+        if inspect.isawaitable(close_result):
+            await close_result
 
 
 class AsyncVisualTrackingRuntime:
@@ -1183,6 +1390,8 @@ class AsyncVisualTrackingRuntime:
         self._pending_future: Future | None = None
         self._last_started_at = 0.0
         self._completed_observations: deque = deque()
+        self._worker_loop: asyncio.AbstractEventLoop | None = None
+        self._shutdown_started = False
 
     def _consume_completed_future_locked(self) -> None:
         pending_future = self._pending_future
@@ -1209,6 +1418,8 @@ class AsyncVisualTrackingRuntime:
     ) -> bool:
         # Implements submit if needed behavior for this module.
         with self._lock:
+            if self._shutdown_started:
+                return False
             self._consume_completed_future_locked()
             if self._pending_future is not None and not self._pending_future.done():
                 return False
@@ -1226,6 +1437,7 @@ class AsyncVisualTrackingRuntime:
                 event_reasons or [],
                 (dict(follow_up_context) if isinstance(follow_up_context, dict) else None),
                 request_timeout_seconds,
+                float(now),
             )
             return True
 
@@ -1260,7 +1472,24 @@ class AsyncVisualTrackingRuntime:
 
     def shutdown(self) -> None:
         # Implements shutdown behavior for this module.
-        self._executor.shutdown(wait=False, cancel_futures=True)
+        cleanup_future: Future | None = None
+        with self._lock:
+            if self._shutdown_started:
+                return
+            self._shutdown_started = True
+            pending_future = self._pending_future
+            self._pending_future = None
+            if pending_future is not None and not pending_future.done():
+                pending_future.cancel()
+            cleanup_future = self._executor.submit(self._shutdown_worker_resources)
+
+        if cleanup_future is not None:
+            try:
+                cleanup_future.result()
+            except Exception:
+                pass
+
+        self._executor.shutdown(wait=True, cancel_futures=True)
 
     def _run_once(
         self,
@@ -1271,22 +1500,32 @@ class AsyncVisualTrackingRuntime:
         event_reasons: list[str],
         follow_up_context: dict[str, Any] | None,
         request_timeout_seconds: float,
+        runtime_candidate_submitted_at: float | None,
     ):
         # Runs once workflow steps and returns status outcomes.
+        runtime_worker_started_at = time.time()
         call_kwargs: dict[str, Any] = {
             "frame_reference": frame_reference,
             "detections": detections,
             "event_reasons": event_reasons,
             "request_timeout_seconds": request_timeout_seconds,
         }
-        if isinstance(follow_up_context, dict):
-            try:
-                if "follow_up_context" in inspect.signature(self._agent.propose_associations).parameters:
-                    call_kwargs["follow_up_context"] = follow_up_context
-            except (TypeError, ValueError):
-                pass
+        try:
+            propose_signature = inspect.signature(self._agent.propose_associations)
+        except (TypeError, ValueError):
+            propose_signature = None
 
-        result = asyncio.run(self._agent.propose_associations(**call_kwargs))
+        if isinstance(follow_up_context, dict):
+            if propose_signature is not None and "follow_up_context" in propose_signature.parameters:
+                call_kwargs["follow_up_context"] = follow_up_context
+
+        if propose_signature is not None and "runtime_timing" in propose_signature.parameters:
+            call_kwargs["runtime_timing"] = {
+                "runtime_candidate_submitted_at": _coerce_timestamp(runtime_candidate_submitted_at),
+                "runtime_worker_started_at": float(runtime_worker_started_at),
+            }
+
+        result = self._run_agent_call_on_worker_loop(call_kwargs)
 
         uncertainties = list(result.uncertainty_flags)
         if not result.available and result.error is not None:
@@ -1305,7 +1544,7 @@ class AsyncVisualTrackingRuntime:
             if result_status is not None:
                 uncertainties.append(f"followup_result_status:{result_status}")
 
-        return self._coordinator.build_tracking_agent_observation(
+        observation = self._coordinator.build_tracking_agent_observation(
             detections=detections,
             proposals=result.proposals,
             timestamp=now,
@@ -1317,6 +1556,68 @@ class AsyncVisualTrackingRuntime:
             additional_uncertainties=uncertainties,
             decision=result.decision,
         )
+
+        merged_timing_markers = (
+            dict(result.timing_markers)
+            if isinstance(result.timing_markers, dict)
+            else {}
+        )
+        if merged_timing_markers.get("runtime_candidate_submitted_at") is None:
+            merged_timing_markers["runtime_candidate_submitted_at"] = _coerce_timestamp(runtime_candidate_submitted_at)
+        if merged_timing_markers.get("runtime_worker_started_at") is None:
+            merged_timing_markers["runtime_worker_started_at"] = float(runtime_worker_started_at)
+        merged_timing_markers["observation_published_at"] = time.time()
+
+        _emit_tracking_vlm_observation_timing_diagnostic(
+            attempt_id=result.attempt_id,
+            llm_correlation_id=result.llm_correlation_id,
+            timing_markers=merged_timing_markers,
+            request_metadata=(
+                dict(result.request_metadata)
+                if isinstance(result.request_metadata, dict)
+                else None
+            ),
+        )
+
+        return observation
+
+    def _get_or_create_worker_loop(self) -> asyncio.AbstractEventLoop:
+        loop = self._worker_loop
+        if loop is not None and not loop.is_closed():
+            return loop
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        self._worker_loop = loop
+        return loop
+
+    def _run_agent_call_on_worker_loop(self, call_kwargs: dict[str, Any]) -> VisualTrackingAgentResult:
+        loop = self._get_or_create_worker_loop()
+        return loop.run_until_complete(self._agent.propose_associations(**call_kwargs))
+
+    def _shutdown_worker_resources(self) -> None:
+        loop = self._worker_loop
+        if loop is None or loop.is_closed():
+            return
+
+        async def _close_agent_resources() -> None:
+            close_method = getattr(self._agent, "aclose", None)
+            if close_method is None or not callable(close_method):
+                return
+            close_result = close_method()
+            if inspect.isawaitable(close_result):
+                await close_result
+
+        try:
+            loop.run_until_complete(_close_agent_resources())
+        except Exception:
+            pass
+        finally:
+            try:
+                loop.run_until_complete(loop.shutdown_asyncgens())
+            except Exception:
+                pass
+            loop.close()
+            self._worker_loop = None
 
 
 def encode_frame_as_data_url(frame) -> str:

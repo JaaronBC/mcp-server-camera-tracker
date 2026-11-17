@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import contextlib
 import json
 import os
 import sys
@@ -36,6 +37,44 @@ def _write_jsonl(path: Path, rows: list[dict]) -> None:
     if payload:
         payload += "\n"
     path.write_text(payload, encoding="utf-8")
+
+
+def _write_budget_state(path: Path, *, tracking_attempted: int, attempted: int | None = None) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    total_attempted = attempted if isinstance(attempted, int) else tracking_attempted
+    payload = {
+        "schema_version": "1.0",
+        "updated_at": 1000.0,
+        "totals": {
+            "attempted": int(total_attempted),
+            "per_role_attempted": {
+                "tracking_vlm": int(tracking_attempted),
+                "observation_text": 0,
+                "reasoning_text": 0,
+                "observation_visual": 0,
+            },
+        },
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+class _NeverExitProcess:
+    def __init__(self, pid: int = 43210) -> None:
+        self.pid = pid
+        self.returncode = None
+
+    def poll(self) -> int | None:
+        return None
+
+    def wait(self, timeout: float | None = None) -> int:
+        self.returncode = 0
+        return 0
+
+    def terminate(self) -> None:
+        self.returncode = 0
+
+    def kill(self) -> None:
+        self.returncode = 0
 
 
 class TestTrackingOnlyHarnessControls(unittest.TestCase):
@@ -95,6 +134,10 @@ class TestTrackingOnlyHarnessControls(unittest.TestCase):
 
             self.assertEqual(env["PHASE2D_TRACKING_DECISION_TOOL_REQUESTS_PATH"], str(paths.tracking_decision_tool_requests))
             self.assertEqual(env["PHASE2D_TRACKING_DECISION_TOOL_RESULTS_PATH"], str(paths.tracking_decision_tool_results))
+            self.assertEqual(
+                env["PHASE2D_TRACKING_TERMINAL_FOLLOW_UP_DECISIONS_PATH"],
+                str(paths.tracking_terminal_follow_up_decisions),
+            )
             self.assertEqual(env["PHASE2D_TRACKING_DECISION_REQUEST_INDEX_PATH"], str(paths.tracking_decision_request_index))
             self.assertEqual(env["PHASE2D_TRACKING_DECISION_RESULT_INDEX_PATH"], str(paths.tracking_decision_result_index))
             self.assertEqual(env["PHASE2D_TRACKING_DECISION_IPC_ENABLED"], "1")
@@ -494,6 +537,545 @@ class TestTrackingOnlyHarnessControls(unittest.TestCase):
             summary = module._summarize_provider_events(paths.budget_log)
             self.assertEqual(summary["attempts"], 1)
 
+    def test_diagnostic_timeline_classifies_initial_followup_and_unrelated_attempts(self) -> None:
+        module = _load_harness({})
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = module._build_paths(Path(temp_dir))
+
+            _write_jsonl(
+                paths.budget_log,
+                [
+                    {
+                        "event_type": "provider_call_attempt",
+                        "role": "tracking_vlm",
+                        "attempt_id": "attempt-1",
+                        "outcome": "ok",
+                        "reserved_at": 10.0,
+                        "timestamp": 12.0,
+                    },
+                    {
+                        "event_type": "provider_call_attempt",
+                        "role": "tracking_vlm",
+                        "attempt_id": "attempt-2",
+                        "outcome": "ok",
+                        "reserved_at": 20.0,
+                        "timestamp": 22.0,
+                    },
+                    {
+                        "event_type": "provider_call_attempt",
+                        "role": "tracking_vlm",
+                        "attempt_id": "attempt-3",
+                        "outcome": "ok",
+                        "reserved_at": 30.0,
+                        "timestamp": 32.0,
+                    },
+                ],
+            )
+
+            _write_jsonl(
+                paths.tracking_vlm_attempt_diagnostics,
+                [
+                    {
+                        "event_type": "tracking_vlm_attempt_completed",
+                        "attempt_id": "attempt-1",
+                        "llm_correlation_id": "corr-1",
+                        "request_metadata": {
+                            "model_identifier": "qwen",
+                        },
+                        "timing_markers": {
+                            "provider_request_started_at": 11.0,
+                            "provider_response_completed_at": 11.5,
+                        },
+                    },
+                    {
+                        "event_type": "tracking_vlm_observation_published",
+                        "attempt_id": "attempt-1",
+                        "llm_correlation_id": "corr-1",
+                        "timing_markers": {
+                            "observation_published_at": 11.8,
+                        },
+                    },
+                    {
+                        "event_type": "tracking_vlm_attempt_completed",
+                        "attempt_id": "attempt-2",
+                        "llm_correlation_id": "corr-2",
+                        "request_metadata": {
+                            "follow_up_investigation_id": "inv-1",
+                            "follow_up_request_id": "req-1",
+                            "follow_up_result_status": "ok",
+                            "follow_up_mcp_result_present": True,
+                            "follow_up_evidence_refs_present": True,
+                        },
+                        "timing_markers": {
+                            "provider_request_started_at": 21.0,
+                            "provider_response_completed_at": 21.2,
+                        },
+                    },
+                    {
+                        "event_type": "tracking_vlm_observation_published",
+                        "attempt_id": "attempt-2",
+                        "llm_correlation_id": "corr-2",
+                        "timing_markers": {
+                            "observation_published_at": 21.4,
+                        },
+                    },
+                    {
+                        "event_type": "tracking_vlm_attempt_completed",
+                        "attempt_id": "attempt-3",
+                        "llm_correlation_id": "corr-3",
+                        "request_metadata": {
+                            "follow_up_investigation_id": "inv-x",
+                            "follow_up_request_id": "req-x",
+                            "follow_up_result_status": "ok",
+                            "follow_up_mcp_result_present": False,
+                            "follow_up_evidence_refs_present": False,
+                        },
+                        "timing_markers": {
+                            "provider_request_started_at": 31.0,
+                            "provider_timeout_at": 31.3,
+                        },
+                    },
+                ],
+            )
+
+            _write_jsonl(
+                paths.tracking_decision_tool_requests,
+                [
+                    {
+                        "event_type": "decision_tool_request",
+                        "created_at": 20.5,
+                        "investigation_id": "inv-1",
+                        "request_id": "req-1",
+                        "tool_name": "get_track_evidence_history",
+                    }
+                ],
+            )
+            _write_jsonl(
+                paths.tracking_decision_tool_results,
+                [
+                    {
+                        "event_type": "decision_tool_result",
+                        "finished_at": 20.8,
+                        "investigation_id": "inv-1",
+                        "request_id": "req-1",
+                        "status": "ok",
+                    }
+                ],
+            )
+
+            decision_artifacts = module._collect_decision_artifacts(paths)
+            timeline = module._build_tracking_diagnostic_timeline(paths, decision_artifacts, "inv-1")
+
+            counts = timeline["classification_counts"]
+            self.assertEqual(counts["initial_provider_call"], 1)
+            self.assertEqual(counts["correlated_follow_up"], 1)
+            self.assertEqual(counts["unrelated_or_prematurely_queued"], 1)
+            self.assertEqual(counts["cannot_classify_from_available_evidence"], 0)
+
+            stages = [entry.get("stage") for entry in timeline["timeline"]]
+            self.assertIn("provider_reservation", stages)
+            self.assertIn("provider_sdk_request_started", stages)
+            self.assertIn("provider_response_completed", stages)
+            self.assertIn("provider_timeout", stages)
+            self.assertIn("observation_published", stages)
+            self.assertIn("mcp_request_created", stages)
+            self.assertIn("mcp_result_completed", stages)
+
+    def test_diagnostic_timeline_follow_up_wrong_investigation_id_is_unrelated(self) -> None:
+        module = _load_harness({})
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = module._build_paths(Path(temp_dir))
+            _write_jsonl(
+                paths.budget_log,
+                [
+                    {
+                        "event_type": "provider_call_attempt",
+                        "role": "tracking_vlm",
+                        "attempt_id": "attempt-wrong-investigation",
+                        "outcome": "ok",
+                    }
+                ],
+            )
+            _write_jsonl(
+                paths.tracking_vlm_attempt_diagnostics,
+                [
+                    {
+                        "event_type": "tracking_vlm_attempt_completed",
+                        "attempt_id": "attempt-wrong-investigation",
+                        "llm_correlation_id": "corr-wrong-investigation",
+                        "request_metadata": {
+                            "follow_up_investigation_id": "inv-other",
+                            "follow_up_request_id": "req-1",
+                            "follow_up_result_status": "ok",
+                            "follow_up_mcp_result_present": True,
+                            "follow_up_evidence_refs_present": True,
+                        },
+                        "timing_markers": {
+                            "provider_request_started_at": 30.0,
+                        },
+                    }
+                ],
+            )
+            _write_jsonl(
+                paths.tracking_decision_tool_requests,
+                [{"investigation_id": "inv-1", "request_id": "req-1", "created_at": 20.0}],
+            )
+            _write_jsonl(
+                paths.tracking_decision_tool_results,
+                [{"investigation_id": "inv-1", "request_id": "req-1", "status": "ok", "finished_at": 21.0}],
+            )
+
+            timeline = module._build_tracking_diagnostic_timeline(paths, {"investigation_ids": ["inv-1"]}, "inv-1")
+            self.assertEqual(timeline["classification_counts"]["correlated_follow_up"], 0)
+            self.assertEqual(timeline["classification_counts"]["unrelated_or_prematurely_queued"], 1)
+
+    def test_diagnostic_timeline_follow_up_wrong_request_id_is_unclassifiable(self) -> None:
+        module = _load_harness({})
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = module._build_paths(Path(temp_dir))
+            _write_jsonl(
+                paths.budget_log,
+                [
+                    {
+                        "event_type": "provider_call_attempt",
+                        "role": "tracking_vlm",
+                        "attempt_id": "attempt-wrong-request",
+                        "outcome": "ok",
+                    }
+                ],
+            )
+            _write_jsonl(
+                paths.tracking_vlm_attempt_diagnostics,
+                [
+                    {
+                        "event_type": "tracking_vlm_attempt_completed",
+                        "attempt_id": "attempt-wrong-request",
+                        "request_metadata": {
+                            "follow_up_investigation_id": "inv-1",
+                            "follow_up_request_id": "req-missing",
+                            "follow_up_result_status": "ok",
+                            "follow_up_mcp_result_present": True,
+                            "follow_up_evidence_refs_present": True,
+                        },
+                        "timing_markers": {"provider_request_started_at": 50.0},
+                    }
+                ],
+            )
+            _write_jsonl(
+                paths.tracking_decision_tool_requests,
+                [{"investigation_id": "inv-1", "request_id": "req-1", "created_at": 20.0}],
+            )
+            _write_jsonl(
+                paths.tracking_decision_tool_results,
+                [{"investigation_id": "inv-1", "request_id": "req-1", "status": "ok", "finished_at": 21.0}],
+            )
+
+            timeline = module._build_tracking_diagnostic_timeline(paths, {"investigation_ids": ["inv-1"]}, "inv-1")
+            self.assertEqual(timeline["classification_counts"]["correlated_follow_up"], 0)
+            self.assertEqual(timeline["classification_counts"]["cannot_classify_from_available_evidence"], 1)
+
+    def test_diagnostic_timeline_follow_up_missing_or_failed_result_not_correlated(self) -> None:
+        module = _load_harness({})
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = module._build_paths(Path(temp_dir))
+
+            _write_jsonl(
+                paths.budget_log,
+                [
+                    {
+                        "event_type": "provider_call_attempt",
+                        "role": "tracking_vlm",
+                        "attempt_id": "attempt-missing-result",
+                        "outcome": "ok",
+                    },
+                    {
+                        "event_type": "provider_call_attempt",
+                        "role": "tracking_vlm",
+                        "attempt_id": "attempt-failed-result",
+                        "outcome": "ok",
+                    },
+                ],
+            )
+
+            _write_jsonl(
+                paths.tracking_vlm_attempt_diagnostics,
+                [
+                    {
+                        "event_type": "tracking_vlm_attempt_completed",
+                        "attempt_id": "attempt-missing-result",
+                        "request_metadata": {
+                            "follow_up_investigation_id": "inv-1",
+                            "follow_up_request_id": "req-missing-result",
+                            "follow_up_result_status": "ok",
+                            "follow_up_mcp_result_present": True,
+                            "follow_up_evidence_refs_present": True,
+                        },
+                        "timing_markers": {"provider_request_started_at": 40.0},
+                    },
+                    {
+                        "event_type": "tracking_vlm_attempt_completed",
+                        "attempt_id": "attempt-failed-result",
+                        "request_metadata": {
+                            "follow_up_investigation_id": "inv-1",
+                            "follow_up_request_id": "req-failed-result",
+                            "follow_up_result_status": "error",
+                            "follow_up_mcp_result_present": True,
+                            "follow_up_evidence_refs_present": True,
+                        },
+                        "timing_markers": {"provider_request_started_at": 60.0},
+                    },
+                ],
+            )
+
+            _write_jsonl(
+                paths.tracking_decision_tool_requests,
+                [
+                    {"investigation_id": "inv-1", "request_id": "req-missing-result", "created_at": 25.0},
+                    {"investigation_id": "inv-1", "request_id": "req-failed-result", "created_at": 26.0},
+                ],
+            )
+            _write_jsonl(
+                paths.tracking_decision_tool_results,
+                [
+                    {"investigation_id": "inv-1", "request_id": "req-failed-result", "status": "failed", "finished_at": 27.0},
+                ],
+            )
+
+            timeline = module._build_tracking_diagnostic_timeline(paths, {"investigation_ids": ["inv-1"]}, "inv-1")
+            self.assertEqual(timeline["classification_counts"]["correlated_follow_up"], 0)
+            self.assertEqual(timeline["classification_counts"]["cannot_classify_from_available_evidence"], 1)
+            self.assertEqual(timeline["classification_counts"]["unrelated_or_prematurely_queued"], 1)
+
+    def test_diagnostic_timeline_follow_up_provider_started_before_result_is_unrelated(self) -> None:
+        module = _load_harness({})
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = module._build_paths(Path(temp_dir))
+            _write_jsonl(
+                paths.budget_log,
+                [
+                    {
+                        "event_type": "provider_call_attempt",
+                        "role": "tracking_vlm",
+                        "attempt_id": "attempt-too-early",
+                        "outcome": "ok",
+                    }
+                ],
+            )
+            _write_jsonl(
+                paths.tracking_vlm_attempt_diagnostics,
+                [
+                    {
+                        "event_type": "tracking_vlm_attempt_completed",
+                        "attempt_id": "attempt-too-early",
+                        "request_metadata": {
+                            "follow_up_investigation_id": "inv-1",
+                            "follow_up_request_id": "req-1",
+                            "follow_up_result_status": "ok",
+                            "follow_up_mcp_result_present": True,
+                            "follow_up_evidence_refs_present": True,
+                        },
+                        "timing_markers": {"provider_request_started_at": 19.0},
+                    }
+                ],
+            )
+            _write_jsonl(
+                paths.tracking_decision_tool_requests,
+                [{"investigation_id": "inv-1", "request_id": "req-1", "created_at": 20.0}],
+            )
+            _write_jsonl(
+                paths.tracking_decision_tool_results,
+                [{"investigation_id": "inv-1", "request_id": "req-1", "status": "ok", "finished_at": 21.0}],
+            )
+
+            timeline = module._build_tracking_diagnostic_timeline(paths, {"investigation_ids": ["inv-1"]}, "inv-1")
+            self.assertEqual(timeline["classification_counts"]["correlated_follow_up"], 0)
+            self.assertEqual(timeline["classification_counts"]["unrelated_or_prematurely_queued"], 1)
+
+    def test_diagnostic_timeline_follow_up_partial_timestamps_is_unclassifiable(self) -> None:
+        module = _load_harness({})
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = module._build_paths(Path(temp_dir))
+            _write_jsonl(
+                paths.budget_log,
+                [
+                    {
+                        "event_type": "provider_call_attempt",
+                        "role": "tracking_vlm",
+                        "attempt_id": "attempt-missing-time",
+                        "outcome": "ok",
+                    }
+                ],
+            )
+            _write_jsonl(
+                paths.tracking_vlm_attempt_diagnostics,
+                [
+                    {
+                        "event_type": "tracking_vlm_attempt_completed",
+                        "attempt_id": "attempt-missing-time",
+                        "request_metadata": {
+                            "follow_up_investigation_id": "inv-1",
+                            "follow_up_request_id": "req-1",
+                            "follow_up_result_status": "ok",
+                            "follow_up_mcp_result_present": True,
+                            "follow_up_evidence_refs_present": True,
+                        },
+                        "timing_markers": {},
+                    }
+                ],
+            )
+            _write_jsonl(
+                paths.tracking_decision_tool_requests,
+                [{"investigation_id": "inv-1", "request_id": "req-1", "created_at": 20.0}],
+            )
+            _write_jsonl(
+                paths.tracking_decision_tool_results,
+                [{"investigation_id": "inv-1", "request_id": "req-1", "status": "ok", "finished_at": None}],
+            )
+
+            timeline = module._build_tracking_diagnostic_timeline(paths, {"investigation_ids": ["inv-1"]}, "inv-1")
+            self.assertEqual(timeline["classification_counts"]["correlated_follow_up"], 0)
+            self.assertEqual(timeline["classification_counts"]["cannot_classify_from_available_evidence"], 1)
+
+    def test_diagnostic_timeline_does_not_infer_mcp_result_completion_from_non_schema_timestamp(self) -> None:
+        module = _load_harness({})
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = module._build_paths(Path(temp_dir))
+            _write_jsonl(
+                paths.budget_log,
+                [
+                    {
+                        "event_type": "provider_call_attempt",
+                        "role": "tracking_vlm",
+                        "attempt_id": "attempt-no-finished-at",
+                        "outcome": "ok",
+                    }
+                ],
+            )
+            _write_jsonl(
+                paths.tracking_vlm_attempt_diagnostics,
+                [
+                    {
+                        "event_type": "tracking_vlm_attempt_completed",
+                        "attempt_id": "attempt-no-finished-at",
+                        "request_metadata": {
+                            "follow_up_investigation_id": "inv-1",
+                            "follow_up_request_id": "req-1",
+                            "follow_up_result_status": "ok",
+                            "follow_up_mcp_result_present": True,
+                            "follow_up_evidence_refs_present": True,
+                        },
+                        "timing_markers": {"provider_request_started_at": 50.0},
+                    }
+                ],
+            )
+            _write_jsonl(
+                paths.tracking_decision_tool_requests,
+                [{"investigation_id": "inv-1", "request_id": "req-1", "created_at": 20.0}],
+            )
+            _write_jsonl(
+                paths.tracking_decision_tool_results,
+                [
+                    {
+                        "investigation_id": "inv-1",
+                        "request_id": "req-1",
+                        "status": "ok",
+                        "timestamp": 21.0,
+                    }
+                ],
+            )
+
+            timeline = module._build_tracking_diagnostic_timeline(paths, {"investigation_ids": ["inv-1"]}, "inv-1")
+            self.assertEqual(timeline["classification_counts"]["correlated_follow_up"], 0)
+            self.assertEqual(timeline["classification_counts"]["cannot_classify_from_available_evidence"], 1)
+
+    def test_diagnostic_timeline_handles_partial_events_without_fabrication(self) -> None:
+        module = _load_harness({})
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = module._build_paths(Path(temp_dir))
+
+            _write_jsonl(
+                paths.budget_log,
+                [
+                    {
+                        "event_type": "provider_call_attempt",
+                        "role": "tracking_vlm",
+                        "attempt_id": "attempt-partial",
+                        "outcome": "ok",
+                        "timestamp": 10.0,
+                    }
+                ],
+            )
+            _write_jsonl(
+                paths.tracking_vlm_attempt_diagnostics,
+                [
+                    {
+                        "event_type": "tracking_vlm_observation_published",
+                        "attempt_id": None,
+                        "llm_correlation_id": "corr-uncorrelated",
+                        "timing_markers": {"observation_published_at": 12.0},
+                    }
+                ],
+            )
+
+            timeline = module._build_tracking_diagnostic_timeline(paths, None, None)
+            self.assertEqual(timeline["classification_counts"]["initial_provider_call"], 1)
+            self.assertEqual(len(timeline["uncorrelated_diagnostics"]), 1)
+
+            stages = [entry.get("stage") for entry in timeline["timeline"]]
+            self.assertNotIn("provider_reservation", stages)
+            self.assertNotIn("provider_sdk_request_started", stages)
+            self.assertNotIn("provider_response_completed", stages)
+            self.assertNotIn("provider_timeout", stages)
+
+    def test_diagnostic_timeline_does_not_copy_sensitive_payload_fields(self) -> None:
+        module = _load_harness({})
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = module._build_paths(Path(temp_dir))
+
+            _write_jsonl(
+                paths.budget_log,
+                [
+                    {
+                        "event_type": "provider_call_attempt",
+                        "role": "tracking_vlm",
+                        "attempt_id": "attempt-safe",
+                        "outcome": "ok",
+                        "reserved_at": 1.0,
+                        "timestamp": 2.0,
+                    }
+                ],
+            )
+            _write_jsonl(
+                paths.tracking_vlm_attempt_diagnostics,
+                [
+                    {
+                        "event_type": "tracking_vlm_attempt_completed",
+                        "attempt_id": "attempt-safe",
+                        "llm_correlation_id": "corr-safe",
+                        "request_metadata": {
+                            "follow_up_investigation_id": "inv-safe",
+                            "follow_up_mcp_result_present": True,
+                            "follow_up_evidence_refs_present": True,
+                            "api_key": "secret-token",
+                            "authorization": "Bearer secret-token",
+                            "messages": [{"role": "user", "content": "raw prompt"}],
+                            "image_url": "data:image/jpeg;base64,AAAA",
+                        },
+                        "timing_markers": {
+                            "provider_request_started_at": 1.1,
+                            "provider_response_completed_at": 1.2,
+                        },
+                    }
+                ],
+            )
+
+            timeline = module._build_tracking_diagnostic_timeline(paths, None, "inv-safe")
+            serialized = json.dumps(timeline)
+            self.assertNotIn("secret-token", serialized)
+            self.assertNotIn("Bearer", serialized)
+            self.assertNotIn("raw prompt", serialized)
+            self.assertNotIn("data:image/jpeg;base64", serialized)
+
     def test_missing_runtime_observation_not_interpreted_as_successful_decision(self) -> None:
         module = _load_harness({})
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -723,6 +1305,862 @@ class TestTrackingOnlyHarnessControls(unittest.TestCase):
         }
         self.assertTrue(module._observation_record_satisfies_post_success_completion(record, cycle))
 
+    def test_follow_up_shutdown_classification_pending_with_second_reservation(self) -> None:
+        module = _load_harness({})
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = module._build_paths(Path(temp_dir))
+
+            _write_jsonl(
+                paths.budget_log,
+                [
+                    {
+                        "event_type": "provider_call_attempt",
+                        "role": "tracking_vlm",
+                        "attempt_id": "attempt-1",
+                        "outcome": "ok",
+                        "timestamp": 10.0,
+                    }
+                ],
+            )
+            _write_budget_state(paths.budget_state, tracking_attempted=2)
+            paths.tracking_decision_result_index.write_text(
+                json.dumps({"delivered_result_keys": ["rk-1"]}),
+                encoding="utf-8",
+            )
+            _write_jsonl(
+                paths.tracking_decision_tool_requests,
+                [
+                    {
+                        "event_type": "decision_tool_request",
+                        "created_at": 15.0,
+                        "investigation_id": "inv-1",
+                        "request_id": "req-1",
+                        "tool_name": "get_track_evidence_history",
+                    }
+                ],
+            )
+            _write_jsonl(
+                paths.tracking_decision_tool_results,
+                [
+                    {
+                        "event_type": "decision_tool_result",
+                        "finished_at": 18.0,
+                        "investigation_id": "inv-1",
+                        "request_id": "req-1",
+                        "status": "ok",
+                        "idempotency_key": "rk-1",
+                    }
+                ],
+            )
+
+            classification = module._classify_follow_up_shutdown_state(
+                paths=paths,
+                decision_artifacts={
+                    "investigation_ids": ["inv-1"],
+                    "result_index": {"delivered_result_keys": ["rk-1"]},
+                },
+                decision_cycle={
+                    "mcp_result_processed": True,
+                    "follow_up_decision_valid": False,
+                },
+                selected_investigation_id="inv-1",
+                diagnostic_timeline=None,
+            )
+
+            self.assertEqual(classification["status"], "pending_at_shutdown")
+            self.assertTrue(classification["defer_post_success_grace_stop"])
+            self.assertEqual(classification["reservation_gap"], 1)
+            evidence = classification.get("pending_correlation_evidence")
+            self.assertIsInstance(evidence, dict)
+            self.assertEqual(evidence.get("investigation_id"), "inv-1")
+            self.assertEqual(evidence.get("request_id"), "req-1")
+
+    def test_follow_up_shutdown_classification_pending_requires_matching_investigation_id(self) -> None:
+        module = _load_harness({})
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = module._build_paths(Path(temp_dir))
+
+            _write_jsonl(
+                paths.budget_log,
+                [
+                    {
+                        "event_type": "provider_call_attempt",
+                        "role": "tracking_vlm",
+                        "attempt_id": "attempt-1",
+                        "outcome": "ok",
+                        "timestamp": 10.0,
+                    }
+                ],
+            )
+            _write_budget_state(paths.budget_state, tracking_attempted=2)
+            _write_jsonl(
+                paths.tracking_decision_tool_requests,
+                [
+                    {
+                        "event_type": "decision_tool_request",
+                        "created_at": 15.0,
+                        "investigation_id": "inv-2",
+                        "request_id": "req-1",
+                        "tool_name": "get_track_evidence_history",
+                    }
+                ],
+            )
+            _write_jsonl(
+                paths.tracking_decision_tool_results,
+                [
+                    {
+                        "event_type": "decision_tool_result",
+                        "finished_at": 18.0,
+                        "investigation_id": "inv-2",
+                        "request_id": "req-1",
+                        "status": "ok",
+                        "idempotency_key": "rk-1",
+                    }
+                ],
+            )
+
+            classification = module._classify_follow_up_shutdown_state(
+                paths=paths,
+                decision_artifacts={
+                    "investigation_ids": ["inv-1"],
+                    "result_index": {"delivered_result_keys": ["rk-1"]},
+                },
+                decision_cycle={"mcp_result_processed": True, "follow_up_decision_valid": False},
+                selected_investigation_id="inv-1",
+                diagnostic_timeline=None,
+            )
+
+            self.assertEqual(classification["status"], "correlation_unverified")
+
+    def test_follow_up_shutdown_classification_pending_requires_matching_request_id(self) -> None:
+        module = _load_harness({})
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = module._build_paths(Path(temp_dir))
+
+            _write_jsonl(
+                paths.budget_log,
+                [
+                    {
+                        "event_type": "provider_call_attempt",
+                        "role": "tracking_vlm",
+                        "attempt_id": "attempt-1",
+                        "outcome": "ok",
+                        "timestamp": 10.0,
+                    }
+                ],
+            )
+            _write_budget_state(paths.budget_state, tracking_attempted=2)
+            _write_jsonl(
+                paths.tracking_decision_tool_requests,
+                [
+                    {
+                        "event_type": "decision_tool_request",
+                        "created_at": 15.0,
+                        "investigation_id": "inv-1",
+                        "request_id": "req-1",
+                        "tool_name": "get_track_evidence_history",
+                    }
+                ],
+            )
+            _write_jsonl(
+                paths.tracking_decision_tool_results,
+                [
+                    {
+                        "event_type": "decision_tool_result",
+                        "finished_at": 18.0,
+                        "investigation_id": "inv-1",
+                        "request_id": "req-2",
+                        "status": "ok",
+                        "idempotency_key": "rk-1",
+                    }
+                ],
+            )
+
+            classification = module._classify_follow_up_shutdown_state(
+                paths=paths,
+                decision_artifacts={
+                    "investigation_ids": ["inv-1"],
+                    "result_index": {"delivered_result_keys": ["rk-1"]},
+                },
+                decision_cycle={"mcp_result_processed": True, "follow_up_decision_valid": False},
+                selected_investigation_id="inv-1",
+                diagnostic_timeline=None,
+            )
+
+            self.assertEqual(classification["status"], "correlation_unverified")
+
+    def test_follow_up_shutdown_classification_pending_requires_present_mcp_result(self) -> None:
+        module = _load_harness({})
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = module._build_paths(Path(temp_dir))
+
+            _write_jsonl(
+                paths.budget_log,
+                [
+                    {
+                        "event_type": "provider_call_attempt",
+                        "role": "tracking_vlm",
+                        "attempt_id": "attempt-1",
+                        "outcome": "ok",
+                    }
+                ],
+            )
+            _write_budget_state(paths.budget_state, tracking_attempted=2)
+            _write_jsonl(
+                paths.tracking_decision_tool_requests,
+                [
+                    {
+                        "event_type": "decision_tool_request",
+                        "created_at": 15.0,
+                        "investigation_id": "inv-1",
+                        "request_id": "req-1",
+                        "tool_name": "get_track_evidence_history",
+                    }
+                ],
+            )
+
+            missing_result_classification = module._classify_follow_up_shutdown_state(
+                paths=paths,
+                decision_artifacts={"investigation_ids": ["inv-1"], "result_index": {"delivered_result_keys": []}},
+                decision_cycle={"mcp_result_processed": True, "follow_up_decision_valid": False},
+                selected_investigation_id="inv-1",
+                diagnostic_timeline=None,
+            )
+            self.assertEqual(missing_result_classification["status"], "correlation_unverified")
+
+    def test_follow_up_shutdown_classification_pending_requires_successful_mcp_result(self) -> None:
+        module = _load_harness({})
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = module._build_paths(Path(temp_dir))
+
+            _write_jsonl(
+                paths.budget_log,
+                [
+                    {
+                        "event_type": "provider_call_attempt",
+                        "role": "tracking_vlm",
+                        "attempt_id": "attempt-1",
+                        "outcome": "ok",
+                    }
+                ],
+            )
+            _write_budget_state(paths.budget_state, tracking_attempted=2)
+            _write_jsonl(
+                paths.tracking_decision_tool_requests,
+                [
+                    {
+                        "event_type": "decision_tool_request",
+                        "created_at": 15.0,
+                        "investigation_id": "inv-1",
+                        "request_id": "req-1",
+                        "tool_name": "get_track_evidence_history",
+                    }
+                ],
+            )
+            _write_jsonl(
+                paths.tracking_decision_tool_results,
+                [
+                    {
+                        "event_type": "decision_tool_result",
+                        "finished_at": 18.0,
+                        "investigation_id": "inv-1",
+                        "request_id": "req-1",
+                        "status": "failed",
+                        "idempotency_key": "rk-1",
+                    }
+                ],
+            )
+
+            failed_result_classification = module._classify_follow_up_shutdown_state(
+                paths=paths,
+                decision_artifacts={"investigation_ids": ["inv-1"], "result_index": {"delivered_result_keys": ["rk-1"]}},
+                decision_cycle={"mcp_result_processed": True, "follow_up_decision_valid": False},
+                selected_investigation_id="inv-1",
+                diagnostic_timeline=None,
+            )
+            self.assertEqual(failed_result_classification["status"], "correlation_unverified")
+
+    def test_follow_up_shutdown_classification_reservation_must_follow_mcp_result_completion(self) -> None:
+        module = _load_harness({})
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = module._build_paths(Path(temp_dir))
+
+            _write_jsonl(
+                paths.budget_log,
+                [
+                    {
+                        "event_type": "provider_call_attempt",
+                        "role": "tracking_vlm",
+                        "attempt_id": "attempt-1",
+                        "outcome": "ok",
+                    }
+                ],
+            )
+            _write_budget_state(paths.budget_state, tracking_attempted=2)
+            paths.budget_state.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "updated_at": 12.0,
+                        "totals": {
+                            "attempted": 2,
+                            "per_role_attempted": {
+                                "tracking_vlm": 2,
+                                "observation_text": 0,
+                                "reasoning_text": 0,
+                                "observation_visual": 0,
+                            },
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            _write_jsonl(
+                paths.tracking_decision_tool_requests,
+                [
+                    {
+                        "event_type": "decision_tool_request",
+                        "created_at": 10.0,
+                        "investigation_id": "inv-1",
+                        "request_id": "req-1",
+                        "tool_name": "get_track_evidence_history",
+                    }
+                ],
+            )
+            _write_jsonl(
+                paths.tracking_decision_tool_results,
+                [
+                    {
+                        "event_type": "decision_tool_result",
+                        "finished_at": 18.0,
+                        "investigation_id": "inv-1",
+                        "request_id": "req-1",
+                        "status": "ok",
+                        "idempotency_key": "rk-1",
+                    }
+                ],
+            )
+
+            classification = module._classify_follow_up_shutdown_state(
+                paths=paths,
+                decision_artifacts={"investigation_ids": ["inv-1"], "result_index": {"delivered_result_keys": ["rk-1"]}},
+                decision_cycle={"mcp_result_processed": True, "follow_up_decision_valid": False},
+                selected_investigation_id="inv-1",
+                diagnostic_timeline=None,
+            )
+
+            self.assertEqual(classification["status"], "correlation_unverified")
+
+    def test_follow_up_shutdown_classification_missing_correlation_metadata_unverified(self) -> None:
+        module = _load_harness({})
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = module._build_paths(Path(temp_dir))
+
+            _write_jsonl(
+                paths.budget_log,
+                [
+                    {
+                        "event_type": "provider_call_attempt",
+                        "role": "tracking_vlm",
+                        "attempt_id": "attempt-1",
+                        "outcome": "ok",
+                        "timestamp": 10.0,
+                    }
+                ],
+            )
+            _write_budget_state(paths.budget_state, tracking_attempted=2)
+            _write_jsonl(
+                paths.tracking_decision_tool_requests,
+                [
+                    {
+                        "event_type": "decision_tool_request",
+                        "created_at": 15.0,
+                        "investigation_id": "inv-1",
+                        "request_id": "req-1",
+                        "tool_name": "get_track_evidence_history",
+                    }
+                ],
+            )
+            _write_jsonl(
+                paths.tracking_decision_tool_results,
+                [
+                    {
+                        "event_type": "decision_tool_result",
+                        "finished_at": 18.0,
+                        "investigation_id": "inv-1",
+                        "request_id": "req-1",
+                        "status": "ok",
+                    }
+                ],
+            )
+
+            classification = module._classify_follow_up_shutdown_state(
+                paths=paths,
+                decision_artifacts={"investigation_ids": ["inv-1"], "result_index": {"delivered_result_keys": []}},
+                decision_cycle={"mcp_result_processed": True, "follow_up_decision_valid": False},
+                selected_investigation_id="inv-1",
+                diagnostic_timeline=None,
+            )
+
+            self.assertEqual(classification["status"], "correlation_unverified")
+
+    def test_follow_up_shutdown_classification_grace_expiry_keeps_waiting_when_pending(self) -> None:
+        module = _load_harness({})
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = module._build_paths(Path(temp_dir))
+
+            _write_jsonl(
+                paths.budget_log,
+                [
+                    {
+                        "event_type": "provider_call_attempt",
+                        "role": "tracking_vlm",
+                        "attempt_id": "attempt-1",
+                        "outcome": "ok",
+                        "timestamp": 10.0,
+                    }
+                ],
+            )
+            _write_budget_state(paths.budget_state, tracking_attempted=2)
+            paths.tracking_decision_result_index.write_text(
+                json.dumps({"delivered_result_keys": ["rk-1"]}),
+                encoding="utf-8",
+            )
+            _write_jsonl(
+                paths.tracking_decision_tool_requests,
+                [
+                    {
+                        "event_type": "decision_tool_request",
+                        "created_at": 15.0,
+                        "investigation_id": "inv-1",
+                        "request_id": "req-1",
+                        "tool_name": "get_track_evidence_history",
+                    }
+                ],
+            )
+            _write_jsonl(
+                paths.tracking_decision_tool_results,
+                [
+                    {
+                        "event_type": "decision_tool_result",
+                        "finished_at": 18.0,
+                        "investigation_id": "inv-1",
+                        "request_id": "req-1",
+                        "status": "ok",
+                        "idempotency_key": "rk-1",
+                    }
+                ],
+            )
+
+            classification = module._classify_follow_up_shutdown_state(
+                paths=paths,
+                decision_artifacts={
+                    "investigation_ids": ["inv-1"],
+                    "result_index": {"delivered_result_keys": ["rk-1"]},
+                },
+                decision_cycle={
+                    "mcp_result_processed": True,
+                    "follow_up_decision_valid": False,
+                },
+                selected_investigation_id="inv-1",
+                diagnostic_timeline=None,
+            )
+
+            self.assertTrue(classification["defer_post_success_grace_stop"])
+
+    def test_follow_up_shutdown_classification_completed_before_deadline(self) -> None:
+        module = _load_harness({})
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = module._build_paths(Path(temp_dir))
+
+            _write_jsonl(
+                paths.budget_log,
+                [
+                    {
+                        "event_type": "provider_call_attempt",
+                        "role": "tracking_vlm",
+                        "attempt_id": "attempt-1",
+                        "outcome": "ok",
+                    },
+                    {
+                        "event_type": "provider_call_attempt",
+                        "role": "tracking_vlm",
+                        "attempt_id": "attempt-2",
+                        "outcome": "ok",
+                    },
+                ],
+            )
+            _write_budget_state(paths.budget_state, tracking_attempted=2)
+
+            classification = module._classify_follow_up_shutdown_state(
+                paths=paths,
+                decision_artifacts={"investigation_ids": ["inv-1"]},
+                decision_cycle={
+                    "mcp_result_processed": True,
+                    "follow_up_decision_valid": True,
+                },
+                selected_investigation_id="inv-1",
+                diagnostic_timeline={
+                    "provider_attempts": [
+                        {
+                            "classification": "correlated_follow_up",
+                            "provider_outcome": "ok",
+                            "provider_error_code": None,
+                        }
+                    ]
+                },
+            )
+
+            self.assertEqual(classification["status"], "completed")
+            self.assertFalse(classification["defer_post_success_grace_stop"])
+
+    def test_follow_up_shutdown_classification_timeout(self) -> None:
+        module = _load_harness({})
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = module._build_paths(Path(temp_dir))
+
+            _write_jsonl(
+                paths.budget_log,
+                [
+                    {
+                        "event_type": "provider_call_attempt",
+                        "role": "tracking_vlm",
+                        "attempt_id": "attempt-1",
+                        "outcome": "ok",
+                    },
+                    {
+                        "event_type": "provider_call_attempt",
+                        "role": "tracking_vlm",
+                        "attempt_id": "attempt-2",
+                        "outcome": "error",
+                        "error_code": "timeout",
+                    },
+                ],
+            )
+            _write_budget_state(paths.budget_state, tracking_attempted=2)
+
+            classification = module._classify_follow_up_shutdown_state(
+                paths=paths,
+                decision_artifacts={"investigation_ids": ["inv-1"]},
+                decision_cycle={
+                    "mcp_result_processed": True,
+                    "follow_up_decision_valid": False,
+                },
+                selected_investigation_id="inv-1",
+                diagnostic_timeline={
+                    "provider_attempts": [
+                        {
+                            "classification": "correlated_follow_up",
+                            "provider_outcome": "error",
+                            "provider_error_code": "timeout",
+                        }
+                    ]
+                },
+            )
+
+            self.assertEqual(classification["status"], "timed_out")
+
+    def test_follow_up_shutdown_classification_never_scheduled(self) -> None:
+        module = _load_harness({})
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = module._build_paths(Path(temp_dir))
+
+            _write_jsonl(
+                paths.budget_log,
+                [
+                    {
+                        "event_type": "provider_call_attempt",
+                        "role": "tracking_vlm",
+                        "attempt_id": "attempt-1",
+                        "outcome": "ok",
+                    }
+                ],
+            )
+            _write_budget_state(paths.budget_state, tracking_attempted=1)
+
+            classification = module._classify_follow_up_shutdown_state(
+                paths=paths,
+                decision_artifacts={"investigation_ids": ["inv-1"]},
+                decision_cycle={
+                    "mcp_result_processed": False,
+                    "follow_up_decision_valid": False,
+                },
+                selected_investigation_id="inv-1",
+                diagnostic_timeline=None,
+            )
+
+            self.assertEqual(classification["status"], "never_scheduled")
+
+    def test_follow_up_shutdown_classification_pending_when_absolute_deadline_reached(self) -> None:
+        module = _load_harness({})
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = module._build_paths(Path(temp_dir))
+
+            _write_jsonl(
+                paths.budget_log,
+                [
+                    {
+                        "event_type": "provider_call_attempt",
+                        "role": "tracking_vlm",
+                        "attempt_id": "attempt-1",
+                        "outcome": "ok",
+                    }
+                ],
+            )
+            _write_budget_state(paths.budget_state, tracking_attempted=2)
+            paths.tracking_decision_result_index.write_text(
+                json.dumps({"delivered_result_keys": ["rk-1"]}),
+                encoding="utf-8",
+            )
+            _write_jsonl(
+                paths.tracking_decision_tool_requests,
+                [
+                    {
+                        "event_type": "decision_tool_request",
+                        "created_at": 15.0,
+                        "investigation_id": "inv-1",
+                        "request_id": "req-1",
+                        "tool_name": "get_track_evidence_history",
+                    }
+                ],
+            )
+            _write_jsonl(
+                paths.tracking_decision_tool_results,
+                [
+                    {
+                        "event_type": "decision_tool_result",
+                        "finished_at": 18.0,
+                        "investigation_id": "inv-1",
+                        "request_id": "req-1",
+                        "status": "ok",
+                        "idempotency_key": "rk-1",
+                    }
+                ],
+            )
+
+            classification = module._classify_follow_up_shutdown_state(
+                paths=paths,
+                decision_artifacts={
+                    "investigation_ids": ["inv-1"],
+                    "result_index": {"delivered_result_keys": ["rk-1"]},
+                },
+                decision_cycle={
+                    "mcp_result_processed": True,
+                    "follow_up_decision_valid": False,
+                },
+                selected_investigation_id="inv-1",
+                diagnostic_timeline=None,
+            )
+
+            self.assertEqual(classification["status"], "pending_at_shutdown")
+            self.assertEqual(classification["reservation_gap"], 1)
+
+    def test_follow_up_shutdown_classification_unrelated_second_reservation_unverified(self) -> None:
+        module = _load_harness({})
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = module._build_paths(Path(temp_dir))
+
+            _write_jsonl(
+                paths.budget_log,
+                [
+                    {
+                        "event_type": "provider_call_attempt",
+                        "role": "tracking_vlm",
+                        "attempt_id": "attempt-1",
+                        "outcome": "ok",
+                    }
+                ],
+            )
+            _write_budget_state(paths.budget_state, tracking_attempted=2)
+            _write_jsonl(
+                paths.tracking_decision_tool_requests,
+                [
+                    {
+                        "event_type": "decision_tool_request",
+                        "created_at": 15.0,
+                        "investigation_id": "inv-2",
+                        "request_id": "req-2",
+                        "tool_name": "get_track_evidence_history",
+                    }
+                ],
+            )
+            _write_jsonl(
+                paths.tracking_decision_tool_results,
+                [
+                    {
+                        "event_type": "decision_tool_result",
+                        "finished_at": 18.0,
+                        "investigation_id": "inv-2",
+                        "request_id": "req-2",
+                        "status": "ok",
+                        "idempotency_key": "rk-2",
+                    }
+                ],
+            )
+
+            classification = module._classify_follow_up_shutdown_state(
+                paths=paths,
+                decision_artifacts={
+                    "investigation_ids": ["inv-1", "inv-2"],
+                    "result_index": {"delivered_result_keys": ["rk-2"]},
+                },
+                decision_cycle={
+                    "mcp_result_processed": True,
+                    "follow_up_decision_valid": False,
+                },
+                selected_investigation_id="inv-1",
+                diagnostic_timeline=None,
+            )
+
+            self.assertEqual(classification["status"], "correlation_unverified")
+            self.assertFalse(classification["defer_post_success_grace_stop"])
+
+    def test_request_event_with_decision_action_sets_initial_decision_action_hint(self) -> None:
+        module = _load_harness({})
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = module._build_paths(Path(temp_dir))
+
+            _write_jsonl(
+                paths.tracking_decision_tool_requests,
+                [
+                    {
+                        "schema_version": "1.0",
+                        "event_type": "decision_tool_request",
+                        "request_id": "req-1",
+                        "investigation_id": "inv-1",
+                        "decision_action": "request_additional_tracking_evidence",
+                        "tool_name": "get_track_evidence_history",
+                        "arguments": {"track_id": "1"},
+                    }
+                ],
+            )
+            _write_jsonl(
+                paths.tracking_decision_tool_results,
+                [
+                    {
+                        "schema_version": "1.0",
+                        "event_type": "decision_tool_result",
+                        "request_id": "req-1",
+                        "investigation_id": "inv-1",
+                        "tool_name": "get_track_evidence_history",
+                        "status": "ok",
+                        "result_payload": {"available": True, "messages": []},
+                        "idempotency_key": "inv-1:req-1:get_track_evidence_history",
+                    }
+                ],
+            )
+
+            decision_artifacts = module._collect_decision_artifacts(paths)
+            cycle = module._decision_cycle_state(decision_artifacts)
+
+            self.assertIsNone(decision_artifacts["initial_decision"])
+            self.assertEqual(decision_artifacts["initial_decision_action_hint"], "request_additional_tracking_evidence")
+            self.assertTrue(cycle["mcp_request_submitted"])
+            self.assertTrue(cycle["mcp_result_processed"])
+            self.assertTrue(cycle["initial_decision_valid"])
+            self.assertEqual(cycle["initial_decision_action"], "request_additional_tracking_evidence")
+            self.assertEqual(cycle["initial_decision_action_source"], "request_event")
+            self.assertFalse(cycle["follow_up_decision_valid"])
+
+            report = {
+                "error": None,
+                "stopped_by": "post_success_observation_grace_expired",
+                "milestones": {"provider_response_parsed_successfully": {"status": "hit"}},
+            }
+            outcome = module._classify_investigation_outcome(report, decision_artifacts)
+            self.assertEqual(outcome["status"], "inconclusive")
+            self.assertEqual(outcome["reason"], "missing_follow_up_decision")
+
+    def test_terminal_follow_up_event_supplies_follow_up_decision_for_outcome(self) -> None:
+        module = _load_harness({})
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = module._build_paths(Path(temp_dir))
+
+            _write_jsonl(
+                paths.tracking_decision_tool_requests,
+                [
+                    {
+                        "schema_version": "1.0",
+                        "event_type": "decision_tool_request",
+                        "request_id": "req-1",
+                        "investigation_id": "inv-1",
+                        "decision_action": "request_additional_tracking_evidence",
+                        "tool_name": "get_track_evidence_history",
+                        "arguments": {"track_id": "1"},
+                    }
+                ],
+            )
+            _write_jsonl(
+                paths.tracking_decision_tool_results,
+                [
+                    {
+                        "schema_version": "1.0",
+                        "event_type": "decision_tool_result",
+                        "request_id": "req-1",
+                        "investigation_id": "inv-1",
+                        "tool_name": "get_track_evidence_history",
+                        "status": "ok",
+                        "result_payload": {"available": True},
+                        "idempotency_key": "inv-1:req-1:get_track_evidence_history",
+                    }
+                ],
+            )
+            _write_jsonl(
+                paths.tracking_terminal_follow_up_decisions,
+                [
+                    {
+                        "schema_version": "1.0",
+                        "event_type": "tracking_terminal_follow_up_decision",
+                        "status": "accepted",
+                        "reason": "terminal_follow_up_persisted",
+                        "investigation_id": "inv-1",
+                        "request_id": "req-1",
+                        "decision": {
+                            "action": "inconclusive",
+                            "investigation_id": "inv-1",
+                            "reason": "insufficient_evidence",
+                        },
+                    }
+                ],
+            )
+
+            decision_artifacts = module._collect_decision_artifacts(paths)
+            cycle = module._decision_cycle_state(decision_artifacts)
+
+            self.assertIsInstance(decision_artifacts["follow_up_decision"], dict)
+            self.assertEqual(decision_artifacts["follow_up_decision"]["action"], "inconclusive")
+            self.assertTrue(cycle["follow_up_decision_valid"])
+
+            report = {
+                "error": None,
+                "stopped_by": "post_success_observation_grace_expired",
+                "milestones": {"provider_response_parsed_successfully": {"status": "hit"}},
+            }
+            outcome = module._classify_investigation_outcome(report, decision_artifacts)
+            self.assertEqual(outcome["status"], "accepted")
+            self.assertEqual(outcome["reason"], "tool_result_ok_with_follow_up_decision")
+
+    def test_main_help_returns_zero_without_running_harness(self) -> None:
+        module = _load_harness({})
+        with patch.object(module, "run_harness", side_effect=AssertionError("run_harness should not be called")):
+            exit_code = module.main(["--help"])
+        self.assertEqual(exit_code, 0)
+
+    def test_main_preflight_only_forwards_flag(self) -> None:
+        module = _load_harness({})
+        captured: dict[str, object] = {}
+
+        def _fake_run_harness(*, preflight_only: bool = False) -> int:
+            captured["preflight_only"] = preflight_only
+            return 0
+
+        with patch.object(module, "run_harness", side_effect=_fake_run_harness):
+            exit_code = module.main(["--preflight-only"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertIs(captured.get("preflight_only"), True)
+
     def test_run_harness_fails_closed_when_gate_probe_fails(self) -> None:
         module = _load_harness({})
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -863,6 +2301,436 @@ class TestTrackingOnlyHarnessControls(unittest.TestCase):
             report = json.loads((run_dir / "artifacts" / "tracking_only_report.json").read_text(encoding="utf-8"))
             self.assertEqual(report.get("error"), "prelaunch_probe_failed")
             self.assertIn("child_tracking_agent_config_probe_failed", report["preflight"]["errors"])
+
+    def test_run_harness_preflight_only_exits_before_runtime_launch(self) -> None:
+        module = _load_harness({})
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            run_dir = (root / "run").resolve()
+            isolated_repo = (root / "isolated_repo").resolve()
+            captures_dir = (root / "captures").resolve()
+            captures_dir.mkdir(parents=True, exist_ok=True)
+            video_path = (root / "video.mp4").resolve()
+            video_path.write_bytes(b"video")
+
+            def _fake_workspace_copy(src_repo_root: Path, dst_repo_root: Path) -> dict:
+                dst_repo_root.mkdir(parents=True, exist_ok=True)
+                (dst_repo_root / "captures").mkdir(parents=True, exist_ok=True)
+                (dst_repo_root / "main.py").write_text("print('noop')\n", encoding="utf-8")
+                return {
+                    "source_repo_root": str(src_repo_root),
+                    "isolated_repo_root": str(dst_repo_root),
+                    "isolated_captures_dir": str((dst_repo_root / "captures").resolve()),
+                    "copy_duration_seconds": 0.0,
+                }
+
+            with patch.object(module, "RUN_DIR", run_dir), \
+                patch.object(module, "ISOLATED_REPO_ROOT", isolated_repo), \
+                patch.object(module, "REPORT_PATH", (run_dir / "tracking_only_report.json").resolve()), \
+                patch.object(module, "VIDEO_PATH", video_path), \
+                patch.object(module, "ORIGINAL_CAPTURES_DIR", captures_dir), \
+                patch.object(module, "_preflight_errors", return_value=[]), \
+                patch.object(module, "_probe_child_interpreter", return_value={"passed": True}), \
+                patch.object(module, "_build_isolated_workspace", side_effect=_fake_workspace_copy), \
+                patch.object(module, "_server_process_snapshot", return_value=[]), \
+                patch.object(module, "_dashboard_process_snapshot", return_value=[]), \
+                patch.object(module, "_probe_child_gate_installation", side_effect=[
+                    {"passed": True, "details": {"runtime_submit_wrapped": True}},
+                    {"passed": True, "details": {}},
+                ]), \
+                patch.object(module, "_probe_child_budget_env", return_value={"passed": True, "details": {}}), \
+                patch.object(module, "_probe_child_tracking_agent_config", return_value={"passed": True, "details": {}}), \
+                patch.object(module.subprocess, "Popen", side_effect=AssertionError("runtime launch should not occur")):
+                exit_code = module.run_harness(preflight_only=True)
+
+            self.assertEqual(exit_code, 0)
+
+            report = json.loads((run_dir / "artifacts" / "tracking_only_report.json").read_text(encoding="utf-8"))
+            self.assertTrue(report.get("preflight_only"))
+            self.assertEqual(report.get("stopped_by"), "preflight_only")
+
+    def test_run_harness_live_loop_defers_only_while_pending_then_stops_when_unverified(self) -> None:
+        module = _load_harness({})
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            run_dir = (root / "run").resolve()
+            isolated_repo = (root / "isolated_repo").resolve()
+            captures_dir = (root / "captures").resolve()
+            captures_dir.mkdir(parents=True, exist_ok=True)
+            video_path = (root / "video.mp4").resolve()
+            video_path.write_bytes(b"video")
+
+            def _fake_workspace_copy(src_repo_root: Path, dst_repo_root: Path) -> dict:
+                dst_repo_root.mkdir(parents=True, exist_ok=True)
+                (dst_repo_root / "captures").mkdir(parents=True, exist_ok=True)
+                (dst_repo_root / "main.py").write_text("print('noop')\n", encoding="utf-8")
+                return {
+                    "source_repo_root": str(src_repo_root),
+                    "isolated_repo_root": str(dst_repo_root),
+                    "isolated_captures_dir": str((dst_repo_root / "captures").resolve()),
+                    "copy_duration_seconds": 0.0,
+                }
+
+            monotonic_now = [1000.0]
+
+            def _fake_now() -> float:
+                current = monotonic_now[0]
+                monotonic_now[0] = current + 0.5
+                return current
+
+            classify_calls = {"count": 0}
+
+            def _classify_side_effect(*, paths, decision_artifacts, decision_cycle, selected_investigation_id, diagnostic_timeline=None):
+                classify_calls["count"] += 1
+                if classify_calls["count"] <= 2:
+                    return {
+                        "status": "pending_at_shutdown",
+                        "reason": "reservation_gap_after_mcp_result_with_selected_investigation",
+                        "defer_post_success_grace_stop": True,
+                        "tracking_reservations": 2,
+                        "tracking_finalized_attempt_events": 1,
+                        "reservation_gap": 1,
+                        "mcp_result_processed": True,
+                        "follow_up_decision_valid": False,
+                        "correlated_follow_up_attempts_seen": 0,
+                        "correlated_follow_up_completed": 0,
+                        "correlated_follow_up_timed_out": 0,
+                    }
+                return {
+                    "status": "correlation_unverified",
+                    "reason": "reservation_gap_present_but_correlation_not_proven",
+                    "defer_post_success_grace_stop": False,
+                    "tracking_reservations": 2,
+                    "tracking_finalized_attempt_events": 1,
+                    "reservation_gap": 1,
+                    "mcp_result_processed": True,
+                    "follow_up_decision_valid": False,
+                    "correlated_follow_up_attempts_seen": 0,
+                    "correlated_follow_up_completed": 0,
+                    "correlated_follow_up_timed_out": 0,
+                }
+
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(patch.object(module, "RUN_DIR", run_dir))
+                stack.enter_context(patch.object(module, "ISOLATED_REPO_ROOT", isolated_repo))
+                stack.enter_context(patch.object(module, "REPORT_PATH", (run_dir / "tracking_only_report.json").resolve()))
+                stack.enter_context(patch.object(module, "VIDEO_PATH", video_path))
+                stack.enter_context(patch.object(module, "ORIGINAL_CAPTURES_DIR", captures_dir))
+                stack.enter_context(patch.object(module, "_preflight_errors", return_value=[]))
+                stack.enter_context(patch.object(module, "_probe_video_file", return_value={"exists": True}))
+                stack.enter_context(patch.object(module, "_probe_child_interpreter", return_value={"passed": True}))
+                stack.enter_context(patch.object(module, "_build_isolated_workspace", side_effect=_fake_workspace_copy))
+                stack.enter_context(patch.object(module, "_server_process_snapshot", return_value=[]))
+                stack.enter_context(patch.object(module, "_dashboard_process_snapshot", return_value=[]))
+                stack.enter_context(patch.object(module, "_process_snapshot_all", return_value=[]))
+                stack.enter_context(patch.object(module, "_collect_provider_event_pids", return_value=set()))
+                stack.enter_context(patch.object(module, "_pid_exists", return_value=False))
+                stack.enter_context(patch.object(module, "_terminate_pid", return_value={"pid": -1, "terminated": False}))
+                stack.enter_context(patch.object(module, "_safe_kill_process_group", return_value=None))
+                stack.enter_context(patch.object(module.os, "getpgid", return_value=43210))
+                stack.enter_context(
+                    patch.object(
+                        module,
+                        "_probe_child_gate_installation",
+                        side_effect=[
+                            {"passed": True, "details": {"runtime_submit_wrapped": True}},
+                            {"passed": True, "details": {}},
+                        ],
+                    )
+                )
+                stack.enter_context(patch.object(module, "_probe_child_budget_env", return_value={"passed": True, "details": {}}))
+                stack.enter_context(
+                    patch.object(module, "_probe_child_tracking_agent_config", return_value={"passed": True, "details": {}})
+                )
+                stack.enter_context(patch.object(module.subprocess, "Popen", return_value=_NeverExitProcess()))
+                stack.enter_context(
+                    patch.object(
+                        module,
+                        "_extract_tracking_events",
+                        return_value=[
+                            {
+                                "event_type": "provider_call_attempt",
+                                "role": "tracking_vlm",
+                                "attempt_id": "attempt-1",
+                                "outcome": "ok",
+                                "timestamp": 1000.0,
+                            }
+                        ],
+                    )
+                )
+                stack.enter_context(patch.object(module, "_collect_decision_artifacts", return_value={"investigation_ids": ["inv-1"]}))
+                stack.enter_context(
+                    patch.object(
+                        module,
+                        "_decision_cycle_state",
+                        return_value={
+                            "initial_decision_completed": False,
+                            "mcp_result_processed": True,
+                            "follow_up_decision_valid": False,
+                            "initial_decision_action": "request_identity_snapshot",
+                            "evidence_cycle_completed": False,
+                        },
+                    )
+                )
+                stack.enter_context(patch.object(module, "_investigation_reached_final_outcome", return_value=False))
+                stack.enter_context(patch.object(module, "_scan_radar_for_milestones", return_value=None))
+                stack.enter_context(patch.object(module, "_build_tracking_diagnostic_timeline", return_value={"provider_attempts": []}))
+                stack.enter_context(patch.object(module, "_classify_follow_up_shutdown_state", side_effect=_classify_side_effect))
+                stack.enter_context(patch.object(module, "_now", side_effect=_fake_now))
+                stack.enter_context(patch.object(module.time, "sleep", return_value=None))
+                exit_code = module.run_harness()
+
+            self.assertEqual(exit_code, 0)
+            report = json.loads((run_dir / "artifacts" / "tracking_only_report.json").read_text(encoding="utf-8"))
+            self.assertGreaterEqual(classify_calls["count"], 3)
+            self.assertEqual(report.get("stopped_by"), "post_success_observation_grace_expired")
+            stop_classification = report.get("stop_details", {}).get("follow_up_shutdown_classification", {})
+            self.assertEqual(stop_classification.get("status"), "correlation_unverified")
+            self.assertFalse(bool(stop_classification.get("defer_post_success_grace_stop", False)))
+
+    def test_run_harness_live_loop_stops_deferring_when_pending_becomes_timed_out(self) -> None:
+        module = _load_harness({})
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            run_dir = (root / "run").resolve()
+            isolated_repo = (root / "isolated_repo").resolve()
+            captures_dir = (root / "captures").resolve()
+            captures_dir.mkdir(parents=True, exist_ok=True)
+            video_path = (root / "video.mp4").resolve()
+            video_path.write_bytes(b"video")
+
+            def _fake_workspace_copy(src_repo_root: Path, dst_repo_root: Path) -> dict:
+                dst_repo_root.mkdir(parents=True, exist_ok=True)
+                (dst_repo_root / "captures").mkdir(parents=True, exist_ok=True)
+                (dst_repo_root / "main.py").write_text("print('noop')\n", encoding="utf-8")
+                return {
+                    "source_repo_root": str(src_repo_root),
+                    "isolated_repo_root": str(dst_repo_root),
+                    "isolated_captures_dir": str((dst_repo_root / "captures").resolve()),
+                    "copy_duration_seconds": 0.0,
+                }
+
+            monotonic_now = [2000.0]
+
+            def _fake_now() -> float:
+                current = monotonic_now[0]
+                monotonic_now[0] = current + 0.5
+                return current
+
+            classify_calls = {"count": 0}
+
+            def _classify_side_effect(*, paths, decision_artifacts, decision_cycle, selected_investigation_id, diagnostic_timeline=None):
+                classify_calls["count"] += 1
+                if classify_calls["count"] <= 2:
+                    return {
+                        "status": "pending_at_shutdown",
+                        "reason": "reservation_gap_after_mcp_result_with_selected_investigation",
+                        "defer_post_success_grace_stop": True,
+                        "tracking_reservations": 2,
+                        "tracking_finalized_attempt_events": 1,
+                        "reservation_gap": 1,
+                        "mcp_result_processed": True,
+                        "follow_up_decision_valid": False,
+                        "correlated_follow_up_attempts_seen": 0,
+                        "correlated_follow_up_completed": 0,
+                        "correlated_follow_up_timed_out": 0,
+                    }
+                return {
+                    "status": "timed_out",
+                    "reason": "correlated_follow_up_provider_attempt_timed_out",
+                    "defer_post_success_grace_stop": False,
+                    "tracking_reservations": 2,
+                    "tracking_finalized_attempt_events": 2,
+                    "reservation_gap": 0,
+                    "mcp_result_processed": True,
+                    "follow_up_decision_valid": False,
+                    "correlated_follow_up_attempts_seen": 1,
+                    "correlated_follow_up_completed": 0,
+                    "correlated_follow_up_timed_out": 1,
+                }
+
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(patch.object(module, "RUN_DIR", run_dir))
+                stack.enter_context(patch.object(module, "ISOLATED_REPO_ROOT", isolated_repo))
+                stack.enter_context(patch.object(module, "REPORT_PATH", (run_dir / "tracking_only_report.json").resolve()))
+                stack.enter_context(patch.object(module, "VIDEO_PATH", video_path))
+                stack.enter_context(patch.object(module, "ORIGINAL_CAPTURES_DIR", captures_dir))
+                stack.enter_context(patch.object(module, "_preflight_errors", return_value=[]))
+                stack.enter_context(patch.object(module, "_probe_video_file", return_value={"exists": True}))
+                stack.enter_context(patch.object(module, "_probe_child_interpreter", return_value={"passed": True}))
+                stack.enter_context(patch.object(module, "_build_isolated_workspace", side_effect=_fake_workspace_copy))
+                stack.enter_context(patch.object(module, "_server_process_snapshot", return_value=[]))
+                stack.enter_context(patch.object(module, "_dashboard_process_snapshot", return_value=[]))
+                stack.enter_context(patch.object(module, "_process_snapshot_all", return_value=[]))
+                stack.enter_context(patch.object(module, "_collect_provider_event_pids", return_value=set()))
+                stack.enter_context(patch.object(module, "_pid_exists", return_value=False))
+                stack.enter_context(patch.object(module, "_terminate_pid", return_value={"pid": -1, "terminated": False}))
+                stack.enter_context(patch.object(module, "_safe_kill_process_group", return_value=None))
+                stack.enter_context(patch.object(module.os, "getpgid", return_value=43210))
+                stack.enter_context(
+                    patch.object(
+                        module,
+                        "_probe_child_gate_installation",
+                        side_effect=[
+                            {"passed": True, "details": {"runtime_submit_wrapped": True}},
+                            {"passed": True, "details": {}},
+                        ],
+                    )
+                )
+                stack.enter_context(patch.object(module, "_probe_child_budget_env", return_value={"passed": True, "details": {}}))
+                stack.enter_context(
+                    patch.object(module, "_probe_child_tracking_agent_config", return_value={"passed": True, "details": {}})
+                )
+                stack.enter_context(patch.object(module.subprocess, "Popen", return_value=_NeverExitProcess()))
+                stack.enter_context(
+                    patch.object(
+                        module,
+                        "_extract_tracking_events",
+                        return_value=[
+                            {
+                                "event_type": "provider_call_attempt",
+                                "role": "tracking_vlm",
+                                "attempt_id": "attempt-1",
+                                "outcome": "ok",
+                                "timestamp": 2000.0,
+                            }
+                        ],
+                    )
+                )
+                stack.enter_context(patch.object(module, "_collect_decision_artifacts", return_value={"investigation_ids": ["inv-1"]}))
+                stack.enter_context(
+                    patch.object(
+                        module,
+                        "_decision_cycle_state",
+                        return_value={
+                            "initial_decision_completed": False,
+                            "mcp_result_processed": True,
+                            "follow_up_decision_valid": False,
+                            "initial_decision_action": "request_identity_snapshot",
+                            "evidence_cycle_completed": False,
+                        },
+                    )
+                )
+                stack.enter_context(patch.object(module, "_investigation_reached_final_outcome", return_value=False))
+                stack.enter_context(patch.object(module, "_scan_radar_for_milestones", return_value=None))
+                stack.enter_context(patch.object(module, "_build_tracking_diagnostic_timeline", return_value={"provider_attempts": []}))
+                stack.enter_context(patch.object(module, "_classify_follow_up_shutdown_state", side_effect=_classify_side_effect))
+                stack.enter_context(patch.object(module, "_now", side_effect=_fake_now))
+                stack.enter_context(patch.object(module.time, "sleep", return_value=None))
+                exit_code = module.run_harness()
+
+            self.assertEqual(exit_code, 0)
+            report = json.loads((run_dir / "artifacts" / "tracking_only_report.json").read_text(encoding="utf-8"))
+            self.assertGreaterEqual(classify_calls["count"], 3)
+            self.assertEqual(report.get("stopped_by"), "post_success_observation_grace_expired")
+            stop_classification = report.get("stop_details", {}).get("follow_up_shutdown_classification", {})
+            self.assertEqual(stop_classification.get("status"), "timed_out")
+            self.assertFalse(bool(stop_classification.get("defer_post_success_grace_stop", False)))
+
+    def test_run_harness_max_runtime_overrides_pending_grace_deferral(self) -> None:
+        module = _load_harness({})
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            run_dir = (root / "run").resolve()
+            isolated_repo = (root / "isolated_repo").resolve()
+            captures_dir = (root / "captures").resolve()
+            captures_dir.mkdir(parents=True, exist_ok=True)
+            video_path = (root / "video.mp4").resolve()
+            video_path.write_bytes(b"video")
+
+            def _fake_workspace_copy(src_repo_root: Path, dst_repo_root: Path) -> dict:
+                dst_repo_root.mkdir(parents=True, exist_ok=True)
+                (dst_repo_root / "captures").mkdir(parents=True, exist_ok=True)
+                (dst_repo_root / "main.py").write_text("print('noop')\n", encoding="utf-8")
+                return {
+                    "source_repo_root": str(src_repo_root),
+                    "isolated_repo_root": str(dst_repo_root),
+                    "isolated_captures_dir": str((dst_repo_root / "captures").resolve()),
+                    "copy_duration_seconds": 0.0,
+                }
+
+            monotonic_now = [3000.0]
+
+            def _fake_now() -> float:
+                current = monotonic_now[0]
+                monotonic_now[0] = current + 25.0
+                return current
+
+            pending_classification = {
+                "status": "pending_at_shutdown",
+                "reason": "reservation_gap_after_mcp_result_with_selected_investigation",
+                "defer_post_success_grace_stop": True,
+                "tracking_reservations": 2,
+                "tracking_finalized_attempt_events": 1,
+                "reservation_gap": 1,
+                "mcp_result_processed": True,
+                "follow_up_decision_valid": False,
+                "correlated_follow_up_attempts_seen": 0,
+                "correlated_follow_up_completed": 0,
+                "correlated_follow_up_timed_out": 0,
+            }
+
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(patch.object(module, "RUN_DIR", run_dir))
+                stack.enter_context(patch.object(module, "ISOLATED_REPO_ROOT", isolated_repo))
+                stack.enter_context(patch.object(module, "REPORT_PATH", (run_dir / "tracking_only_report.json").resolve()))
+                stack.enter_context(patch.object(module, "VIDEO_PATH", video_path))
+                stack.enter_context(patch.object(module, "ORIGINAL_CAPTURES_DIR", captures_dir))
+                stack.enter_context(patch.object(module, "_preflight_errors", return_value=[]))
+                stack.enter_context(patch.object(module, "_probe_video_file", return_value={"exists": True}))
+                stack.enter_context(patch.object(module, "_probe_child_interpreter", return_value={"passed": True}))
+                stack.enter_context(patch.object(module, "_build_isolated_workspace", side_effect=_fake_workspace_copy))
+                stack.enter_context(patch.object(module, "_server_process_snapshot", return_value=[]))
+                stack.enter_context(patch.object(module, "_dashboard_process_snapshot", return_value=[]))
+                stack.enter_context(patch.object(module, "_process_snapshot_all", return_value=[]))
+                stack.enter_context(patch.object(module, "_collect_provider_event_pids", return_value=set()))
+                stack.enter_context(patch.object(module, "_pid_exists", return_value=False))
+                stack.enter_context(patch.object(module, "_terminate_pid", return_value={"pid": -1, "terminated": False}))
+                stack.enter_context(patch.object(module, "_safe_kill_process_group", return_value=None))
+                stack.enter_context(patch.object(module.os, "getpgid", return_value=43210))
+                stack.enter_context(
+                    patch.object(
+                        module,
+                        "_probe_child_gate_installation",
+                        side_effect=[
+                            {"passed": True, "details": {"runtime_submit_wrapped": True}},
+                            {"passed": True, "details": {}},
+                        ],
+                    )
+                )
+                stack.enter_context(patch.object(module, "_probe_child_budget_env", return_value={"passed": True, "details": {}}))
+                stack.enter_context(
+                    patch.object(module, "_probe_child_tracking_agent_config", return_value={"passed": True, "details": {}})
+                )
+                stack.enter_context(patch.object(module.subprocess, "Popen", return_value=_NeverExitProcess()))
+                stack.enter_context(patch.object(module, "_extract_tracking_events", return_value=[]))
+                stack.enter_context(patch.object(module, "_collect_decision_artifacts", return_value={"investigation_ids": ["inv-1"]}))
+                stack.enter_context(
+                    patch.object(
+                        module,
+                        "_decision_cycle_state",
+                        return_value={
+                            "initial_decision_completed": False,
+                            "mcp_result_processed": True,
+                            "follow_up_decision_valid": False,
+                            "initial_decision_action": "request_identity_snapshot",
+                            "evidence_cycle_completed": False,
+                        },
+                    )
+                )
+                stack.enter_context(patch.object(module, "_investigation_reached_final_outcome", return_value=False))
+                stack.enter_context(patch.object(module, "_scan_radar_for_milestones", return_value=None))
+                stack.enter_context(patch.object(module, "_build_tracking_diagnostic_timeline", return_value={"provider_attempts": []}))
+                stack.enter_context(patch.object(module, "_classify_follow_up_shutdown_state", return_value=pending_classification))
+                stack.enter_context(patch.object(module, "_now", side_effect=_fake_now))
+                stack.enter_context(patch.object(module.time, "sleep", return_value=None))
+                exit_code = module.run_harness()
+
+            self.assertEqual(exit_code, 0)
+            report = json.loads((run_dir / "artifacts" / "tracking_only_report.json").read_text(encoding="utf-8"))
+            self.assertEqual(report.get("stopped_by"), "max_runtime_reached")
+            stop_classification = report.get("stop_details", {}).get("follow_up_shutdown_classification", {})
+            self.assertEqual(stop_classification.get("status"), "pending_at_shutdown")
 
 
 if __name__ == "__main__":

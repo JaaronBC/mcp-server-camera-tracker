@@ -71,6 +71,10 @@ TRACKING_DECISION_TOOL_RESULTS_PATH = _env_path(
     "PHASE2D_TRACKING_DECISION_TOOL_RESULTS_PATH",
     CAPTURES_DIR / "tracking_decision_tool_results.jsonl",
 )
+TRACKING_TERMINAL_FOLLOW_UP_DECISIONS_PATH = _env_path(
+    "PHASE2D_TRACKING_TERMINAL_FOLLOW_UP_DECISIONS_PATH",
+    CAPTURES_DIR / "tracking_terminal_follow_up_decisions.jsonl",
+)
 LATEST_TRACKING_DECISION_REQUEST_INDEX_PATH = _env_path(
     "PHASE2D_TRACKING_DECISION_REQUEST_INDEX_PATH",
     CAPTURES_DIR / "latest_tracking_decision_request_index.json",

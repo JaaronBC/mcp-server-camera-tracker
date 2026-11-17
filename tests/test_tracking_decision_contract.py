@@ -30,6 +30,25 @@ class _CaptureCompletions:
         return SimpleNamespace(choices=[choice], usage=None)
 
 
+class _LoopBoundCompletions:
+    def __init__(self, content: str) -> None:
+        self._content = content
+        self._bound_loop: asyncio.AbstractEventLoop | None = None
+
+    async def create(self, **kwargs):
+        loop = asyncio.get_running_loop()
+        if self._bound_loop is None:
+            self._bound_loop = loop
+        elif self._bound_loop is not loop:
+            raise RuntimeError("bound_to_different_event_loop")
+
+        choice = SimpleNamespace(
+            message=SimpleNamespace(content=self._content),
+            finish_reason="stop",
+        )
+        return SimpleNamespace(choices=[choice], usage=None)
+
+
 class _CaptureClient:
     def __init__(self, completions: _CaptureCompletions) -> None:
         self.chat = SimpleNamespace(completions=completions)
@@ -842,6 +861,53 @@ class TestTrackingDecisionContract(unittest.TestCase):
         inv_b = normalized_b["decision"]["investigation_id"]
         self.assertEqual(req_a, req_b)
         self.assertEqual(inv_a, inv_b)
+
+    def test_reused_loop_bound_client_succeeds_when_calls_share_persistent_loop(self) -> None:
+        decision = {
+            "action": "inconclusive",
+            "investigation_id": "inv-runtime-repro",
+            "reason": "insufficient_evidence",
+        }
+        client = _CaptureClient(_LoopBoundCompletions(_build_response(decision=decision, proposals=[])))
+        agent = LLMVisualTrackingAgent(client=client)
+
+        with patch.dict(
+            os.environ,
+            {
+                "PROVIDER_CALL_BUDGET_ENABLED": "0",
+                "TRACKING_IDENTITY_EVIDENCE_ENABLED": "0",
+            },
+            clear=False,
+        ):
+            loop = asyncio.new_event_loop()
+            try:
+                first = loop.run_until_complete(
+                    agent.propose_associations(
+                        frame_reference=None,
+                        detections=[_make_detection()],
+                        event_reasons=["possible_id_switch"],
+                        follow_up_context=None,
+                        request_timeout_seconds=1.0,
+                    )
+                )
+                second = loop.run_until_complete(
+                    agent.propose_associations(
+                        frame_reference=None,
+                        detections=[_make_detection()],
+                        event_reasons=["possible_id_switch"],
+                        follow_up_context={
+                            "investigation_id": "inv-runtime-repro",
+                            "request_id": "req-runtime-repro",
+                        },
+                        request_timeout_seconds=1.0,
+                    )
+                )
+            finally:
+                loop.close()
+
+        self.assertTrue(first.available)
+        self.assertTrue(second.available)
+        self.assertIsNone(second.error)
 
 
 if __name__ == "__main__":
