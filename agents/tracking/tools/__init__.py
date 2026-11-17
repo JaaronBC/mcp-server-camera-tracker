@@ -1,3 +1,3 @@
 """Tracking MCP tool registrations."""
 
-from . import visual_tracking  # noqa: F401
+from . import capabilities  # noqa: F401

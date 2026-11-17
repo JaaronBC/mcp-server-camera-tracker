@@ -5,7 +5,7 @@ from agents.registry import mcp
 from agents.observation import tools as _observation_tools
 from agents.orchestration.tools import orchestration as _orchestration_tools
 from agents.reasoning import tools as _reasoning_tools
-from agents.tracking import tools as _tracking_tools
+from agents.tracking.tools import visual_tracking as _tracking_visual_tracking_tools
 
 if __name__ == "__main__":
     mcp.run()

@@ -29,6 +29,16 @@ from ..orchestration.runtime.identity_snapshot_service import (
     find_identity_candidates,
     load_identity_snapshot,
 )
+from .tools.capabilities import (
+    TRACKING_ACTION_REQUEST_ADDITIONAL_TRACKING_EVIDENCE,
+    TRACKING_ACTION_REQUEST_IDENTITY_SNAPSHOT,
+    TRACKING_DECISION_ACTIONS,
+    TRACKING_DECISION_REQUEST_ACTIONS,
+    TRACKING_DECISION_TOOL_ALLOWLIST,
+    TRACKING_REQUEST_ACTION_TO_TOOL_NAME,
+    TRACKING_TOOL_GET_IDENTITY_SNAPSHOT,
+    TRACKING_TOOL_GET_TRACK_EVIDENCE_HISTORY,
+)
 
 TRACKING_VLM_MODEL = "qwen-3.8-27b"
 DEFAULT_OPENAI_BASE_URL = "https://128.171.10.83:9443/v1"
@@ -47,16 +57,6 @@ TRACKING_AGENT_SYSTEM_PROMPT_FALLBACK = (
 DEFAULT_TRACKING_IDENTITY_EVIDENCE_MAX_CANDIDATES = 8
 DEFAULT_TRACKING_IDENTITY_EVIDENCE_MAX_IDENTITY_POOL = 16
 DEFAULT_TRACKING_IDENTITY_EVIDENCE_STALE_SECONDS = 3.0
-TRACKING_DECISION_ACTIONS = {
-    "request_identity_snapshot",
-    "request_additional_tracking_evidence",
-    "propose_identity_association",
-    "inconclusive",
-}
-TRACKING_DECISION_TOOL_ALLOWLIST = {
-    "get_identity_snapshot",
-    "get_track_evidence_history",
-}
 
 _PROVIDER_ERROR_CODE_ALLOWED_PATTERN = re.compile(r"[^a-z0-9._:-]+")
 
@@ -1718,11 +1718,9 @@ def _normalize_uncertainty_for_decision(value: Any) -> Any:
 
 
 def _inferred_tool_name_for_action(action: str | None) -> str | None:
-    if action == "request_identity_snapshot":
-        return "get_identity_snapshot"
-    if action == "request_additional_tracking_evidence":
-        return "get_track_evidence_history"
-    return None
+    if action is None:
+        return None
+    return TRACKING_REQUEST_ACTION_TO_TOOL_NAME.get(action)
 
 
 def _collect_semantic_selector(decision: dict[str, Any], key: str) -> Any:
@@ -1928,7 +1926,7 @@ def _normalize_compact_response_payload(
                 or _nonempty_str(decision.get("name"))
             )
 
-            if action in {"request_identity_snapshot", "request_additional_tracking_evidence"} and (
+            if action in TRACKING_DECISION_REQUEST_ACTIONS and (
                 isinstance(semantic_arguments, dict) or explicit_semantic_tool_name is not None
             ):
                 runtime_investigation_id = _nonempty_str(decision.get("investigation_id"))
@@ -2005,10 +2003,7 @@ def _normalize_compact_response_payload(
     )
     if trusted_follow_up_investigation_id is not None:
         decision["investigation_id"] = trusted_follow_up_investigation_id
-    elif _nonempty_str(decision.get("investigation_id")) is None and action in {
-        "request_identity_snapshot",
-        "request_additional_tracking_evidence",
-    }:
+    elif _nonempty_str(decision.get("investigation_id")) is None and action in TRACKING_DECISION_REQUEST_ACTIONS:
         fallback_investigation_id = _runtime_fallback_investigation_id(
             request_correlation_id=request_correlation_id,
             follow_up_context=follow_up_context,
@@ -2092,7 +2087,7 @@ def _normalize_compact_response_payload(
                 "arguments": arguments,
             }
         ]
-    elif action in {"request_identity_snapshot", "request_additional_tracking_evidence"}:
+    elif action in TRACKING_DECISION_REQUEST_ACTIONS:
         semantic_arguments = _build_semantic_tool_arguments(action, parsed)
         explicit_semantic_tool_name = (
             _nonempty_str(parsed.get("tool_name"))
@@ -2305,7 +2300,7 @@ def _validate_tracking_decision_payload(payload: Any) -> tuple[dict[str, Any] | 
     if len(tool_requests) > 1:
         errors.append("decision_tool_requests_exceeds_max")
 
-    if action in {"request_identity_snapshot", "request_additional_tracking_evidence"}:
+    if action in TRACKING_DECISION_REQUEST_ACTIONS:
         if len(tool_requests) != 1:
             errors.append("decision_tool_request_required")
         if investigation_id is None:
@@ -2332,14 +2327,13 @@ def _validate_tracking_decision_payload(payload: Any) -> tuple[dict[str, Any] | 
             errors.append("decision_tool_arguments_invalid")
             continue
 
-        if action == "request_identity_snapshot" and tool_name != "get_identity_snapshot":
-            errors.append("decision_tool_action_mismatch")
-        if action == "request_additional_tracking_evidence" and tool_name != "get_track_evidence_history":
+        expected_tool_name = TRACKING_REQUEST_ACTION_TO_TOOL_NAME.get(action) if action is not None else None
+        if expected_tool_name is not None and tool_name != expected_tool_name:
             errors.append("decision_tool_action_mismatch")
 
-        if tool_name == "get_identity_snapshot":
+        if tool_name == TRACKING_TOOL_GET_IDENTITY_SNAPSHOT:
             errors.extend(_validate_identity_snapshot_arguments(arguments))
-        elif tool_name == "get_track_evidence_history":
+        elif tool_name == TRACKING_TOOL_GET_TRACK_EVIDENCE_HISTORY:
             errors.extend(_validate_track_evidence_history_arguments(arguments))
 
     if action in {"propose_identity_association", "inconclusive"} and len(tool_requests) > 0:
@@ -2369,8 +2363,8 @@ def _is_actionable_proposal(item: Any) -> bool:
 def _decision_disallows_actionable_proposals(decision_payload: dict[str, Any], raw_proposals: list[Any]) -> bool:
     action = _nonempty_str(decision_payload.get("action"))
     if action not in {
-        "request_identity_snapshot",
-        "request_additional_tracking_evidence",
+        TRACKING_ACTION_REQUEST_IDENTITY_SNAPSHOT,
+        TRACKING_ACTION_REQUEST_ADDITIONAL_TRACKING_EVIDENCE,
         "inconclusive",
     }:
         return False
