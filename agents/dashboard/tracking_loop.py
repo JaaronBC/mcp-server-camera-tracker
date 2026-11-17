@@ -951,6 +951,19 @@ def _initialize_tracking_runtime(
     return model, camera, calibration, udp_socket, tracking_runtime
 
 
+def _motion_fraction(frame: Any, previous_gray: Any | None) -> tuple[float, Any]:
+    small = cv2.resize(frame, (160, 90), interpolation=cv2.INTER_AREA)
+    gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+    gray = cv2.GaussianBlur(gray, (5, 5), 0)
+
+    if previous_gray is None:
+        return 1.0, gray
+
+    difference = cv2.absdiff(previous_gray, gray)
+    _, changed = cv2.threshold(difference, 20, 255, cv2.THRESH_BINARY)
+    return cv2.countNonZero(changed) / changed.size, gray
+
+
 def run_live_tracking_loop(
     state: SharedDashboardState,
     video_path: str | None = None,
@@ -970,7 +983,12 @@ def run_live_tracking_loop(
 
     model, camera, calibration, udp_socket, tracking_runtime = initialized
     frame_index = 0
+    previous_gray = None
+    last_detection_at = 0.0
     detection_stride = 2
+    motion_threshold = 0.01
+    min_detection_interval = 0.25
+    max_detection_gap = 1.0
 
     try:
         while True:
@@ -1009,9 +1027,26 @@ def run_live_tracking_loop(
                 state.last_live_frame_time = now
 
             frame_index += 1
-            if (frame_index - 1) % detection_stride != 0:
+            motion_fraction, previous_gray = _motion_fraction(frame, previous_gray)
+
+            is_first_frame = frame_index == 1
+            is_periodic_detection_due = now - last_detection_at >= max_detection_gap
+            is_scheduled_frame = (frame_index - 1) % detection_stride == 0
+            motion_allows_detection = (
+                motion_fraction >= motion_threshold
+                and now - last_detection_at >= min_detection_interval
+            )
+
+            if not (
+                is_first_frame
+                or is_periodic_detection_due
+                or (is_scheduled_frame and motion_allows_detection)
+            ):
+                with state.lock:
+                    state.latest_annotated_frame = frame.copy()
                 continue
 
+            last_detection_at = now
             detection_result = _run_detection_or_mark_error(state, model, frame)
             if isinstance(detection_result, tuple) and len(detection_result) == 2:
                 result, should_break = detection_result

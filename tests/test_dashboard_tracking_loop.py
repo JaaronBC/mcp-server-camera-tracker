@@ -607,6 +607,26 @@ class TestDashboardTrackingLoopInitialization(unittest.TestCase):
         self.assertEqual(state.detector_status, "stopped")
 
 
+class TestMotionFraction(unittest.TestCase):
+    def test_initial_frame_is_motion_and_unchanged_frame_is_not(self) -> None:
+        frame = np.zeros((90, 160, 3), dtype=np.uint8)
+
+        initial_motion, previous_gray = tracking_loop._motion_fraction(frame, None)
+        unchanged_motion, _ = tracking_loop._motion_fraction(frame, previous_gray)
+
+        self.assertEqual(initial_motion, 1.0)
+        self.assertEqual(unchanged_motion, 0.0)
+
+    def test_changed_frame_reports_motion(self) -> None:
+        previous_frame = np.zeros((90, 160, 3), dtype=np.uint8)
+        changed_frame = np.full((90, 160, 3), 255, dtype=np.uint8)
+        _, previous_gray = tracking_loop._motion_fraction(previous_frame, None)
+
+        motion, _ = tracking_loop._motion_fraction(changed_frame, previous_gray)
+
+        self.assertGreater(motion, 0.0)
+
+
 class TestDashboardTrackingLoopTrailSnapshot(unittest.TestCase):
     def test_snapshot_for_transformer_is_taken_while_holding_state_lock(self) -> None:
         state = SharedDashboardState()
@@ -633,6 +653,7 @@ class TestDashboardTrackingLoopTrailSnapshot(unittest.TestCase):
         with (
             patch("agents.dashboard.tracking_loop._initialize_tracking_runtime", return_value=initialized),
             patch("agents.dashboard.tracking_loop._capture_frame_or_mark_error", return_value=(True, _FakeFrame())),
+            patch("agents.dashboard.tracking_loop._motion_fraction", return_value=(1.0, None)),
             patch("agents.dashboard.tracking_loop._run_detection_or_mark_error", return_value=_FakeResult()),
             patch(
                 "agents.dashboard.tracking_loop.build_tracking_frame_outputs",
@@ -668,6 +689,7 @@ class TestDashboardTrackingLoopTrailSnapshot(unittest.TestCase):
         with (
             patch("agents.dashboard.tracking_loop._initialize_tracking_runtime", return_value=initialized),
             patch("agents.dashboard.tracking_loop._capture_frame_or_mark_error", return_value=(True, _FakeFrame())),
+            patch("agents.dashboard.tracking_loop._motion_fraction", return_value=(1.0, None)),
             patch("agents.dashboard.tracking_loop._run_detection_or_mark_error", return_value=_FakeResult()),
             patch("agents.dashboard.tracking_loop.build_tracking_frame_outputs", side_effect=_build_outputs_side_effect),
             patch("agents.dashboard.tracking_loop._apply_tracking_agent_runtime_cycle", return_value=None),
