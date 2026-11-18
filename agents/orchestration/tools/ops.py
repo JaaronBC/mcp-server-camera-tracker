@@ -701,6 +701,36 @@ def _observation_follow_up_input(
     }
 
 
+def _observation_follow_up_handoff_assessment(
+    *,
+    track_id: str,
+    normalized_summary: dict[str, Any],
+    follow_up_meta: dict[str, Any] | None,
+) -> dict[str, Any]:
+    decision_payload = normalized_summary.get("decision")
+    return {
+        "available": True,
+        "state": "observation_follow_up_completed",
+        "track_id": track_id,
+        "summary": normalized_summary.get("summary"),
+        "supporting_observation_ids": _coerce_str_list(normalized_summary.get("supporting_observation_ids")),
+        "conflicting_evidence": _coerce_str_list(normalized_summary.get("conflicting_evidence")),
+        "uncertainties": _coerce_str_list(normalized_summary.get("uncertainties")),
+        "needs_more_observations": bool(normalized_summary.get("needs_more_observations", False)),
+        "decision": dict(decision_payload) if isinstance(decision_payload, dict) else None,
+        "provenance": {
+            "source": "observation_follow_up_llm",
+            "observation_status": (
+                _coerce_nonempty_str(follow_up_meta.get("status"))
+                if isinstance(follow_up_meta, dict)
+                else None
+            ),
+            "identity_verification_authorized": False,
+            "identity_mutation_authorized": False,
+        },
+    }
+
+
 
 def _evaluate_track_for_cycle(
     track_id: str,
@@ -825,6 +855,43 @@ def _evaluate_track_for_cycle(
                             )
                             result["summary"] = normalized_summary
                             summary_payload = normalized_summary
+
+                            handoff_assessment = _observation_follow_up_handoff_assessment(
+                                track_id=track_id,
+                                normalized_summary=normalized_summary,
+                                follow_up_meta=(
+                                    dict(follow_up_observation_meta)
+                                    if isinstance(follow_up_observation_meta, dict)
+                                    else None
+                                ),
+                            )
+                            register_transport = _observation_ipc_transport()
+                            register_response = register_transport.dashboard_register_observation_follow_up_assessment(
+                                investigation_id=(
+                                    _coerce_nonempty_str(correlated_result.get("investigation_id"))
+                                    or ""
+                                ),
+                                request_id=(
+                                    _coerce_nonempty_str(correlated_result.get("request_id"))
+                                    or ""
+                                ),
+                                tool_name=(
+                                    _coerce_nonempty_str(correlated_result.get("tool_name"))
+                                    or OBSERVATION_TOOL_GET_TRACK_EVIDENCE_HISTORY
+                                ),
+                                idempotency_key=(
+                                    _coerce_nonempty_str(correlated_result.get("idempotency_key"))
+                                    or ""
+                                ),
+                                track_id=track_id,
+                                assessment=handoff_assessment,
+                            )
+                            result["observation_follow_up_handoff"] = {
+                                "published": bool(register_response.get("published", False)),
+                                "duplicate": bool(register_response.get("duplicate", False)),
+                                "rejected": bool(register_response.get("rejected", False)),
+                                "reason": register_response.get("reason"),
+                            }
 
                     observation_decision = _resolve_observation_decision(
                         summary_payload=summary_payload,

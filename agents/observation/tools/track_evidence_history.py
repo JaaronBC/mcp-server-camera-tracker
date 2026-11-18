@@ -126,6 +126,101 @@ def _extract_track_identity_ids(entries: list[dict[str, Any]]) -> set[str]:
     return identity_ids
 
 
+def _observation_motion_consistency_assessment(
+    *,
+    entries: list[dict[str, Any]],
+    advisory_evidence: dict[str, Any],
+) -> dict[str, Any]:
+    supporting_observation_ids: list[str] = []
+    supporting_message_ids: list[str] = []
+
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        message_id = _nonempty_str(entry.get("message_id"))
+        if message_id is not None:
+            supporting_message_ids.append(message_id)
+        bounded_history = entry.get("bounded_history")
+        if not isinstance(bounded_history, list):
+            continue
+        for record in bounded_history:
+            if not isinstance(record, dict):
+                continue
+            observation_id = _nonempty_str(record.get("observation_id"))
+            if observation_id is not None:
+                supporting_observation_ids.append(observation_id)
+
+    unique_observation_ids = sorted(set(supporting_observation_ids))
+    unique_message_ids = sorted(set(supporting_message_ids))
+    advisory_ambiguous_count = int(advisory_evidence.get("ambiguous_count", 0)) if isinstance(advisory_evidence, dict) else 0
+    advisory_matched_count = int(advisory_evidence.get("matched_count", 0)) if isinstance(advisory_evidence, dict) else 0
+
+    uncertainty: list[str] = []
+    if len(unique_observation_ids) < 2:
+        uncertainty.append("insufficient_history")
+
+    if advisory_ambiguous_count > 0:
+        uncertainty.append("advisory_ambiguity")
+        return {
+            "available": True,
+            "state": "advisory_ambiguous",
+            "motion_consistency": "ambiguous",
+            "supporting_observation_ids": unique_observation_ids,
+            "supporting_tracking_message_ids": unique_message_ids,
+            "matched_advisory_count": advisory_matched_count,
+            "ambiguous_advisory_count": advisory_ambiguous_count,
+            "uncertainty": uncertainty,
+            "provenance": {
+                "source": "observation_track_evidence_history",
+                "method": "bounded_history_and_advisory_consistency",
+                "advisory_evidence_used": True,
+                "identity_verification_authorized": False,
+                "identity_mutation_authorized": False,
+            },
+        }
+
+    if len(unique_observation_ids) < 2:
+        return {
+            "available": False,
+            "state": "insufficient_history",
+            "motion_consistency": "insufficient_evidence",
+            "supporting_observation_ids": unique_observation_ids,
+            "supporting_tracking_message_ids": unique_message_ids,
+            "matched_advisory_count": advisory_matched_count,
+            "ambiguous_advisory_count": advisory_ambiguous_count,
+            "uncertainty": uncertainty,
+            "provenance": {
+                "source": "observation_track_evidence_history",
+                "method": "bounded_history_and_advisory_consistency",
+                "advisory_evidence_used": advisory_matched_count > 0,
+                "identity_verification_authorized": False,
+                "identity_mutation_authorized": False,
+            },
+        }
+
+    state = "history_consistent"
+    if advisory_matched_count > 0:
+        state = "history_consistent_with_advisory_match"
+
+    return {
+        "available": True,
+        "state": state,
+        "motion_consistency": "consistent",
+        "supporting_observation_ids": unique_observation_ids,
+        "supporting_tracking_message_ids": unique_message_ids,
+        "matched_advisory_count": advisory_matched_count,
+        "ambiguous_advisory_count": advisory_ambiguous_count,
+        "uncertainty": uncertainty,
+        "provenance": {
+            "source": "observation_track_evidence_history",
+            "method": "bounded_history_and_advisory_consistency",
+            "advisory_evidence_used": advisory_matched_count > 0,
+            "identity_verification_authorized": False,
+            "identity_mutation_authorized": False,
+        },
+    }
+
+
 def _advisory_evidence_for_track(
     *,
     track_id: str,
@@ -417,6 +512,10 @@ def get_track_evidence_history(
         now_timestamp=now_timestamp,
         max_records=selected_max_advisories,
     )
+    motion_consistency_assessment = _observation_motion_consistency_assessment(
+        entries=entries,
+        advisory_evidence=advisory_evidence,
+    )
 
     response: dict[str, Any] = {
         "available": True,
@@ -441,6 +540,7 @@ def get_track_evidence_history(
             "count": len(track_identity_ids),
         },
         "prediction_detection_advisory_evidence": advisory_evidence,
+        "observation_motion_consistency_assessment": motion_consistency_assessment,
         "provenance": {
             "source": "tracking_evidence_storage",
             "retrieval_mode": "bounded_scan_no_track_index",

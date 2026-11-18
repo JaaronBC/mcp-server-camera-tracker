@@ -588,6 +588,7 @@ class TestObservationMcpEvidenceTools(unittest.TestCase):
                 )
 
         advisory = result["prediction_detection_advisory_evidence"]
+        motion = result["observation_motion_consistency_assessment"]
         self.assertTrue(result["available"])
         self.assertFalse(result["mutation_authorized"])
         self.assertTrue(advisory["available"])
@@ -599,6 +600,11 @@ class TestObservationMcpEvidenceTools(unittest.TestCase):
         self.assertEqual(decisions, {"matched", "ambiguous"})
         self.assertFalse(advisory["provenance"]["identity_verification_authorized"])
         self.assertFalse(advisory["provenance"]["identity_mutation_authorized"])
+        self.assertTrue(motion["available"])
+        self.assertEqual(motion["motion_consistency"], "ambiguous")
+        self.assertIn("advisory_ambiguity", motion["uncertainty"])
+        self.assertFalse(motion["provenance"]["identity_verification_authorized"])
+        self.assertFalse(motion["provenance"]["identity_mutation_authorized"])
 
     def test_get_track_evidence_history_rejects_stale_or_mismatched_advisories(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -658,11 +664,15 @@ class TestObservationMcpEvidenceTools(unittest.TestCase):
                 )
 
         advisory = result["prediction_detection_advisory_evidence"]
+        motion = result["observation_motion_consistency_assessment"]
         self.assertTrue(result["available"])
         self.assertFalse(advisory["available"])
         self.assertEqual(advisory["state"], "no_current_advisory")
         self.assertEqual(advisory["advisory_count"], 0)
         self.assertGreaterEqual(advisory["rejected_count"], 2)
+        self.assertTrue(motion["available"])
+        self.assertEqual(motion["motion_consistency"], "consistent")
+        self.assertFalse(motion["provenance"]["identity_mutation_authorized"])
 
 
 class TestObservationMcpToolDiscoverability(unittest.IsolatedAsyncioTestCase):

@@ -256,6 +256,165 @@ class TestTrackingDecisionIpcTransport(unittest.TestCase):
             self.assertIsInstance(errors, list)
             self.assertIn("decision_tool_name_mismatch_for_action", errors)
 
+    def test_observation_follow_up_handoff_delivers_as_separate_late_event(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            transport = _new_transport(Path(temp_dir))
+            transport.dashboard_submit_decision_request(
+                decision=_decision(investigation_id="inv-handoff", request_id="req-handoff"),
+                now_timestamp=1000.0,
+            )
+            cycle = transport.run_fixture_orchestration_cycle(now_timestamp=1000.1)
+            self.assertEqual(cycle["published_count"], 1)
+
+            first_poll = transport.dashboard_poll_results(now_timestamp=1000.12)
+            self.assertEqual(first_poll["result_count"], 1)
+            self.assertEqual(first_poll["results"][0].get("delivery_kind"), "mcp_result")
+
+            published = transport.dashboard_register_observation_follow_up_assessment(
+                investigation_id="inv-handoff",
+                request_id="req-handoff",
+                tool_name="get_track_evidence_history",
+                idempotency_key="inv-handoff:req-handoff:get_track_evidence_history",
+                track_id="track-1",
+                assessment={
+                    "available": True,
+                    "state": "observation_follow_up_completed",
+                    "uncertainties": ["occlusion_overlap"],
+                    "needs_more_observations": True,
+                    "decision": {"action": "inconclusive", "reason": "ambiguous_motion"},
+                    "supporting_observation_ids": ["obs-1"],
+                    "provenance": {
+                        "source": "observation_follow_up_llm",
+                        "identity_verification_authorized": False,
+                        "identity_mutation_authorized": False,
+                    },
+                },
+                now_timestamp=1000.15,
+            )
+            self.assertTrue(published["published"])
+
+            second_poll = transport.dashboard_poll_results(now_timestamp=1000.2)
+            self.assertEqual(second_poll["result_count"], 1)
+            self.assertEqual(
+                second_poll["results"][0].get("delivery_kind"),
+                "observation_follow_up_assessment",
+            )
+            payload = second_poll["results"][0].get("result_payload", {})
+            handoff = payload.get("observation_llm_follow_up_assessment")
+            self.assertIsInstance(handoff, dict)
+            assert isinstance(handoff, dict)
+            self.assertEqual(handoff.get("state"), "observation_follow_up_completed")
+            self.assertEqual(handoff.get("decision", {}).get("action"), "inconclusive")
+            self.assertIn("occlusion_overlap", handoff.get("uncertainties", []))
+            provenance = payload.get("observation_llm_follow_up_assessment_provenance", {})
+            self.assertFalse(provenance.get("identity_verification_authorized", True))
+            self.assertFalse(provenance.get("identity_mutation_authorized", True))
+
+            third_poll = transport.dashboard_poll_results(now_timestamp=1000.21)
+            self.assertEqual(third_poll["result_count"], 0)
+
+    def test_observation_follow_up_handoff_when_registered_before_first_poll_emits_both_orders(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            transport = _new_transport(Path(temp_dir))
+            transport.dashboard_submit_decision_request(
+                decision=_decision(investigation_id="inv-order", request_id="req-order"),
+                now_timestamp=1000.0,
+            )
+            transport.run_fixture_orchestration_cycle(now_timestamp=1000.1)
+
+            published = transport.dashboard_register_observation_follow_up_assessment(
+                investigation_id="inv-order",
+                request_id="req-order",
+                tool_name="get_track_evidence_history",
+                idempotency_key="inv-order:req-order:get_track_evidence_history",
+                track_id="track-order",
+                assessment={
+                    "available": True,
+                    "state": "observation_follow_up_completed",
+                    "uncertainties": ["brief_occlusion"],
+                    "supporting_observation_ids": ["obs-order"],
+                    "provenance": {
+                        "identity_verification_authorized": False,
+                        "identity_mutation_authorized": False,
+                    },
+                },
+                now_timestamp=1000.15,
+            )
+            self.assertTrue(published["published"])
+
+            polled = transport.dashboard_poll_results(now_timestamp=1000.2)
+            self.assertEqual(polled["result_count"], 2)
+            delivery_kinds = [item.get("delivery_kind") for item in polled["results"]]
+            self.assertEqual(delivery_kinds, ["mcp_result", "observation_follow_up_assessment"])
+
+    def test_observation_follow_up_handoff_rejects_mismatch_duplicate_superseded_and_expired(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            transport = _new_transport(Path(temp_dir))
+            transport.dashboard_submit_decision_request(
+                decision=_decision(investigation_id="inv-handoff-2", request_id="req-handoff-2"),
+                now_timestamp=1000.0,
+            )
+            transport.run_fixture_orchestration_cycle(now_timestamp=1000.1)
+
+            mismatch = transport.dashboard_register_observation_follow_up_assessment(
+                investigation_id="inv-handoff-2",
+                request_id="req-other",
+                tool_name="get_track_evidence_history",
+                idempotency_key="inv-handoff-2:req-handoff-2:get_track_evidence_history",
+                track_id="track-1",
+                assessment={"available": True},
+                now_timestamp=1000.11,
+            )
+            self.assertTrue(mismatch["rejected"])
+            self.assertEqual(mismatch["reason"], "correlation_mismatch")
+
+            first = transport.dashboard_register_observation_follow_up_assessment(
+                investigation_id="inv-handoff-2",
+                request_id="req-handoff-2",
+                tool_name="get_track_evidence_history",
+                idempotency_key="inv-handoff-2:req-handoff-2:get_track_evidence_history",
+                track_id="track-1",
+                assessment={"available": True, "uncertainties": ["low_confidence"]},
+                now_timestamp=1000.12,
+            )
+            self.assertTrue(first["published"])
+
+            duplicate = transport.dashboard_register_observation_follow_up_assessment(
+                investigation_id="inv-handoff-2",
+                request_id="req-handoff-2",
+                tool_name="get_track_evidence_history",
+                idempotency_key="inv-handoff-2:req-handoff-2:get_track_evidence_history",
+                track_id="track-1",
+                assessment={"available": True, "uncertainties": ["low_confidence"]},
+                now_timestamp=1000.13,
+            )
+            self.assertTrue(duplicate["duplicate"])
+
+            superseded = transport.dashboard_register_observation_follow_up_assessment(
+                investigation_id="inv-handoff-2",
+                request_id="req-handoff-2",
+                tool_name="get_track_evidence_history",
+                idempotency_key="inv-handoff-2:req-handoff-2:get_track_evidence_history",
+                track_id="track-1",
+                assessment={"available": True, "uncertainties": ["newer_interpretation"]},
+                now_timestamp=1000.131,
+            )
+            self.assertTrue(superseded["rejected"])
+            self.assertEqual(superseded["reason"], "superseded_assessment_rejected")
+
+            transport.dashboard_poll_results(now_timestamp=1000.2)
+            expired = transport.dashboard_register_observation_follow_up_assessment(
+                investigation_id="inv-handoff-2",
+                request_id="req-handoff-2",
+                tool_name="get_track_evidence_history",
+                idempotency_key="inv-handoff-2:req-handoff-2:get_track_evidence_history",
+                track_id="track-1",
+                assessment={"available": True},
+                now_timestamp=1201.0,
+            )
+            self.assertTrue(expired["rejected"])
+            self.assertEqual(expired["reason"], "expired_assessment")
+
     def test_bounded_retention(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             transport = _new_transport(

@@ -318,6 +318,373 @@ class TestTrackingDecisionFollowUp(unittest.TestCase):
         self.assertIsInstance(captured_context.get("evidence_references"), dict)
         self.assertIsInstance(captured_context.get("mcp_result"), dict)
 
+    def test_follow_up_context_includes_observation_llm_assessment_payload(self) -> None:
+        state = SharedDashboardState()
+        state.tracking_decision_ipc_enabled = True
+        state.tracking_decision_ipc_transport = _FakeResultTransport(
+            [
+                {
+                    "investigation_id": "inv-1",
+                    "request_id": "req-1",
+                    "tool_name": "get_track_evidence_history",
+                    "status": "ok",
+                    "idempotency_key": "rk-1",
+                    "result_payload": {
+                        "available": True,
+                        "messages": [{"message_id": "m-1"}],
+                        "observation_llm_follow_up_assessment": {
+                            "available": True,
+                            "state": "observation_follow_up_completed",
+                            "uncertainties": ["occlusion_overlap"],
+                            "needs_more_observations": True,
+                            "decision": {"action": "inconclusive", "reason": "ambiguous_motion"},
+                            "supporting_observation_ids": ["obs-9"],
+                            "provenance": {
+                                "source": "observation_follow_up_llm",
+                                "identity_verification_authorized": False,
+                                "identity_mutation_authorized": False,
+                            },
+                        },
+                    },
+                }
+            ]
+        )
+        state.tracking_decision_investigations["inv-1"] = _base_investigation_state()
+
+        captured_context: dict[str, object] = {}
+
+        def _capture_submit(**kwargs):
+            follow_up = kwargs.get("follow_up_context")
+            if isinstance(follow_up, dict):
+                captured_context.update(follow_up)
+            return True
+
+        with patch.object(tracking_loop, "submit_tracking_runtime_candidates", side_effect=_capture_submit):
+            tracking_loop._consume_tracking_decision_results_if_enabled(
+                state=state,
+                tracking_runtime=_FakeRuntime(),
+                frame=types.SimpleNamespace(shape=(10, 10, 3)),
+                tracking_candidates=[],
+                now=1001.0,
+            )
+
+        mcp_result = captured_context.get("mcp_result")
+        self.assertIsInstance(mcp_result, dict)
+        assert isinstance(mcp_result, dict)
+        assessment = mcp_result.get("observation_llm_follow_up_assessment")
+        self.assertIsInstance(assessment, dict)
+        assert isinstance(assessment, dict)
+        self.assertEqual(assessment.get("state"), "observation_follow_up_completed")
+        self.assertIn("occlusion_overlap", assessment.get("uncertainties", []))
+        self.assertEqual(assessment.get("decision", {}).get("action"), "inconclusive")
+        self.assertFalse(assessment.get("provenance", {}).get("identity_verification_authorized", True))
+        self.assertFalse(assessment.get("provenance", {}).get("identity_mutation_authorized", True))
+
+    def test_late_observation_assessment_is_processed_after_mcp_result_consumed(self) -> None:
+        state = SharedDashboardState()
+        state.tracking_decision_ipc_enabled = True
+        state.tracking_decision_investigations["inv-1"] = _base_investigation_state()
+
+        captured_contexts: list[dict[str, object]] = []
+
+        def _capture_submit(**kwargs):
+            follow_up = kwargs.get("follow_up_context")
+            if isinstance(follow_up, dict):
+                captured_contexts.append(dict(follow_up))
+            return len(captured_contexts) >= 2
+
+        state.tracking_decision_ipc_transport = _FakeResultTransport(
+            [
+                {
+                    "delivery_kind": "mcp_result",
+                    "investigation_id": "inv-1",
+                    "request_id": "req-1",
+                    "tool_name": "get_track_evidence_history",
+                    "status": "ok",
+                    "idempotency_key": "rk-1",
+                    "result_payload": {"available": True, "messages": [{"message_id": "m-1"}]},
+                }
+            ]
+        )
+
+        with patch.object(tracking_loop, "submit_tracking_runtime_candidates", side_effect=_capture_submit):
+            tracking_loop._consume_tracking_decision_results_if_enabled(
+                state=state,
+                tracking_runtime=_FakeRuntime(),
+                frame=types.SimpleNamespace(shape=(10, 10, 3)),
+                tracking_candidates=[],
+                now=1001.0,
+            )
+
+            state.tracking_decision_ipc_transport = _FakeResultTransport(
+                [
+                    {
+                        "delivery_kind": "observation_follow_up_assessment",
+                        "investigation_id": "inv-1",
+                        "request_id": "req-1",
+                        "tool_name": "get_track_evidence_history",
+                        "status": "ok",
+                        "idempotency_key": "rk-1:observation_follow_up_assessment",
+                        "result_payload": {
+                            "observation_llm_follow_up_assessment": {
+                                "available": True,
+                                "state": "observation_follow_up_completed",
+                                "supporting_observation_ids": ["obs-2"],
+                                "uncertainties": ["occlusion_overlap"],
+                                "provenance": {
+                                    "identity_verification_authorized": False,
+                                    "identity_mutation_authorized": False,
+                                },
+                            }
+                        },
+                    }
+                ]
+            )
+            tracking_loop._consume_tracking_decision_results_if_enabled(
+                state=state,
+                tracking_runtime=_FakeRuntime(),
+                frame=types.SimpleNamespace(shape=(10, 10, 3)),
+                tracking_candidates=[],
+                now=1001.1,
+            )
+
+        self.assertEqual(len(captured_contexts), 2)
+        late_payload = captured_contexts[1].get("mcp_result")
+        self.assertIsInstance(late_payload, dict)
+        assert isinstance(late_payload, dict)
+        assessment = late_payload.get("observation_llm_follow_up_assessment")
+        self.assertIsInstance(assessment, dict)
+        assert isinstance(assessment, dict)
+        self.assertIn("obs-2", assessment.get("supporting_observation_ids", []))
+        self.assertIn("occlusion_overlap", assessment.get("uncertainties", []))
+        self.assertFalse(assessment.get("provenance", {}).get("identity_mutation_authorized", True))
+
+    def test_late_assessment_does_not_resubmit_when_follow_up_already_submitted(self) -> None:
+        state = SharedDashboardState()
+        state.tracking_decision_ipc_enabled = True
+        state.tracking_decision_investigations["inv-1"] = _base_investigation_state()
+
+        with patch.object(tracking_loop, "submit_tracking_runtime_candidates", return_value=True) as submit_mock:
+            state.tracking_decision_ipc_transport = _FakeResultTransport(
+                [
+                    {
+                        "delivery_kind": "mcp_result",
+                        "investigation_id": "inv-1",
+                        "request_id": "req-1",
+                        "tool_name": "get_track_evidence_history",
+                        "status": "ok",
+                        "idempotency_key": "rk-1",
+                        "result_payload": {"available": True},
+                    }
+                ]
+            )
+            tracking_loop._consume_tracking_decision_results_if_enabled(
+                state=state,
+                tracking_runtime=_FakeRuntime(),
+                frame=types.SimpleNamespace(shape=(10, 10, 3)),
+                tracking_candidates=[],
+                now=1001.0,
+            )
+
+            state.tracking_decision_ipc_transport = _FakeResultTransport(
+                [
+                    {
+                        "delivery_kind": "observation_follow_up_assessment",
+                        "investigation_id": "inv-1",
+                        "request_id": "req-1",
+                        "tool_name": "get_track_evidence_history",
+                        "status": "ok",
+                        "idempotency_key": "rk-1:observation_follow_up_assessment",
+                        "result_payload": {
+                            "observation_llm_follow_up_assessment": {
+                                "available": True,
+                                "state": "observation_follow_up_completed",
+                                "provenance": {
+                                    "identity_verification_authorized": False,
+                                    "identity_mutation_authorized": False,
+                                },
+                            }
+                        },
+                    }
+                ]
+            )
+            tracking_loop._consume_tracking_decision_results_if_enabled(
+                state=state,
+                tracking_runtime=_FakeRuntime(),
+                frame=types.SimpleNamespace(shape=(10, 10, 3)),
+                tracking_candidates=[],
+                now=1001.1,
+            )
+
+        self.assertEqual(submit_mock.call_count, 1)
+
+    def test_late_assessment_after_investigation_termination_is_ignored(self) -> None:
+        state = SharedDashboardState()
+        state.tracking_decision_ipc_enabled = True
+        state.tracking_decision_investigations["inv-1"] = _base_investigation_state()
+        investigation = state.tracking_decision_investigations["inv-1"]
+        investigation["terminal"] = True
+        investigation["follow_up_completed"] = True
+
+        state.tracking_decision_ipc_transport = _FakeResultTransport(
+            [
+                {
+                    "delivery_kind": "observation_follow_up_assessment",
+                    "investigation_id": "inv-1",
+                    "request_id": "req-1",
+                    "tool_name": "get_track_evidence_history",
+                    "status": "ok",
+                    "idempotency_key": "rk-1:observation_follow_up_assessment",
+                    "result_payload": {
+                        "observation_llm_follow_up_assessment": {
+                            "available": True,
+                            "state": "observation_follow_up_completed",
+                            "uncertainties": ["late_assessment"],
+                            "provenance": {
+                                "identity_verification_authorized": False,
+                                "identity_mutation_authorized": False,
+                            },
+                        }
+                    },
+                }
+            ]
+        )
+
+        with patch.object(tracking_loop, "submit_tracking_runtime_candidates", return_value=True) as submit_mock:
+            tracking_loop._consume_tracking_decision_results_if_enabled(
+                state=state,
+                tracking_runtime=_FakeRuntime(),
+                frame=types.SimpleNamespace(shape=(10, 10, 3)),
+                tracking_candidates=[],
+                now=1001.0,
+            )
+
+        submit_mock.assert_not_called()
+
+    def test_failed_follow_up_submission_retains_pending_recovery_behavior(self) -> None:
+        state = SharedDashboardState()
+        state.tracking_decision_ipc_enabled = True
+        state.tracking_decision_investigations["inv-1"] = _base_investigation_state()
+        state.tracking_decision_ipc_transport = _FakeResultTransport(
+            [
+                {
+                    "delivery_kind": "mcp_result",
+                    "investigation_id": "inv-1",
+                    "request_id": "req-1",
+                    "tool_name": "get_track_evidence_history",
+                    "status": "ok",
+                    "idempotency_key": "rk-1",
+                    "result_payload": {"available": True, "messages": [{"message_id": "m-1"}]},
+                }
+            ]
+        )
+
+        with patch.object(tracking_loop, "submit_tracking_runtime_candidates", return_value=False) as first_submit_mock:
+            tracking_loop._consume_tracking_decision_results_if_enabled(
+                state=state,
+                tracking_runtime=_FakeRuntime(),
+                frame=types.SimpleNamespace(shape=(10, 10, 3)),
+                tracking_candidates=[],
+                now=1001.0,
+            )
+
+        self.assertEqual(first_submit_mock.call_count, 1)
+        investigation = state.tracking_decision_investigations["inv-1"]
+        self.assertTrue(investigation.get("follow_up_submit_pending", False))
+        self.assertFalse(investigation.get("follow_up_submitted", False))
+
+        captured: dict[str, object] = {}
+
+        def _capture_submit(**kwargs):
+            follow_up = kwargs.get("follow_up_context")
+            if isinstance(follow_up, dict):
+                captured.update(follow_up)
+            return True
+
+        with patch.object(tracking_loop, "submit_tracking_runtime_candidates", side_effect=_capture_submit) as retry_submit_mock:
+            tracking_loop._apply_tracking_agent_runtime_cycle(
+                state=state,
+                tracking_runtime=_FakeRuntime(),
+                now=1001.1,
+                frame=types.SimpleNamespace(shape=(10, 10, 3)),
+                tracks={"det-1": _track_snapshot()},
+                tracking_candidates=[{"track_id": "track-new"}],
+                selected_event_reasons=["new_tracking_candidate"],
+            )
+
+        self.assertEqual(retry_submit_mock.call_count, 1)
+        self.assertEqual(captured.get("investigation_id"), "inv-1")
+        self.assertEqual(captured.get("idempotency_key"), "rk-1")
+
+    def test_duplicate_and_mismatched_assessments_do_not_trigger_additional_llm_calls(self) -> None:
+        state = SharedDashboardState()
+        state.tracking_decision_ipc_enabled = True
+        state.tracking_decision_investigations["inv-1"] = _base_investigation_state()
+
+        with patch.object(tracking_loop, "submit_tracking_runtime_candidates", return_value=True) as submit_mock:
+            state.tracking_decision_ipc_transport = _FakeResultTransport(
+                [
+                    {
+                        "delivery_kind": "mcp_result",
+                        "investigation_id": "inv-1",
+                        "request_id": "req-1",
+                        "tool_name": "get_track_evidence_history",
+                        "status": "ok",
+                        "idempotency_key": "rk-1",
+                        "result_payload": {"available": True},
+                    }
+                ]
+            )
+            tracking_loop._consume_tracking_decision_results_if_enabled(
+                state=state,
+                tracking_runtime=_FakeRuntime(),
+                frame=types.SimpleNamespace(shape=(10, 10, 3)),
+                tracking_candidates=[],
+                now=1001.0,
+            )
+
+            state.tracking_decision_ipc_transport = _FakeResultTransport(
+                [
+                    {
+                        "delivery_kind": "observation_follow_up_assessment",
+                        "investigation_id": "inv-1",
+                        "request_id": "req-mismatch",
+                        "tool_name": "get_track_evidence_history",
+                        "status": "ok",
+                        "idempotency_key": "rk-1:observation_follow_up_assessment_mismatch",
+                        "result_payload": {
+                            "observation_llm_follow_up_assessment": {
+                                "available": True,
+                                "state": "observation_follow_up_completed",
+                            }
+                        },
+                    },
+                    {
+                        "delivery_kind": "observation_follow_up_assessment",
+                        "investigation_id": "inv-1",
+                        "request_id": "req-1",
+                        "tool_name": "get_track_evidence_history",
+                        "status": "ok",
+                        "idempotency_key": "rk-1",
+                        "result_payload": {
+                            "observation_llm_follow_up_assessment": {
+                                "available": True,
+                                "state": "observation_follow_up_completed",
+                            }
+                        },
+                    },
+                ]
+            )
+            tracking_loop._consume_tracking_decision_results_if_enabled(
+                state=state,
+                tracking_runtime=_FakeRuntime(),
+                frame=types.SimpleNamespace(shape=(10, 10, 3)),
+                tracking_candidates=[],
+                now=1001.1,
+            )
+
+        self.assertEqual(submit_mock.call_count, 1)
+
     def test_pending_follow_up_is_prioritized_over_new_candidate_submission(self) -> None:
         state = SharedDashboardState()
         state.tracking_decision_investigations["inv-1"] = _base_investigation_state()

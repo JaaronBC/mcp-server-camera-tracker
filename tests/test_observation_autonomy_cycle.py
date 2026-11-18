@@ -13,6 +13,7 @@ class _FakeTransport:
         self.latest_result = latest_result
         self.results = list(results) if isinstance(results, list) else None
         self.submitted: list[dict] = []
+        self.registered_handoffs: list[dict] = []
 
     def dashboard_submit_decision_request(self, *, decision: dict, llm_correlation_id: str | None = None, now_timestamp: float | None = None) -> dict:
         self.submitted.append({"decision": decision, "llm_correlation_id": llm_correlation_id})
@@ -32,6 +33,15 @@ class _FakeTransport:
             "result_count": (1 if isinstance(self.latest_result, dict) else 0),
             "latest": (dict(self.latest_result) if isinstance(self.latest_result, dict) else None),
             "results": ([dict(self.latest_result)] if isinstance(self.latest_result, dict) else []),
+        }
+
+    def dashboard_register_observation_follow_up_assessment(self, **kwargs) -> dict:
+        self.registered_handoffs.append(dict(kwargs))
+        return {
+            "published": True,
+            "duplicate": False,
+            "rejected": False,
+            "reason": None,
         }
 
 
@@ -521,6 +531,16 @@ class TestObservationAutonomyCycle(unittest.TestCase):
             second_eval["result"]["observation_decision"].get("phase"),
             "follow_up_terminal",
         )
+        self.assertEqual(len(fake_transport.registered_handoffs), 1)
+        handoff = fake_transport.registered_handoffs[0]
+        self.assertEqual(handoff.get("track_id"), "track-1")
+        self.assertEqual(handoff.get("idempotency_key"), "inv:req:get_track_evidence_history")
+        assessment = handoff.get("assessment")
+        self.assertIsInstance(assessment, dict)
+        assert isinstance(assessment, dict)
+        self.assertEqual(assessment.get("state"), "observation_follow_up_completed")
+        self.assertIn("obs-3", assessment.get("supporting_observation_ids", []))
+        self.assertFalse(assessment.get("provenance", {}).get("identity_mutation_authorized", True))
 
     def test_followup_explicit_request_is_terminal_and_not_reissued(self) -> None:
         first_result = self._base_result(needs_more_observations=True, speed=1.0)

@@ -1705,6 +1705,8 @@ def _consume_tracking_decision_results_if_enabled(
         if not isinstance(result_event, dict):
             continue
 
+        delivery_kind = _nonempty_str(result_event.get("delivery_kind")) or "mcp_result"
+        is_observation_assessment_delivery = delivery_kind == "observation_follow_up_assessment"
         idempotency_key = _nonempty_str(result_event.get("idempotency_key"))
         investigation_id = _nonempty_str(result_event.get("investigation_id"))
         request_id = _nonempty_str(result_event.get("request_id"))
@@ -1713,6 +1715,10 @@ def _consume_tracking_decision_results_if_enabled(
         result_payload = result_event.get("result_payload")
         if not isinstance(result_payload, dict):
             result_payload = {}
+
+        assessment_follow_up_context: dict[str, Any] | None = None
+        assessment_follow_up_already_submitted = False
+        assessment_event_recorded = False
 
         with state.lock:
             if idempotency_key is not None and idempotency_key in state.tracking_decision_consumed_result_keys:
@@ -1745,21 +1751,108 @@ def _consume_tracking_decision_results_if_enabled(
                     state.tracking_decision_consumed_result_keys.add(idempotency_key)
                 continue
 
-            if idempotency_key is not None:
+            if is_observation_assessment_delivery:
+                if idempotency_key is not None:
+                    state.tracking_decision_consumed_result_keys.add(idempotency_key)
+
+                if bool(investigation_state.get("terminal", False)):
+                    terminal_count += 1
+                    continue
+
+                existing_payload = investigation_state.get("result_payload")
+                merged_payload = (
+                    dict(existing_payload)
+                    if isinstance(existing_payload, dict)
+                    else {}
+                )
+                merged_payload.update(dict(result_payload))
+                investigation_state["result_payload"] = merged_payload
+                if _nonempty_str(investigation_state.get("result_status")) is None:
+                    investigation_state["result_status"] = status
+                investigation_state["updated_at"] = now
+
+                assessment_follow_up_already_submitted = bool(investigation_state.get("follow_up_submitted", False))
+                assessment_follow_up_context = {
+                    "investigation_id": investigation_id,
+                    "request_id": request_id,
+                    "idempotency_key": idempotency_key,
+                    "result_status": _nonempty_str(investigation_state.get("result_status")) or status,
+                    "tool_name": tool_name,
+                    "correlation_id": _nonempty_str(investigation_state.get("correlation_id")),
+                    "initial_decision": (
+                        dict(investigation_state.get("initial_decision"))
+                        if isinstance(investigation_state.get("initial_decision"), dict)
+                        else {}
+                    ),
+                    "evidence_references": (
+                        dict(investigation_state.get("evidence_references"))
+                        if isinstance(investigation_state.get("evidence_references"), dict)
+                        else {}
+                    ),
+                    "mcp_result": dict(merged_payload),
+                }
+                assessment_event_recorded = True
+
+            if not assessment_event_recorded and idempotency_key is not None:
                 state.tracking_decision_consumed_result_keys.add(idempotency_key)
 
-            if bool(investigation_state.get("terminal", False)):
+            if not assessment_event_recorded and bool(investigation_state.get("terminal", False)):
                 terminal_count += 1
                 continue
 
-            if idempotency_key is not None and idempotency_key in state.tracking_decision_followup_result_keys:
+            if (
+                not assessment_event_recorded
+                and idempotency_key is not None
+                and idempotency_key in state.tracking_decision_followup_result_keys
+            ):
                 duplicate_count += 1
                 continue
 
-            investigation_state["result_status"] = status
-            investigation_state["result_payload"] = dict(result_payload)
-            investigation_state["result_key"] = idempotency_key
-            investigation_state["updated_at"] = now
+            if not assessment_event_recorded:
+                investigation_state["result_status"] = status
+                investigation_state["result_payload"] = dict(result_payload)
+                investigation_state["result_key"] = idempotency_key
+                investigation_state["updated_at"] = now
+
+        if is_observation_assessment_delivery:
+            if assessment_follow_up_already_submitted:
+                duplicate_count += 1
+                processed_count += 1
+                continue
+            if not isinstance(assessment_follow_up_context, dict):
+                mismatch_count += 1
+                processed_count += 1
+                continue
+
+            did_submit = submit_tracking_runtime_candidates(
+                runtime=tracking_runtime,
+                now=now,
+                frame=frame,
+                detections=tracking_candidates,
+                event_reasons=["tracking_decision_follow_up"],
+                follow_up_context=assessment_follow_up_context,
+                encode_frame=encode_frame_as_data_url,
+                request_timeout_seconds=TRACKING_AGENT_REQUEST_TIMEOUT_SECONDS,
+            )
+
+            with state.lock:
+                active_state = state.tracking_decision_investigations.get(investigation_id)
+                if isinstance(active_state, dict):
+                    if did_submit:
+                        active_state["follow_up_submitted"] = True
+                        active_state["iterations"] = int(active_state.get("iterations", 1)) + 1
+                        active_state["updated_at"] = now
+                    else:
+                        active_state["follow_up_submit_pending"] = True
+                        active_state["updated_at"] = now
+
+            if did_submit:
+                if idempotency_key is not None:
+                    with state.lock:
+                        state.tracking_decision_followup_result_keys.add(idempotency_key)
+                follow_up_submitted_count += 1
+            processed_count += 1
+            continue
 
         if status in UNSUCCESSFUL_DECISION_RESULT_STATUSES:
             with state.lock:
