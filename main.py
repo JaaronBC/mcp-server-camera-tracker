@@ -21,6 +21,9 @@ from agents.orchestration.runtime.identity_reassociation_intents import Identity
 from agents.orchestration.runtime.tracking_decision_ipc import TrackingDecisionIpcTransport
 from agents.orchestration.runtime.verification_feedback import VerificationFeedbackPublisher
 from agents.orchestration.runtime.verification_queue import VerificationQueueManager
+from agents.observation.tools.track_evidence_history_contract import (
+    validate_track_evidence_history_arguments,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 SERVER_PATH = PROJECT_ROOT / "server.py"
@@ -271,42 +274,13 @@ def _validate_identity_snapshot_arguments(arguments: dict[str, Any]) -> list[str
 
 
 def _validate_track_evidence_history_arguments(arguments: dict[str, Any]) -> list[str]:
-    errors: list[str] = []
-    allowed_keys = {
-        "track_id",
-        "max_messages",
-        "max_history_records",
-        "max_scan_records",
-        "now_timestamp",
-        "investigation_id",
-        "correlation_id",
-    }
-    unknown = [key for key in arguments.keys() if key not in allowed_keys]
-    if unknown:
-        errors.append("track_evidence_history_unknown_arguments")
-
-    if _nonempty_str(arguments.get("track_id")) is None:
-        errors.append("track_evidence_history_track_id_required")
-
-    for key in ("max_messages", "max_history_records", "max_scan_records"):
-        value = arguments.get(key)
-        if value is None:
-            continue
-        if not isinstance(value, int) or value <= 0:
-            errors.append(f"track_evidence_history_{key}_invalid")
-
-    now_timestamp = arguments.get("now_timestamp")
-    if now_timestamp is not None and not isinstance(now_timestamp, (int, float)):
-        errors.append("track_evidence_history_now_timestamp_invalid")
-
-    for key in ("investigation_id", "correlation_id"):
-        value = arguments.get(key)
-        if value is None:
-            continue
-        if _nonempty_str(value) is None:
-            errors.append(f"track_evidence_history_{key}_invalid")
-
-    return sorted(set(errors))
+    validation = validate_track_evidence_history_arguments(
+        arguments,
+        require_track_id=True,
+        validate_track_id_value=True,
+    )
+    errors = validation.get("errors")
+    return list(errors) if isinstance(errors, list) else []
 
 
 def _validate_tracking_decision_request_for_dispatch(request_event: dict[str, Any]) -> list[str]:

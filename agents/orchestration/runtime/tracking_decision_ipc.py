@@ -15,6 +15,10 @@ REQUEST_ACTIONS = {
     "request_identity_snapshot",
     "request_additional_tracking_evidence",
 }
+REQUEST_ACTION_TO_ALLOWED_TOOLS = {
+    "request_identity_snapshot": frozenset({"get_identity_snapshot"}),
+    "request_additional_tracking_evidence": frozenset({"get_track_evidence_history"}),
+}
 ALLOWLISTED_TOOLS = {
     "get_identity_snapshot",
     "get_track_evidence_history",
@@ -347,6 +351,53 @@ class TrackingDecisionIpcTransport:
             "expired_count": expired_count,
             "terminal_rejections": terminal_rejections,
             "budget_exhausted_rejections": budget_exhausted_rejections,
+        }
+
+    def lookup_results_for_request(
+        self,
+        *,
+        investigation_id: str,
+        request_id: str,
+        tool_name: str,
+        now_timestamp: float | None = None,
+    ) -> dict[str, Any]:
+        now = time.time() if now_timestamp is None else float(now_timestamp)
+        normalized_investigation_id = _nonempty_str(investigation_id)
+        normalized_request_id = _nonempty_str(request_id)
+        normalized_tool_name = _nonempty_str(tool_name)
+        if (
+            normalized_investigation_id is None
+            or normalized_request_id is None
+            or normalized_tool_name is None
+        ):
+            return {
+                "available": False,
+                "result_count": 0,
+                "results": [],
+                "error": "invalid_lookup_selector",
+            }
+
+        state = self._load_state(now_timestamp=now)
+        matched: list[dict[str, Any]] = []
+        for result in state["results"]:
+            if _nonempty_str(result.get("investigation_id")) != normalized_investigation_id:
+                continue
+            if _nonempty_str(result.get("request_id")) != normalized_request_id:
+                continue
+            if _nonempty_str(result.get("tool_name")) != normalized_tool_name:
+                continue
+            matched.append(dict(result))
+
+        matched.sort(
+            key=lambda item: float(item.get("finished_at", item.get("started_at", 0.0)) or 0.0),
+            reverse=True,
+        )
+        latest = matched[0] if matched else None
+        return {
+            "available": True,
+            "result_count": len(matched),
+            "results": matched,
+            "latest": latest,
         }
 
     def orchestration_publish_fixture_result(
@@ -782,6 +833,8 @@ class TrackingDecisionIpcTransport:
             tool_name = _nonempty_str(tool_request.get("tool_name"))
             if tool_name not in ALLOWLISTED_TOOLS:
                 errors.append("decision_tool_name_not_allowed")
+            if action in REQUEST_ACTION_TO_ALLOWED_TOOLS and tool_name not in REQUEST_ACTION_TO_ALLOWED_TOOLS[action]:
+                errors.append("decision_tool_name_mismatch_for_action")
             raw_arguments = tool_request.get("arguments")
             if not isinstance(raw_arguments, dict):
                 errors.append("decision_tool_arguments_invalid")

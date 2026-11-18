@@ -260,6 +260,40 @@ class TestTrackingDecisionIpcBoundedMcpExecution(unittest.IsolatedAsyncioTestCas
             )
             self.assertEqual(session.call_count, 1)
 
+    async def test_lookup_results_for_request_does_not_consume_dashboard_results(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            dashboard_transport = _transport(root, role="dashboard")
+            orchestration_transport = _transport(root, role="orchestration")
+            session = _FakeSession(payload={"available": True, "state": "recorded_observation"})
+            now = time.time()
+
+            dashboard_transport.dashboard_submit_decision_request(
+                decision=_decision(investigation_id="inv-lookup", request_id="req-lookup"),
+                now_timestamp=now,
+            )
+
+            await main._run_tracking_decision_ipc_mcp_cycle(
+                session=session,
+                transport=orchestration_transport,
+                max_requests_per_cycle=8,
+                tool_timeout_seconds=0.5,
+            )
+
+            lookup = dashboard_transport.lookup_results_for_request(
+                investigation_id="inv-lookup",
+                request_id="req-lookup",
+                tool_name="get_track_evidence_history",
+                now_timestamp=now + 0.1,
+            )
+            self.assertTrue(lookup["available"])
+            self.assertEqual(lookup["result_count"], 1)
+            self.assertIsInstance(lookup.get("latest"), dict)
+
+            polled = dashboard_transport.dashboard_poll_results(now_timestamp=now + 0.2)
+            self.assertEqual(polled["result_count"], 1)
+            self.assertEqual(polled["results"][0]["status"], "ok")
+
 
 class TestDecisionIpcNonBlockingLoop(unittest.IsolatedAsyncioTestCase):
     async def test_monitor_movement_does_not_block_on_slow_decision_cycle(self) -> None:

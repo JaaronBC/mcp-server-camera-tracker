@@ -170,9 +170,10 @@ def _skipped_reasoning_meta(error: Exception) -> dict[str, Any]:
 
 def _call_observation_agent_with_retry(
     user_payload: dict[str, Any],
+    **kwargs: Any,
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     # Delegates retry + invoke policy to the observation agent module.
-    return observation_agent_module.call_observation_agent_with_retry(user_payload)
+    return observation_agent_module.call_observation_agent_with_retry(user_payload, **kwargs)
 
 
 def _call_reasoning_agent_with_retry(

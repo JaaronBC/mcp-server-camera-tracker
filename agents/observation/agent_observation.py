@@ -16,6 +16,14 @@ from ..coordinator import AgentCoordinator
 from .. import latency_instrumentation
 from .. import llm_call
 from .. import provider_call_budget
+from .tools.capabilities import (
+    OBSERVATION_ACTION_INCONCLUSIVE,
+    OBSERVATION_DECISION_ACTIONS,
+    OBSERVATION_DECISION_REQUEST_ACTIONS,
+    OBSERVATION_REQUEST_ACTION_TO_TOOL_NAME,
+    OBSERVATION_TOOL_GET_TRACK_EVIDENCE_HISTORY,
+    normalize_observation_decision,
+)
 from .evidence_consumption import (
     ObservationEvidenceConsumptionError,
     ObservationEvidenceRequest,
@@ -32,7 +40,14 @@ DEFAULT_OBSERVATION_SYSTEM_PROMPT = (
     "You are the Observation/Behavior Agent. Use provided measurements and timestamped observations "
     "to interpret movement patterns without inventing measurements. "
     "Return strict JSON with keys: summary, measured_facts, interpretations, hypotheses, "
-    "supporting_observation_ids, conflicting_evidence, uncertainties, needs_more_observations. "
+    "supporting_observation_ids, conflicting_evidence, uncertainties, needs_more_observations, and optional decision. "
+    "If decision is provided, it must be an object with keys: action, reason, uncertainty, tool_requests. "
+    "Allowed decision actions are: assess_now, predict_bounded, request_additional_tracking_evidence, inconclusive. "
+    "For request_additional_tracking_evidence, tool_requests must contain exactly one request for get_track_evidence_history. "
+    "For get_track_evidence_history, model-selectable arguments are only: max_messages (positive integer), "
+    "max_history_records (positive integer), and max_scan_records (positive integer). "
+    "Do not include unsupported arguments such as since_timestamp. "
+    "track_id and correlation metadata are authoritative runtime context and are set by the system. "
     "Keep summary and interpretations concise, but preserve all material measured facts, hypotheses, "
     "conflicting evidence, uncertainties, and relevant supporting observation IDs. "
     "Return JSON only, with no Markdown or unnecessary explanation."
@@ -663,6 +678,52 @@ def validate_observation_llm_payload(
     summary = dict(fallback_summary)
     summary.update(interpretation)
     summary["supporting_observation_ids"] = filtered_ids
+
+    decision_payload = payload.get("decision")
+    decision_present = "decision" in payload
+    if decision_present:
+        summary["observation_decision_present"] = True
+        if not isinstance(decision_payload, dict):
+            summary["observation_decision_validation_error"] = "decision_not_object"
+            return summary
+
+        action_raw = decision_payload.get("action")
+        action = action_raw.strip() if isinstance(action_raw, str) else None
+        if action not in OBSERVATION_DECISION_ACTIONS:
+            summary["observation_decision_validation_error"] = "decision_action_invalid"
+            return summary
+
+        normalized_decision = normalize_observation_decision(
+            decision_payload,
+            fallback_action=OBSERVATION_ACTION_INCONCLUSIVE,
+            fallback_reason="decision_reason_missing",
+        )
+
+        if action in OBSERVATION_DECISION_REQUEST_ACTIONS:
+            tool_requests = normalized_decision.get("tool_requests")
+            tool_request = tool_requests[0] if isinstance(tool_requests, list) and tool_requests else None
+            if not isinstance(tool_request, dict):
+                summary["observation_decision_validation_error"] = "decision_tool_request_required"
+                return summary
+            tool_name = tool_request.get("tool_name")
+            if not isinstance(tool_name, str):
+                summary["observation_decision_validation_error"] = "decision_tool_name_invalid"
+                return summary
+            expected_tool_name = OBSERVATION_REQUEST_ACTION_TO_TOOL_NAME.get(action)
+            if tool_name != expected_tool_name:
+                summary["observation_decision_validation_error"] = "decision_tool_name_mismatch_for_action"
+                return summary
+            arguments = tool_request.get("arguments")
+            if not isinstance(arguments, dict):
+                summary["observation_decision_validation_error"] = "decision_tool_arguments_invalid"
+                return summary
+            if tool_name != OBSERVATION_TOOL_GET_TRACK_EVIDENCE_HISTORY:
+                summary["observation_decision_validation_error"] = "decision_tool_name_not_allowed"
+                return summary
+
+        summary["observation_decision"] = normalized_decision
+    else:
+        summary["observation_decision_present"] = False
     return summary
 
 

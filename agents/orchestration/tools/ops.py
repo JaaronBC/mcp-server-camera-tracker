@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import time
 import uuid
@@ -10,6 +11,20 @@ from pathlib import Path
 from typing import Any
 
 from ... import latency_instrumentation
+from ...observation.tools.capabilities import (
+    OBSERVATION_ACTION_ASSESS_NOW,
+    OBSERVATION_ACTION_INCONCLUSIVE,
+    OBSERVATION_ACTION_PREDICT_BOUNDED,
+    OBSERVATION_ACTION_REQUEST_ADDITIONAL_TRACKING_EVIDENCE,
+    OBSERVATION_DECISION_REQUEST_ACTIONS,
+    OBSERVATION_REQUEST_ACTION_TO_TOOL_NAME,
+    OBSERVATION_TOOL_GET_TRACK_EVIDENCE_HISTORY,
+)
+from ...observation.tools.track_evidence_history_contract import (
+    build_track_evidence_history_argument_diagnostics,
+    validate_track_evidence_history_arguments,
+)
+from ...orchestration.runtime.tracking_decision_ipc import TrackingDecisionIpcTransport
 from ...reasoning.tools import _shared as dashboard_reasoning
 from ...registry import mcp
 
@@ -26,6 +41,87 @@ VALID_INVESTIGATION_STATES = {
     "resolved",
     "closed",
 }
+OBSERVATION_TOOL_REQUEST_TIMEOUT_SECONDS = 1.5
+OBSERVATION_TOOL_REQUEST_TTL_SECONDS = 30.0
+OBSERVATION_TOOL_REQUESTS_ENABLED_ENV = "OBSERVATION_TOOL_REQUESTS_ENABLED"
+OBSERVATION_TOOL_REQUEST_TIMEOUT_SECONDS_ENV = "OBSERVATION_TOOL_REQUEST_TIMEOUT_SECONDS"
+OBSERVATION_TOOL_REQUESTS_PATH_ENV = "PHASE2D_TRACKING_DECISION_TOOL_REQUESTS_PATH"
+OBSERVATION_TOOL_RESULTS_PATH_ENV = "PHASE2D_TRACKING_DECISION_TOOL_RESULTS_PATH"
+OBSERVATION_TOOL_REQUEST_INDEX_PATH_ENV = "PHASE2D_TRACKING_DECISION_REQUEST_INDEX_PATH"
+OBSERVATION_TOOL_RESULT_INDEX_PATH_ENV = "PHASE2D_TRACKING_DECISION_RESULT_INDEX_PATH"
+
+_PENDING_OBSERVATION_TOOL_FOLLOWUPS: dict[str, dict[str, Any]] = {}
+_OBSERVATION_FOLLOWUP_RESULT_ALLOWED_STATUSES = frozenset(
+    {
+        "ok",
+        "timeout",
+        "unavailable",
+        "rejected",
+        "expired",
+        "terminal",
+        "incompatible",
+        "stale",
+    }
+)
+
+
+def _resolve_observation_tool_request_timeout_seconds(default: float = 30.0) -> float:
+    raw = os.getenv(OBSERVATION_TOOL_REQUEST_TIMEOUT_SECONDS_ENV, str(default)).strip()
+    try:
+        parsed = float(raw)
+    except ValueError:
+        parsed = default
+    if not math.isfinite(parsed) or parsed <= 0:
+        parsed = default
+    return max(1.0, min(300.0, parsed))
+
+
+OBSERVATION_TOOL_REQUEST_TIMEOUT_SECONDS = _resolve_observation_tool_request_timeout_seconds(30.0)
+
+
+def _observation_tool_requests_enabled() -> bool:
+    raw = os.getenv(OBSERVATION_TOOL_REQUESTS_ENABLED_ENV, "1").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _resolve_observation_ipc_paths() -> tuple[Path, Path, Path, Path]:
+    requests_path = Path(
+        os.getenv(
+            OBSERVATION_TOOL_REQUESTS_PATH_ENV,
+            str(PROJECT_ROOT / "captures" / "tracking_decision_tool_requests.jsonl"),
+        )
+    ).expanduser().resolve()
+    results_path = Path(
+        os.getenv(
+            OBSERVATION_TOOL_RESULTS_PATH_ENV,
+            str(PROJECT_ROOT / "captures" / "tracking_decision_tool_results.jsonl"),
+        )
+    ).expanduser().resolve()
+    request_index_path = Path(
+        os.getenv(
+            OBSERVATION_TOOL_REQUEST_INDEX_PATH_ENV,
+            str(PROJECT_ROOT / "captures" / "latest_tracking_decision_request_index.json"),
+        )
+    ).expanduser().resolve()
+    result_index_path = Path(
+        os.getenv(
+            OBSERVATION_TOOL_RESULT_INDEX_PATH_ENV,
+            str(PROJECT_ROOT / "captures" / "latest_tracking_decision_result_index.json"),
+        )
+    ).expanduser().resolve()
+    return requests_path, results_path, request_index_path, result_index_path
+
+
+def _observation_ipc_transport() -> TrackingDecisionIpcTransport:
+    requests_path, results_path, request_index_path, result_index_path = _resolve_observation_ipc_paths()
+    return TrackingDecisionIpcTransport(
+        requests_path=requests_path,
+        results_path=results_path,
+        request_index_path=request_index_path,
+        result_index_path=result_index_path,
+        request_ttl_seconds=OBSERVATION_TOOL_REQUEST_TTL_SECONDS,
+        writer_role="dashboard",
+    )
 
 
 def _build_investigation_id(*, cycle_id: str, track_id: str) -> str:
@@ -370,6 +466,242 @@ def _initialize_reasoning_cycle(max_tracks: int) -> dict[str, Any]:
     }
 
 
+def _observation_prediction_supported(summary_payload: dict[str, Any] | None) -> bool:
+    if not isinstance(summary_payload, dict):
+        return False
+    sample_count = summary_payload.get("sample_count")
+    speed = summary_payload.get("speed")
+    if not isinstance(sample_count, int) or sample_count < 2:
+        return False
+    if not isinstance(speed, (int, float)):
+        return False
+    return True
+
+
+def _infer_observation_decision_from_summary(
+    *,
+    summary_payload: dict[str, Any] | None,
+    request_evidence_on_uncertainty: bool,
+) -> dict[str, Any]:
+    if not isinstance(summary_payload, dict):
+        return {
+            "action": OBSERVATION_ACTION_INCONCLUSIVE,
+            "reason": "summary_unavailable",
+            "uncertainty": ["summary_unavailable"],
+            "tool_requests": [],
+        }
+
+    needs_more_observations = bool(summary_payload.get("needs_more_observations", False))
+    track_id = _coerce_nonempty_str(summary_payload.get("track_id"))
+    if needs_more_observations and request_evidence_on_uncertainty and track_id is not None:
+        return {
+            "action": OBSERVATION_ACTION_REQUEST_ADDITIONAL_TRACKING_EVIDENCE,
+            "reason": "observation_evidence_insufficient",
+            "uncertainty": _coerce_str_list(summary_payload.get("uncertainties")),
+            "tool_requests": [
+                {
+                    "request_id": None,
+                    "tool_name": OBSERVATION_TOOL_GET_TRACK_EVIDENCE_HISTORY,
+                    "arguments": {
+                        "track_id": track_id,
+                        "max_messages": 5,
+                        "max_history_records": 12,
+                        "max_scan_records": 120,
+                    },
+                }
+            ],
+        }
+
+    if needs_more_observations:
+        if _observation_prediction_supported(summary_payload):
+            return {
+                "action": OBSERVATION_ACTION_PREDICT_BOUNDED,
+                "reason": "bounded_prediction_from_deterministic_history",
+                "uncertainty": _coerce_str_list(summary_payload.get("uncertainties")),
+                "tool_requests": [],
+            }
+        return {
+            "action": OBSERVATION_ACTION_INCONCLUSIVE,
+            "reason": "insufficient_evidence",
+            "uncertainty": _coerce_str_list(summary_payload.get("uncertainties")),
+            "tool_requests": [],
+        }
+
+    return {
+        "action": OBSERVATION_ACTION_ASSESS_NOW,
+        "reason": "evidence_sufficient",
+        "uncertainty": _coerce_str_list(summary_payload.get("uncertainties")),
+        "tool_requests": [],
+    }
+
+
+def _invalid_explicit_decision(*, summary_payload: dict[str, Any], validation_error: str) -> dict[str, Any]:
+    return {
+        "action": OBSERVATION_ACTION_INCONCLUSIVE,
+        "reason": "invalid_explicit_decision",
+        "uncertainty": _coerce_str_list(summary_payload.get("uncertainties")),
+        "tool_requests": [],
+        "decision_source": "invalid_explicit_decision",
+        "validation_error": validation_error,
+        "phase": "terminal_invalid_explicit_decision",
+    }
+
+
+def _resolve_observation_decision(
+    *,
+    summary_payload: dict[str, Any] | None,
+    request_evidence_on_uncertainty: bool,
+) -> dict[str, Any]:
+    if not isinstance(summary_payload, dict):
+        decision = _infer_observation_decision_from_summary(
+            summary_payload=summary_payload,
+            request_evidence_on_uncertainty=request_evidence_on_uncertainty,
+        )
+        decision["decision_source"] = "llm_summary_inference"
+        return decision
+
+    validation_error = _coerce_nonempty_str(summary_payload.get("observation_decision_validation_error"))
+    decision_present = bool(summary_payload.get("observation_decision_present", False)) or (
+        "observation_decision" in summary_payload
+    )
+
+    if validation_error is not None:
+        return _invalid_explicit_decision(summary_payload=summary_payload, validation_error=validation_error)
+
+    explicit_decision = summary_payload.get("observation_decision")
+    if decision_present:
+        if not isinstance(explicit_decision, dict):
+            return _invalid_explicit_decision(
+                summary_payload=summary_payload,
+                validation_error="decision_payload_missing",
+            )
+        normalized = dict(explicit_decision)
+        action = _coerce_nonempty_str(normalized.get("action"))
+        if action in OBSERVATION_DECISION_REQUEST_ACTIONS and not request_evidence_on_uncertainty:
+            return _invalid_explicit_decision(
+                summary_payload=summary_payload,
+                validation_error="decision_request_not_allowed_in_follow_up",
+            )
+        normalized["decision_source"] = "llm_explicit"
+        return normalized
+
+    decision = _infer_observation_decision_from_summary(
+        summary_payload=summary_payload,
+        request_evidence_on_uncertainty=request_evidence_on_uncertainty,
+    )
+    decision["decision_source"] = "llm_summary_inference"
+    return decision
+
+
+def _build_observation_tool_request_decision(
+    *,
+    decision: dict[str, Any],
+    track_id: str,
+    investigation_id: str,
+    request_id: str,
+    correlation_id: str | None,
+) -> dict[str, Any]:
+    tool_requests = decision.get("tool_requests")
+    tool_request = tool_requests[0] if isinstance(tool_requests, list) and tool_requests else None
+    tool_name = None
+    arguments: dict[str, Any] = {}
+    if isinstance(tool_request, dict):
+        tool_name = _coerce_nonempty_str(tool_request.get("tool_name"))
+        if isinstance(tool_request.get("arguments"), dict):
+            arguments = dict(tool_request.get("arguments"))
+    resolved_track_id = _coerce_nonempty_str(track_id)
+    if resolved_track_id is not None:
+        arguments["track_id"] = resolved_track_id
+    if tool_name is None:
+        action = _coerce_nonempty_str(decision.get("action"))
+        tool_name = OBSERVATION_REQUEST_ACTION_TO_TOOL_NAME.get(str(action))
+
+    validation = validate_track_evidence_history_arguments(
+        arguments,
+        require_track_id=False,
+        validate_track_id_value=False,
+    )
+
+    return {
+        "action": OBSERVATION_ACTION_REQUEST_ADDITIONAL_TRACKING_EVIDENCE,
+        "investigation_id": investigation_id,
+        "correlation_id": correlation_id,
+        "iteration_index": 1,
+        "tool_requests": [
+            {
+                "request_id": request_id,
+                "tool_name": tool_name,
+                "arguments": arguments,
+            }
+        ],
+        "argument_validation": validation,
+    }
+
+
+def _extract_observation_tool_result_for_pending(track_id: str) -> dict[str, Any] | None:
+    pending = _PENDING_OBSERVATION_TOOL_FOLLOWUPS.get(track_id)
+    if not isinstance(pending, dict):
+        return None
+    investigation_id = _coerce_nonempty_str(pending.get("investigation_id"))
+    request_id = _coerce_nonempty_str(pending.get("request_id"))
+    tool_name = _coerce_nonempty_str(pending.get("tool_name"))
+    if investigation_id is None or request_id is None or tool_name is None:
+        return None
+    transport = _observation_ipc_transport()
+    lookup = transport.lookup_results_for_request(
+        investigation_id=investigation_id,
+        request_id=request_id,
+        tool_name=tool_name,
+    )
+    results = lookup.get("results") if isinstance(lookup, dict) else None
+    if not isinstance(results, list):
+        return None
+
+    pending_created_at = pending.get("created_at")
+    min_finished_at = float(pending_created_at) if isinstance(pending_created_at, (int, float)) else None
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        status = _coerce_nonempty_str(item.get("status"))
+        if status not in _OBSERVATION_FOLLOWUP_RESULT_ALLOWED_STATUSES:
+            continue
+        finished_at = item.get("finished_at")
+        if min_finished_at is not None and isinstance(finished_at, (int, float)) and float(finished_at) < min_finished_at:
+            continue
+        return dict(item)
+    return None
+
+
+def _observation_follow_up_input(
+    *,
+    summary_payload: dict[str, Any],
+    tool_result_event: dict[str, Any],
+) -> dict[str, Any]:
+    result_payload = tool_result_event.get("result_payload")
+    if not isinstance(result_payload, dict):
+        result_payload = {}
+    return {
+        "track_id": summary_payload.get("track_id"),
+        "created_at": summary_payload.get("created_at"),
+        "summary_measurements": {
+            "velocity_x": summary_payload.get("velocity_x"),
+            "velocity_z": summary_payload.get("velocity_z"),
+            "speed": summary_payload.get("speed"),
+            "confidence": summary_payload.get("confidence"),
+            "sample_count": summary_payload.get("sample_count"),
+        },
+        "quality_uncertainties": _coerce_str_list(summary_payload.get("uncertainties")),
+        "supporting_observation_ids": _coerce_str_list(summary_payload.get("supporting_observation_ids")),
+        "evidence_tool_result": {
+            "status": tool_result_event.get("status"),
+            "error_code": tool_result_event.get("error_code"),
+            "error": tool_result_event.get("error"),
+            "payload": result_payload,
+        },
+    }
+
+
+
 def _evaluate_track_for_cycle(
     track_id: str,
     *,
@@ -399,6 +731,233 @@ def _evaluate_track_for_cycle(
             track_id=track_id,
         )
         latency_instrumentation.restore_context(context_previous)
+
+    summary_payload = result.get("summary") if isinstance(result.get("summary"), dict) else None
+    observation_decision = _resolve_observation_decision(
+        summary_payload=summary_payload,
+        request_evidence_on_uncertainty=request_evidence_on_uncertainty and _observation_tool_requests_enabled(),
+    )
+    observation_tool_request: dict[str, Any] | None = None
+    observation_tool_result: dict[str, Any] | None = None
+
+    action = _coerce_nonempty_str(observation_decision.get("action"))
+    if action in OBSERVATION_DECISION_REQUEST_ACTIONS and _observation_tool_requests_enabled():
+        pending = _PENDING_OBSERVATION_TOOL_FOLLOWUPS.get(track_id)
+        if isinstance(pending, dict):
+            pending_created_at = pending.get("created_at")
+            pending_age_seconds = (
+                max(0.0, time.time() - float(pending_created_at))
+                if isinstance(pending_created_at, (int, float))
+                else None
+            )
+            if (
+                isinstance(pending_age_seconds, float)
+                and pending_age_seconds > OBSERVATION_TOOL_REQUEST_TIMEOUT_SECONDS
+            ):
+                _PENDING_OBSERVATION_TOOL_FOLLOWUPS.pop(track_id, None)
+                if _observation_prediction_supported(summary_payload):
+                    observation_decision = {
+                        "action": OBSERVATION_ACTION_PREDICT_BOUNDED,
+                        "reason": "tool_result_timeout",
+                        "uncertainty": _coerce_str_list(summary_payload.get("uncertainties") if isinstance(summary_payload, dict) else []),
+                        "decision_source": observation_decision.get("decision_source", "llm_summary_inference"),
+                        "phase": "tool_result_timeout",
+                    }
+                else:
+                    observation_decision = {
+                        "action": OBSERVATION_ACTION_INCONCLUSIVE,
+                        "reason": "tool_result_timeout",
+                        "uncertainty": _coerce_str_list(summary_payload.get("uncertainties") if isinstance(summary_payload, dict) else []),
+                        "decision_source": observation_decision.get("decision_source", "llm_summary_inference"),
+                        "phase": "tool_result_timeout",
+                    }
+            else:
+                correlated_result = _extract_observation_tool_result_for_pending(track_id)
+                if isinstance(correlated_result, dict):
+                    _PENDING_OBSERVATION_TOOL_FOLLOWUPS.pop(track_id, None)
+                    observation_tool_result = {
+                        "status": correlated_result.get("status"),
+                        "error_code": correlated_result.get("error_code"),
+                        "error": correlated_result.get("error"),
+                        "idempotency_key": correlated_result.get("idempotency_key"),
+                        "result_payload": correlated_result.get("result_payload"),
+                    }
+
+                    if isinstance(summary_payload, dict):
+                        follow_up_payload = _observation_follow_up_input(
+                            summary_payload=summary_payload,
+                            tool_result_event=correlated_result,
+                        )
+                        follow_up_observation_payload, follow_up_observation_meta = (
+                            dashboard_reasoning._call_observation_agent_with_retry(follow_up_payload)
+                        )
+                        result_agents = result.get("agents") if isinstance(result.get("agents"), dict) else {}
+                        if not isinstance(result_agents, dict):
+                            result_agents = {}
+                        result_agents["observation"] = follow_up_observation_meta
+                        result["agents"] = result_agents
+
+                        if isinstance(follow_up_observation_payload, dict):
+                            valid_observation_ids = set(
+                                _coerce_str_list(summary_payload.get("supporting_observation_ids"))
+                            )
+                            tool_payload = correlated_result.get("result_payload")
+                            if isinstance(tool_payload, dict):
+                                messages = tool_payload.get("messages")
+                                if isinstance(messages, list):
+                                    for item in messages:
+                                        if not isinstance(item, dict):
+                                            continue
+                                        bounded_history = item.get("bounded_history")
+                                        if not isinstance(bounded_history, list):
+                                            continue
+                                        for record in bounded_history:
+                                            if not isinstance(record, dict):
+                                                continue
+                                            observation_id = _coerce_nonempty_str(record.get("observation_id"))
+                                            if observation_id is not None:
+                                                valid_observation_ids.add(observation_id)
+
+                            normalized_summary = dashboard_reasoning._validate_observation_llm_payload(
+                                follow_up_observation_payload,
+                                fallback_summary=summary_payload,
+                                valid_observation_ids=valid_observation_ids,
+                            )
+                            result["summary"] = normalized_summary
+                            summary_payload = normalized_summary
+
+                    observation_decision = _resolve_observation_decision(
+                        summary_payload=summary_payload,
+                        request_evidence_on_uncertainty=False,
+                    )
+                    if observation_decision.get("decision_source") == "invalid_explicit_decision":
+                        observation_decision["phase"] = "terminal_invalid_explicit_decision"
+                    else:
+                        observation_decision["phase"] = "follow_up_terminal"
+                else:
+                    observation_decision["phase"] = "awaiting_tool_result"
+        else:
+            transport = _observation_ipc_transport()
+            resolved_track_id = _coerce_nonempty_str(track_id)
+            investigation_id = _build_investigation_id(
+                cycle_id=cycle_id or "cycle-unknown",
+                track_id=resolved_track_id or "track-unknown",
+            )
+            request_id = f"obs-req-{uuid.uuid4().hex[:16]}"
+            tool_name = OBSERVATION_REQUEST_ACTION_TO_TOOL_NAME.get(
+                OBSERVATION_ACTION_REQUEST_ADDITIONAL_TRACKING_EVIDENCE,
+                OBSERVATION_TOOL_GET_TRACK_EVIDENCE_HISTORY,
+            )
+            request_decision = _build_observation_tool_request_decision(
+                decision=observation_decision,
+                track_id=track_id,
+                investigation_id=investigation_id,
+                request_id=request_id,
+                correlation_id=correlation_id,
+            )
+            argument_validation = request_decision.get("argument_validation")
+            validation_errors = (
+                list(argument_validation.get("errors", []))
+                if isinstance(argument_validation, dict)
+                else []
+            )
+            if validation_errors:
+                diagnostics = build_track_evidence_history_argument_diagnostics(
+                    validation=argument_validation if isinstance(argument_validation, dict) else {},
+                    request_id=request_id,
+                    investigation_id=investigation_id,
+                    correlation_id=correlation_id,
+                )
+                observation_tool_request = {
+                    "submitted": False,
+                    "rejected": True,
+                    "duplicate": False,
+                    "reason": "invalid_tool_arguments_pre_dispatch",
+                    "investigation_id": investigation_id,
+                    "request_id": request_id,
+                    "tool_name": tool_name,
+                    "arguments": (
+                        request_decision.get("tool_requests", [{}])[0].get("arguments")
+                        if isinstance(request_decision.get("tool_requests"), list)
+                        else {}
+                    ),
+                    **diagnostics,
+                }
+                if _observation_prediction_supported(summary_payload):
+                    observation_decision = {
+                        "action": OBSERVATION_ACTION_PREDICT_BOUNDED,
+                        "reason": "invalid_tool_arguments_pre_dispatch",
+                        "uncertainty": _coerce_str_list(summary_payload.get("uncertainties") if isinstance(summary_payload, dict) else []),
+                        "decision_source": observation_decision.get("decision_source", "llm_summary_inference"),
+                        "phase": "tool_request_pre_dispatch_rejected",
+                        "error_code": "invalid_tool_arguments",
+                        "validation_errors": validation_errors,
+                        "unknown_arguments": diagnostics.get("unknown_arguments", []),
+                    }
+                else:
+                    observation_decision = {
+                        "action": OBSERVATION_ACTION_INCONCLUSIVE,
+                        "reason": "invalid_tool_arguments_pre_dispatch",
+                        "uncertainty": _coerce_str_list(summary_payload.get("uncertainties") if isinstance(summary_payload, dict) else []),
+                        "decision_source": observation_decision.get("decision_source", "llm_summary_inference"),
+                        "phase": "tool_request_pre_dispatch_rejected",
+                        "error_code": "invalid_tool_arguments",
+                        "validation_errors": validation_errors,
+                        "unknown_arguments": diagnostics.get("unknown_arguments", []),
+                    }
+                result["observation_tool_request_diagnostics"] = diagnostics
+                result["observation_tool_request_validation_errors"] = validation_errors
+                result["observation_tool_request_original_arguments"] = diagnostics.get("original_requested_arguments", {})
+            else:
+                submit_response = transport.dashboard_submit_decision_request(
+                    decision=request_decision,
+                    llm_correlation_id=correlation_id,
+                )
+                observation_tool_request = {
+                    "submitted": bool(submit_response.get("accepted", False)),
+                    "rejected": bool(submit_response.get("rejected", False)),
+                    "duplicate": bool(submit_response.get("duplicate", False)),
+                    "reason": submit_response.get("reason"),
+                    "investigation_id": investigation_id,
+                    "request_id": request_id,
+                    "tool_name": tool_name,
+                    "arguments": (
+                        request_decision.get("tool_requests", [{}])[0].get("arguments")
+                        if isinstance(request_decision.get("tool_requests"), list)
+                        else {}
+                    ),
+                }
+                if bool(submit_response.get("accepted", False)):
+                    _PENDING_OBSERVATION_TOOL_FOLLOWUPS[track_id] = {
+                        "investigation_id": investigation_id,
+                        "request_id": request_id,
+                        "tool_name": tool_name,
+                        "created_at": time.time(),
+                    }
+                    observation_decision["phase"] = "tool_request_submitted"
+                else:
+                    if _observation_prediction_supported(summary_payload):
+                        observation_decision = {
+                            "action": OBSERVATION_ACTION_PREDICT_BOUNDED,
+                            "reason": "tool_request_not_accepted",
+                            "uncertainty": _coerce_str_list(summary_payload.get("uncertainties") if isinstance(summary_payload, dict) else []),
+                            "decision_source": observation_decision.get("decision_source", "llm_summary_inference"),
+                            "phase": "tool_request_rejected",
+                        }
+                    else:
+                        observation_decision = {
+                            "action": OBSERVATION_ACTION_INCONCLUSIVE,
+                            "reason": "tool_request_not_accepted",
+                            "uncertainty": _coerce_str_list(summary_payload.get("uncertainties") if isinstance(summary_payload, dict) else []),
+                            "decision_source": observation_decision.get("decision_source", "llm_summary_inference"),
+                            "phase": "tool_request_rejected",
+                        }
+
+    result["observation_decision"] = observation_decision
+    if observation_tool_request is not None:
+        result["observation_tool_request"] = observation_tool_request
+    if observation_tool_result is not None:
+        result["observation_tool_result"] = observation_tool_result
 
     available = bool(result.get("available"))
     status = "ok" if available else "error"
@@ -528,6 +1087,9 @@ def _build_reasoning_cycle_event(
     cycle_correlation_id: str | None = None,
 ) -> dict[str, Any]:
     evidence_requested = result.get("evidence_request") is not None
+    observation_decision = result.get("observation_decision") if isinstance(result.get("observation_decision"), dict) else {}
+    observation_tool_request = result.get("observation_tool_request") if isinstance(result.get("observation_tool_request"), dict) else None
+    observation_tool_result = result.get("observation_tool_result") if isinstance(result.get("observation_tool_result"), dict) else None
     investigation_id = (
         _build_investigation_id(cycle_id=cycle_id, track_id=track_id)
         if evidence_requested
@@ -615,6 +1177,12 @@ def _build_reasoning_cycle_event(
         ),
         "cycle_error_code": cycle_error_code,
         "evidence_trace": _extract_evidence_trace(result.get("summary")),
+        "observation_decision_action": observation_decision.get("action"),
+        "observation_decision_reason": observation_decision.get("reason"),
+        "observation_decision_phase": observation_decision.get("phase"),
+        "observation_decision_uncertainty": _coerce_str_list(observation_decision.get("uncertainty")),
+        "observation_tool_request": observation_tool_request,
+        "observation_tool_result": observation_tool_result,
         "error": result.get("error"),
         "correlation_id": correlation_id,
         "cycle_correlation_id": cycle_correlation_id,

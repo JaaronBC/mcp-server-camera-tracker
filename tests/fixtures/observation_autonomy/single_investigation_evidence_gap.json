@@ -1,0 +1,147 @@
+{
+  "track_id": "fixture-track-001",
+  "created_at": 1734023400.5,
+  "summary_measurements": {
+    "velocity_x": 0.31,
+    "velocity_z": -0.06,
+    "speed": 0.316,
+    "confidence": 0.62,
+    "sample_count": 9
+  },
+  "quality_uncertainties": [
+    "Occlusion near lower-left edge creates identity ambiguity.",
+    "Depth return missing for two recent observations."
+  ],
+  "supporting_observation_ids": [
+    "obs-100",
+    "obs-101"
+  ],
+  "history_records": [
+    {
+      "observation_id": "obs-100",
+      "timestamp": 1734023399.1,
+      "x": 0.20,
+      "z": -0.02,
+      "confidence": 0.71
+    },
+    {
+      "observation_id": "obs-101",
+      "timestamp": 1734023399.6,
+      "x": 0.24,
+      "z": -0.04,
+      "confidence": 0.67
+    }
+  ],
+  "latest_track_snapshot": {
+    "track_id": "fixture-track-001",
+    "timestamp": 1734023400.5,
+    "occluded": true
+  },
+  "tracking_agent_context": {
+    "phase": "occlusion_recovery",
+    "identity_risk": "medium"
+  },
+  "coordinate_context": {
+    "units": "meters",
+    "frame": "ground-plane"
+  },
+  "mcp_evidence_result": {
+    "available": true,
+    "track_id": "fixture-track-001",
+    "messages": [
+      {
+        "message_id": "msg-1",
+        "source": "tracking-evidence-history",
+        "bounded_history": [
+          {
+            "observation_id": "obs-102",
+            "timestamp": 1734023400.2,
+            "x": 0.28,
+            "z": -0.05,
+            "confidence": 0.54
+          },
+          {
+            "observation_id": "obs-103",
+            "timestamp": 1734023400.4,
+            "x": 0.29,
+            "z": -0.05,
+            "confidence": 0.56
+          }
+        ]
+      }
+    ],
+    "history_records": [
+      {
+        "observation_id": "obs-102",
+        "timestamp": 1734023400.2,
+        "confidence": 0.54
+      },
+      {
+        "observation_id": "obs-103",
+        "timestamp": 1734023400.4,
+        "confidence": 0.56
+      }
+    ]
+  },
+  "preflight_observation_responses": [
+    {
+      "track_id": "fixture-track-001",
+      "created_at": 1734023400.5,
+      "velocity_x": 9.99,
+      "velocity_z": 9.99,
+      "speed": 99.9,
+      "confidence": 0.62,
+      "sample_count": 999,
+      "summary": "Need more evidence due to occlusion and sparse depth.",
+      "measured_facts": [
+        "Recent observations have degraded confidence."
+      ],
+      "interpretations": [
+        "Identity swap risk cannot be ruled out."
+      ],
+      "hypotheses": [
+        "Temporary merge/split around occlusion region."
+      ],
+      "conflicting_evidence": [
+        "Depth continuity breaks around last two points."
+      ],
+      "uncertainties": [
+        "Identity remains ambiguous."
+      ],
+      "supporting_observation_ids": [
+        "obs-100",
+        "obs-101"
+      ],
+      "needs_more_observations": true
+    },
+    {
+      "track_id": "fixture-track-001",
+      "created_at": 1734023400.5,
+      "velocity_x": 8.88,
+      "velocity_z": 8.88,
+      "speed": 88.8,
+      "confidence": 0.65,
+      "sample_count": 888,
+      "summary": "Evidence history reduces ambiguity but still not conclusive.",
+      "measured_facts": [
+        "Additional bounded history confirms continuity trend."
+      ],
+      "interpretations": [
+        "Occlusion likely caused temporary confidence dip."
+      ],
+      "hypotheses": [
+        "Identity is stable but needs one more clean segment."
+      ],
+      "conflicting_evidence": [],
+      "uncertainties": [
+        "Residual confidence remains moderate."
+      ],
+      "supporting_observation_ids": [
+        "obs-100",
+        "obs-101",
+        "obs-102"
+      ],
+      "needs_more_observations": false
+    }
+  ]
+}

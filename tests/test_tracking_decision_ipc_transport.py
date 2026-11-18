@@ -231,6 +231,31 @@ class TestTrackingDecisionIpcTransport(unittest.TestCase):
             self.assertEqual(payload["status"], "rejected")
             self.assertEqual(payload["error_code"], "correlation_mismatch")
 
+    def test_action_tool_mismatch_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            transport = _new_transport(Path(temp_dir))
+            submitted = transport.dashboard_submit_decision_request(
+                decision={
+                    "action": "request_additional_tracking_evidence",
+                    "investigation_id": "inv-obs-like",
+                    "iteration_index": 1,
+                    "tool_requests": [
+                        {
+                            "request_id": "req-obs-like",
+                            "tool_name": "get_identity_snapshot",
+                            "arguments": {"app_identity_id": "app-1"},
+                        }
+                    ],
+                },
+                now_timestamp=1000.0,
+            )
+
+            self.assertTrue(submitted["rejected"])
+            self.assertEqual(submitted["reason"], "invalid_decision_request")
+            errors = submitted.get("errors")
+            self.assertIsInstance(errors, list)
+            self.assertIn("decision_tool_name_mismatch_for_action", errors)
+
     def test_bounded_retention(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             transport = _new_transport(
