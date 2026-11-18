@@ -149,16 +149,53 @@ def coerce_str(value: Any, default: str) -> str:
     return default
 
 
-def extract_usage_dict(response: Any) -> dict[str, int] | None:
+def _extract_completion_tokens_details(usage: Any) -> dict[str, int] | None:
+    details = getattr(usage, "completion_tokens_details", None)
+    if details is None:
+        return None
+
+    output: dict[str, int] = {}
+    if isinstance(details, dict):
+        for key, value in details.items():
+            if isinstance(key, str) and isinstance(value, int):
+                output[key] = value
+    else:
+        for key in (
+            "reasoning_tokens",
+            "accepted_prediction_tokens",
+            "rejected_prediction_tokens",
+            "audio_tokens",
+        ):
+            value = getattr(details, key, None)
+            if isinstance(value, int):
+                output[key] = value
+
+    if output:
+        return output
+    return None
+
+
+def extract_usage_dict(response: Any) -> dict[str, Any] | None:
     usage = getattr(response, "usage", None)
     if usage is None:
         return None
 
-    payload: dict[str, int] = {}
+    payload: dict[str, Any] = {}
     for field in ("prompt_tokens", "completion_tokens", "total_tokens"):
         value = getattr(usage, field, None)
         if isinstance(value, int):
             payload[field] = value
+
+    completion_tokens_details = _extract_completion_tokens_details(usage)
+    if isinstance(completion_tokens_details, dict):
+        payload["completion_tokens_details"] = completion_tokens_details
+        reasoning_tokens = completion_tokens_details.get("reasoning_tokens")
+        if isinstance(reasoning_tokens, int):
+            payload["reasoning_tokens"] = reasoning_tokens
+    else:
+        reasoning_tokens = getattr(usage, "reasoning_tokens", None)
+        if isinstance(reasoning_tokens, int):
+            payload["reasoning_tokens"] = reasoning_tokens
 
     if not payload:
         return None

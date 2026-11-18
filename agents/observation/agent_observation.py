@@ -740,6 +740,8 @@ async def invoke_llm_json_response(
     reservation = provider_call_budget.reserve_or_raise(provider_call_budget.ROLE_OBSERVATION_TEXT)
     started = time.perf_counter()
     client = _create_openai_client()
+    finish_reason: str | None = None
+    usage_payload: dict[str, Any] | None = None
     try:
         max_output_tokens = _resolve_observation_max_output_tokens()
         request_kwargs: dict[str, Any] = {
@@ -755,21 +757,31 @@ async def invoke_llm_json_response(
             client.chat.completions.create(**request_kwargs),
             timeout=timeout_seconds,
         )
-        latency_ms = round((time.perf_counter() - started) * 1000.0, 3)
-        provider_call_budget.finalize_provider_call_attempt(
-            reservation,
-            outcome="ok",
-            latency_ms=latency_ms,
-            usage=llm_call.extract_usage_dict(response),
-        )
+        usage_payload = llm_call.extract_usage_dict(response)
         if not response.choices:
             raise RuntimeError("llm_empty_response")
-        if getattr(response.choices[0], "finish_reason", None) == "length":
+        finish_reason = getattr(response.choices[0], "finish_reason", None)
+        if finish_reason == "length":
             raise RuntimeError("llm_output_truncated")
         content = response.choices[0].message.content or ""
         parsed = _extract_json_object(content)
         if parsed is None:
             raise RuntimeError("llm_invalid_json_response")
+
+        if isinstance(parsed, dict):
+            parsed["__provider_meta"] = {
+                "finish_reason": finish_reason,
+                "usage": usage_payload,
+            }
+
+        latency_ms = round((time.perf_counter() - started) * 1000.0, 3)
+        provider_call_budget.finalize_provider_call_attempt(
+            reservation,
+            outcome="ok",
+            latency_ms=latency_ms,
+            usage=usage_payload,
+            finish_reason=finish_reason,
+        )
         latency_instrumentation.emit_event(
             "llm_request_completed",
             stage="observation_agent_llm_request",
@@ -782,7 +794,8 @@ async def invoke_llm_json_response(
             attempts_total=attempt_context.get("attempts_total"),
             retry_limit=attempt_context.get("retry_limit"),
             status="ok",
-            usage=llm_call.extract_usage_dict(response),
+            usage=usage_payload,
+            finish_reason=finish_reason,
         )
         return parsed
     except Exception as error:
@@ -791,6 +804,8 @@ async def invoke_llm_json_response(
             reservation,
             outcome="error",
             latency_ms=latency_ms,
+            usage=usage_payload,
+            finish_reason=finish_reason,
             error_code=llm_call.classify_llm_error(error),
         )
         latency_instrumentation.emit_event(
@@ -805,6 +820,8 @@ async def invoke_llm_json_response(
             attempts_total=attempt_context.get("attempts_total"),
             retry_limit=attempt_context.get("retry_limit"),
             status="error",
+            usage=usage_payload,
+            finish_reason=finish_reason,
             error_code=llm_call.classify_llm_error(error),
             error=f"{type(error).__name__}:{error}",
         )
@@ -858,6 +875,16 @@ def call_observation_agent_with_retry(
                     timeout_seconds=selected_timeout,
                 )
             )
+            provider_meta = payload.pop("__provider_meta", None) if isinstance(payload, dict) else None
+            finish_reason = None
+            usage = None
+            if isinstance(provider_meta, dict):
+                raw_finish_reason = provider_meta.get("finish_reason")
+                if isinstance(raw_finish_reason, str):
+                    finish_reason = raw_finish_reason
+                raw_usage = provider_meta.get("usage")
+                if isinstance(raw_usage, dict):
+                    usage = raw_usage
             latency_instrumentation.emit_event(
                 "llm_attempt_completed",
                 stage="observation_agent_llm_attempt",
@@ -870,6 +897,8 @@ def call_observation_agent_with_retry(
                 attempts_total=attempts,
                 retry_limit=selected_retry_limit,
                 status="ok",
+                usage=usage,
+                finish_reason=finish_reason,
             )
             latency_ms = round((time.perf_counter() - started) * 1000.0, 3)
             return payload, {
@@ -880,6 +909,8 @@ def call_observation_agent_with_retry(
                 "error_code": None,
                 "attempts": attempt_index + 1,
                 "retry_count": attempt_index,
+                "finish_reason": finish_reason,
+                "usage": usage,
             }
         except Exception as error:
             last_error_code = classify_error(error)
@@ -914,6 +945,8 @@ def call_observation_agent_with_retry(
         "error_code": last_error_code or "runtime_error",
         "attempts": attempts,
         "retry_count": max(0, attempts - 1),
+        "finish_reason": None,
+        "usage": None,
     }
 
 

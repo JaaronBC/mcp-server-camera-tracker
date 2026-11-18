@@ -195,10 +195,24 @@ def _extract_usage_fields(usage: dict[str, Any] | None) -> dict[str, Any] | None
     if not isinstance(usage, dict):
         return None
     output: dict[str, Any] = {}
-    for field in ("prompt_tokens", "completion_tokens", "total_tokens"):
+    for field in (
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        "reasoning_tokens",
+    ):
         value = usage.get(field)
         if isinstance(value, int):
             output[field] = value
+
+    completion_tokens_details = usage.get("completion_tokens_details")
+    if isinstance(completion_tokens_details, dict):
+        detail_output: dict[str, int] = {}
+        for key, value in completion_tokens_details.items():
+            if isinstance(key, str) and isinstance(value, int):
+                detail_output[key] = value
+        if detail_output:
+            output["completion_tokens_details"] = detail_output
     if output:
         return output
     return None
@@ -213,6 +227,7 @@ def _log_event(
     reserved_at: float,
     latency_ms: float | None,
     usage: dict[str, Any] | None,
+    finish_reason: str | None = None,
     reason: str | None = None,
     error_code: str | None = None,
 ) -> None:
@@ -226,6 +241,7 @@ def _log_event(
         "reserved_at": reserved_at,
         "latency_ms": latency_ms,
         "usage": _extract_usage_fields(usage),
+        "finish_reason": finish_reason,
         "reason": reason,
         "error_code": error_code,
         "pid": os.getpid(),
@@ -380,6 +396,7 @@ def finalize_provider_call_attempt(
     outcome: str,
     latency_ms: float | None,
     usage: dict[str, Any] | None = None,
+    finish_reason: str | None = None,
     error_code: str | None = None,
 ) -> None:
     if not reservation.enabled or not reservation.allowed:
@@ -393,6 +410,7 @@ def finalize_provider_call_attempt(
         reserved_at=reservation.reserved_at,
         latency_ms=latency_ms,
         usage=usage,
+        finish_reason=finish_reason,
         error_code=error_code,
     )
 

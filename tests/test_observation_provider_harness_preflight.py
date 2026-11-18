@@ -39,6 +39,19 @@ class ObservationProviderHarnessPreflightTests(unittest.TestCase):
         fixture.write_text(json.dumps(payload), encoding="utf-8")
         return fixture
 
+    def _run_concise_preflight_with_first_decision(self, decision_payload: dict) -> dict:
+        with tempfile.TemporaryDirectory(prefix="obs-provider-harness-") as temp_dir:
+            run_dir = Path(temp_dir) / "run"
+            payload = self._fixture_payload()
+            payload["preflight_observation_responses"][0]["decision"] = decision_payload
+            fixture = self._write_fixture(run_dir, payload)
+            return run_single_investigation(
+                fixture_path=fixture,
+                run_dir=run_dir,
+                preflight_only=True,
+                concise_prompts=True,
+            )
+
     def test_preflight_harness_report_and_budgets(self) -> None:
         with tempfile.TemporaryDirectory(prefix="obs-provider-harness-") as temp_dir:
             run_dir = Path(temp_dir) / "run"
@@ -147,6 +160,75 @@ class ObservationProviderHarnessPreflightTests(unittest.TestCase):
             self.assertEqual(report.get("live_mode_enabled"), True)
             self.assertGreaterEqual(len(captured_kwargs), 1)
             self.assertNotIn("invoke_fn", captured_kwargs[0])
+
+    def test_live_mode_rejects_nonempty_run_dir_before_any_provider_call(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="obs-provider-harness-") as temp_dir:
+            run_dir = Path(temp_dir) / "run"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "existing_artifact.txt").write_text("stale", encoding="utf-8")
+
+            with patch("tools.observation_autonomy_provider_harness.agent_observation.call_observation_agent_with_retry") as call_mock:
+                report = run_single_investigation(
+                    fixture_path=self.fixture_path,
+                    run_dir=run_dir,
+                    preflight_only=False,
+                )
+
+            self.assertEqual(report.get("status"), "error")
+            self.assertEqual(report.get("error"), "RuntimeError:live_run_dir_not_empty")
+            self.assertEqual(report.get("mode"), "live_provider")
+            call_mock.assert_not_called()
+
+    def test_live_mode_allows_fresh_run_dir(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="obs-provider-harness-") as temp_dir:
+            run_dir = Path(temp_dir) / "fresh-run"
+            captured_calls = 0
+
+            def _fake_call(user_payload: dict, **kwargs: dict):
+                nonlocal captured_calls
+                captured_calls += 1
+                return (
+                    {
+                        "summary": "live-mode fresh dir response",
+                        "measured_facts": [],
+                        "interpretations": [],
+                        "hypotheses": [],
+                        "supporting_observation_ids": ["obs-100"],
+                        "conflicting_evidence": [],
+                        "uncertainties": [],
+                        "needs_more_observations": False,
+                        "decision": {
+                            "action": "assess_now",
+                            "reason": "enough_evidence",
+                            "uncertainty": [],
+                            "tool_requests": [],
+                        },
+                    },
+                    {
+                        "status": "ok",
+                        "model": "test-model",
+                        "latency_ms": 0.1,
+                        "error": None,
+                        "error_code": None,
+                        "attempts": 1,
+                        "retry_count": 0,
+                    },
+                )
+
+            with patch(
+                "tools.observation_autonomy_provider_harness.agent_observation.call_observation_agent_with_retry",
+                side_effect=_fake_call,
+            ):
+                report = run_single_investigation(
+                    fixture_path=self.fixture_path,
+                    run_dir=run_dir,
+                    preflight_only=False,
+                    concise_prompts=True,
+                )
+
+            self.assertEqual(report.get("status"), "ok")
+            self.assertEqual(report.get("mode"), "live_provider")
+            self.assertGreaterEqual(captured_calls, 1)
 
     def test_explicit_request_decision_demonstrates_tool_request_autonomy(self) -> None:
         with tempfile.TemporaryDirectory(prefix="obs-provider-harness-") as temp_dir:
@@ -1011,6 +1093,215 @@ class ObservationProviderHarnessPreflightTests(unittest.TestCase):
         self.assertIn("no additional tool requests are permitted", second_prompt)
         self.assertIn("assess_now, predict_bounded, inconclusive", second_prompt)
         self.assertIn("decision.reason must be meaningful and evidence-specific", second_prompt)
+
+    def test_concise_prompt_mode_is_opt_in_and_applies_both_pass_prompts(self) -> None:
+        captured_kwargs: list[dict] = []
+
+        def _fake_call(user_payload: dict, **kwargs: dict):
+            captured_kwargs.append(dict(kwargs))
+            if len(captured_kwargs) == 1:
+                return (
+                    {
+                        "summary": "Need more evidence due to uncertainty.",
+                        "measured_facts": [],
+                        "interpretations": [],
+                        "hypotheses": [],
+                        "supporting_observation_ids": ["obs-100", "obs-101"],
+                        "conflicting_evidence": [],
+                        "uncertainties": ["occlusion"],
+                        "needs_more_observations": True,
+                        "decision": {
+                            "action": "request_additional_tracking_evidence",
+                            "reason": "need_history",
+                            "uncertainty": ["occlusion"],
+                            "tool_requests": [
+                                {
+                                    "tool_name": "get_track_evidence_history",
+                                    "arguments": {
+                                        "track_id": "fixture-track-001",
+                                    },
+                                }
+                            ],
+                        },
+                    },
+                    {
+                        "status": "ok",
+                        "model": "test-model",
+                        "latency_ms": 0.1,
+                        "error": None,
+                        "error_code": None,
+                        "attempts": 1,
+                        "retry_count": 0,
+                    },
+                )
+            return (
+                {
+                    "summary": "Terminal follow-up assessment.",
+                    "measured_facts": [],
+                    "interpretations": [],
+                    "hypotheses": [],
+                    "supporting_observation_ids": ["obs-100", "obs-101", "obs-102"],
+                    "conflicting_evidence": [],
+                    "uncertainties": [],
+                    "needs_more_observations": False,
+                    "decision": {
+                        "action": "assess_now",
+                        "reason": "enough_evidence",
+                        "uncertainty": [],
+                        "tool_requests": [],
+                    },
+                },
+                {
+                    "status": "ok",
+                    "model": "test-model",
+                    "latency_ms": 0.1,
+                    "error": None,
+                    "error_code": None,
+                    "attempts": 1,
+                    "retry_count": 0,
+                },
+            )
+
+        with tempfile.TemporaryDirectory(prefix="obs-provider-harness-") as temp_dir:
+            run_dir = Path(temp_dir) / "run"
+            with patch(
+                "tools.observation_autonomy_provider_harness.agent_observation.call_observation_agent_with_retry",
+                side_effect=_fake_call,
+            ):
+                report = run_single_investigation(
+                    fixture_path=self.fixture_path,
+                    run_dir=run_dir,
+                    preflight_only=False,
+                    concise_prompts=True,
+                )
+
+        self.assertEqual(report.get("status"), "ok")
+        self.assertEqual(report.get("prompt_mode"), "concise_harness")
+        self.assertGreaterEqual(len(captured_kwargs), 2)
+        self.assertEqual(captured_kwargs[0].get("system_prompt"), harness.HARNESS_FIRST_PASS_CONCISE_SYSTEM_PROMPT)
+        self.assertEqual(
+            captured_kwargs[1].get("system_prompt"),
+            harness.HARNESS_SECOND_PASS_TERMINAL_CONCISE_SYSTEM_PROMPT,
+        )
+
+    def test_concise_mode_valid_explicit_request_runs_mcp_and_terminal_second_pass(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="obs-provider-harness-") as temp_dir:
+            run_dir = Path(temp_dir) / "run"
+            payload = self._fixture_payload()
+            payload["preflight_observation_responses"][0]["decision"] = {
+                "action": "request_additional_tracking_evidence",
+                "reason": "need_more_tracking_history",
+                "uncertainty": ["occlusion"],
+                "tool_requests": [
+                    {
+                        "tool_name": "get_track_evidence_history",
+                        "arguments": {
+                            "track_id": payload["track_id"],
+                            "max_messages": 5,
+                            "max_history_records": 12,
+                            "max_scan_records": 120,
+                        },
+                    }
+                ],
+            }
+            payload["preflight_observation_responses"][1]["decision"] = {
+                "action": "inconclusive",
+                "reason": "residual_occlusion_after_followup",
+                "uncertainty": ["residual_risk"],
+                "tool_requests": [],
+            }
+            payload["preflight_observation_responses"][1]["supporting_observation_ids"] = [
+                "obs-100",
+                "obs-101",
+                "obs-102",
+            ]
+
+            fixture = self._write_fixture(run_dir, payload)
+            report = run_single_investigation(
+                fixture_path=fixture,
+                run_dir=run_dir,
+                preflight_only=True,
+                concise_prompts=True,
+            )
+
+        self.assertEqual(report.get("status"), "ok")
+        self.assertEqual(report.get("prompt_mode"), "concise_harness")
+        investigation = report.get("investigation", {})
+        self.assertEqual(investigation.get("first_pass_decision_source"), "llm_explicit")
+        self.assertTrue(bool(investigation.get("request_submitted", False)))
+        self.assertEqual(investigation.get("mcp_evidence_call_count"), 1)
+        self.assertEqual(investigation.get("evidence_retrieval_status"), "retrieved")
+        self.assertTrue(bool(investigation.get("second_pass", {}).get("attempted", False)))
+        self.assertEqual(investigation.get("second_pass", {}).get("status"), "ok")
+        self.assertEqual(investigation.get("final_decision", {}).get("decision_source"), "llm_explicit")
+        self.assertEqual(investigation.get("final_decision", {}).get("phase"), "follow_up_terminal")
+        self.assertEqual(
+            investigation.get("classification", {}).get("terminal_decision_provenance"),
+            "explicit_terminal_with_evidence_support",
+        )
+        self.assertEqual(investigation.get("evidence_references", {}).get("message_ids"), ["msg-1"])
+
+    def test_concise_mode_request_action_missing_tool_requests_is_rejected(self) -> None:
+        report = self._run_concise_preflight_with_first_decision(
+            {
+                "action": "request_additional_tracking_evidence",
+                "reason": "need_more_tracking_history",
+                "uncertainty": ["occlusion"],
+            }
+        )
+
+        self.assertEqual(report.get("status"), "ok")
+        investigation = report.get("investigation", {})
+        self.assertEqual(investigation.get("first_decision", {}).get("decision_source"), "invalid_explicit_decision")
+        self.assertEqual(investigation.get("first_decision", {}).get("validation_error"), "decision_tool_request_required")
+        self.assertFalse(bool(investigation.get("request_submitted", False)))
+        self.assertEqual(investigation.get("mcp_evidence_call_count"), 0)
+        self.assertFalse(bool(investigation.get("second_pass", {}).get("attempted", False)))
+
+    def test_concise_mode_request_action_with_empty_tool_requests_is_rejected(self) -> None:
+        report = self._run_concise_preflight_with_first_decision(
+            {
+                "action": "request_additional_tracking_evidence",
+                "reason": "need_more_tracking_history",
+                "uncertainty": ["occlusion"],
+                "tool_requests": [],
+            }
+        )
+
+        self.assertEqual(report.get("status"), "ok")
+        investigation = report.get("investigation", {})
+        self.assertEqual(investigation.get("first_decision", {}).get("decision_source"), "invalid_explicit_decision")
+        self.assertEqual(investigation.get("first_decision", {}).get("validation_error"), "decision_tool_request_required")
+        self.assertFalse(bool(investigation.get("request_submitted", False)))
+        self.assertEqual(investigation.get("mcp_evidence_call_count"), 0)
+        self.assertFalse(bool(investigation.get("second_pass", {}).get("attempted", False)))
+
+    def test_concise_mode_request_action_with_malformed_arguments_is_rejected(self) -> None:
+        report = self._run_concise_preflight_with_first_decision(
+            {
+                "action": "request_additional_tracking_evidence",
+                "reason": "need_more_tracking_history",
+                "uncertainty": ["occlusion"],
+                "tool_requests": [
+                    {
+                        "tool_name": "get_track_evidence_history",
+                        "arguments": {
+                            "since_timestamp": 1734023400.1,
+                        },
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(report.get("status"), "ok")
+        investigation = report.get("investigation", {})
+        self.assertEqual(investigation.get("first_decision", {}).get("decision_source"), "llm_explicit")
+        request_submission = investigation.get("request_submission", {})
+        self.assertTrue(bool(request_submission.get("rejected", False)))
+        self.assertEqual(request_submission.get("reason"), "invalid_tool_arguments_pre_dispatch")
+        self.assertFalse(bool(investigation.get("request_submitted", False)))
+        self.assertEqual(investigation.get("mcp_evidence_call_count"), 0)
+        self.assertFalse(bool(investigation.get("second_pass", {}).get("attempted", False)))
 
     def test_compact_correlated_evidence_preserves_required_fields_and_drops_transport_metadata(self) -> None:
         correlated_result = {

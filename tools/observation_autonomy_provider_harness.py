@@ -36,6 +36,30 @@ HARNESS_SECOND_PASS_TERMINAL_SYSTEM_PROMPT = (
     "Preserve deterministic measurements and uncertainty reporting; do not invent measurements. "
     "Return JSON only, with no Markdown or unnecessary explanation."
 )
+HARNESS_FIRST_PASS_CONCISE_SYSTEM_PROMPT = (
+    "You are the Observation/Behavior Agent. Return strict JSON only with keys: summary, measured_facts, interpretations, hypotheses, "
+    "supporting_observation_ids, conflicting_evidence, uncertainties, needs_more_observations, and optional decision. "
+    "Keep each field concise and evidence-grounded; do not add narrative outside JSON. "
+    "If decision is provided, it must be an object with keys: action, reason, uncertainty, tool_requests. "
+    "If decision is provided, action must be one of: assess_now, request_additional_tracking_evidence, predict_bounded, inconclusive. "
+    "For request_additional_tracking_evidence, tool_requests must contain exactly one request for get_track_evidence_history with a valid arguments object. "
+    "For request_additional_tracking_evidence, only tool get_track_evidence_history is allowed. "
+    "Model-selectable arguments are only max_messages, max_history_records, and max_scan_records (positive integers). "
+    "Do not include unsupported arguments such as since_timestamp. "
+    "track_id and correlation metadata are authoritative runtime context and are set by the system."
+)
+HARNESS_SECOND_PASS_TERMINAL_CONCISE_SYSTEM_PROMPT = (
+    "You are the Observation/Behavior Agent in a terminal follow-up pass. "
+    "Evidence retrieval is complete and no additional tool requests are permitted. "
+    "Return strict JSON only with keys: summary, measured_facts, interpretations, hypotheses, "
+    "supporting_observation_ids, conflicting_evidence, uncertainties, needs_more_observations, and optional decision. "
+    "Keep output concise and evidence-grounded; avoid long narrative text. "
+    "If decision is provided, action must be one of: assess_now, predict_bounded, inconclusive. "
+    "If decision.action is inconclusive, decision.reason must be meaningful and evidence-specific (not blank, generic, or placeholder). "
+    "Do not use request_additional_tracking_evidence and do not include tool_requests for any tool call. "
+    "Preserve deterministic measurements and uncertainty reporting; do not invent measurements. "
+    "Return JSON only, with no Markdown or unnecessary explanation."
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +101,16 @@ def _build_paths(*, run_dir: Path) -> HarnessPaths:
         budget_lock_path=run_dir / "provider_call_budget_state.lock",
         budget_log_path=run_dir / "provider_call_budget_events.jsonl",
     )
+
+
+def _has_existing_artifacts(run_dir: Path) -> bool:
+    if not run_dir.exists() or not run_dir.is_dir():
+        return False
+    try:
+        next(run_dir.iterdir())
+    except StopIteration:
+        return False
+    return True
 
 
 def _load_fixture(path: Path) -> dict[str, Any]:
@@ -620,10 +654,47 @@ def run_single_investigation(
     fixture_path: Path = DEFAULT_FIXTURE_PATH,
     run_dir: Path | None = None,
     preflight_only: bool = True,
+    concise_prompts: bool = False,
     budgets: HarnessBudgets = HarnessBudgets(),
 ) -> dict[str, Any]:
     started_at = time.time()
     selected_run_dir = run_dir or (DEFAULT_RUNS_DIR / f"run_{int(started_at)}_{uuid.uuid4().hex[:8]}")
+
+    if not preflight_only and _has_existing_artifacts(selected_run_dir):
+        return {
+            "mode": "live_provider",
+            "live_mode_enabled": True,
+            "prompt_mode": "concise_harness" if concise_prompts else "baseline",
+            "fixture_path": str(fixture_path),
+            "run_dir": str(selected_run_dir),
+            "budgets": {
+                "provider_total_limit": budgets.provider_total_limit,
+                "provider_observation_text_limit": budgets.provider_observation_text_limit,
+                "provider_tracking_vlm_limit": budgets.provider_tracking_vlm_limit,
+                "provider_reasoning_text_limit": budgets.provider_reasoning_text_limit,
+                "provider_observation_visual_limit": budgets.provider_observation_visual_limit,
+                "max_observation_llm_calls": budgets.max_observation_llm_calls,
+                "max_mcp_evidence_requests": budgets.max_mcp_evidence_requests,
+                "wall_clock_budget_seconds": budgets.wall_clock_budget_seconds,
+            },
+            "investigation": {
+                "timing": {
+                    "started_at": started_at,
+                    "completed_at": time.time(),
+                    "elapsed_seconds": max(0.0, time.time() - started_at),
+                }
+            },
+            "safety": {
+                "camera_interaction": "disabled",
+                "tracking_identity_mutation": "disabled",
+                "mcp_tool_scope": ["get_track_evidence_history"],
+                "ipc_scope": "harness_run_dir_only",
+            },
+            "status": "error",
+            "error": "RuntimeError:live_run_dir_not_empty",
+            "outcome": "failed_runtime_error",
+        }
+
     paths = _build_paths(run_dir=selected_run_dir)
     fixture = _load_fixture(fixture_path)
     budget_env = _budget_env(paths, budgets)
@@ -634,6 +705,7 @@ def run_single_investigation(
     report: dict[str, Any] = {
         "mode": "preflight" if preflight_only else "live_provider",
         "live_mode_enabled": not preflight_only,
+        "prompt_mode": "concise_harness" if concise_prompts else "baseline",
         "fixture_path": str(fixture_path),
         "run_dir": str(paths.run_dir),
         "budgets": {
@@ -785,7 +857,10 @@ def run_single_investigation(
 
         pass1_events_before = len(_read_budget_events(paths.budget_log_path))
         pass1_attempts_before = _extract_attempt_count(_read_budget_state(paths.budget_state_path))
-        first_payload, first_meta = _call_observation(user_payload)
+        first_payload, first_meta = _call_observation(
+            user_payload,
+            system_prompt=HARNESS_FIRST_PASS_CONCISE_SYSTEM_PROMPT if concise_prompts else None,
+        )
         pass1_meta = first_meta if isinstance(first_meta, dict) else None
         pass1_events_after = _read_budget_events(paths.budget_log_path)
         pass1_attempts_after = _extract_attempt_count(_read_budget_state(paths.budget_state_path))
@@ -1043,7 +1118,11 @@ def run_single_investigation(
                 pass2_attempts_before = _extract_attempt_count(_read_budget_state(paths.budget_state_path))
                 second_payload, second_meta = _call_observation(
                     second_input,
-                    system_prompt=HARNESS_SECOND_PASS_TERMINAL_SYSTEM_PROMPT,
+                    system_prompt=(
+                        HARNESS_SECOND_PASS_TERMINAL_CONCISE_SYSTEM_PROMPT
+                        if concise_prompts
+                        else HARNESS_SECOND_PASS_TERMINAL_SYSTEM_PROMPT
+                    ),
                 )
                 pass2_meta = second_meta if isinstance(second_meta, dict) else None
                 pass2_events_after = _read_budget_events(paths.budget_log_path)
@@ -1325,6 +1404,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--fixture", default=str(DEFAULT_FIXTURE_PATH), help="Path to single investigation fixture JSON")
     parser.add_argument("--run-dir", default="", help="Optional explicit output run directory")
     parser.add_argument("--live", action="store_true", help="Enable real Observation provider calls")
+    parser.add_argument("--concise-prompts", action="store_true", help="Use harness-only concise prompt variants")
     return parser.parse_args(argv)
 
 
@@ -1336,6 +1416,7 @@ def main_cli(argv: list[str] | None = None) -> int:
         fixture_path=fixture_path,
         run_dir=run_dir,
         preflight_only=not bool(args.live),
+        concise_prompts=bool(args.concise_prompts),
     )
     print(json.dumps(report, indent=2), flush=True)
     return 0 if report.get("status") == "ok" else 1

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import multiprocessing
 import os
 import tempfile
@@ -49,21 +50,47 @@ def _cross_process_worker(env: dict[str, str], attempts: int, result_queue: mult
 
 
 class _FakeSuccessChoice:
-    def __init__(self, payload: str) -> None:
+    def __init__(self, payload: str, *, finish_reason: str = "stop") -> None:
         self.message = type("Message", (), {"content": payload})
+        self.finish_reason = finish_reason
 
 
 class _FakeUsage:
-    def __init__(self, prompt_tokens: int, completion_tokens: int, total_tokens: int) -> None:
+    def __init__(
+        self,
+        prompt_tokens: int,
+        completion_tokens: int,
+        total_tokens: int,
+        *,
+        completion_tokens_details: dict[str, int] | None = None,
+        reasoning_tokens: int | None = None,
+    ) -> None:
         self.prompt_tokens = prompt_tokens
         self.completion_tokens = completion_tokens
         self.total_tokens = total_tokens
+        self.completion_tokens_details = completion_tokens_details
+        self.reasoning_tokens = reasoning_tokens
 
 
 class _FakeResponse:
-    def __init__(self, payload: str, prompt_tokens: int = 10, completion_tokens: int = 5) -> None:
-        self.choices = [_FakeSuccessChoice(payload)]
-        self.usage = _FakeUsage(prompt_tokens, completion_tokens, prompt_tokens + completion_tokens)
+    def __init__(
+        self,
+        payload: str,
+        prompt_tokens: int = 10,
+        completion_tokens: int = 5,
+        *,
+        finish_reason: str = "stop",
+        completion_tokens_details: dict[str, int] | None = None,
+        reasoning_tokens: int | None = None,
+    ) -> None:
+        self.choices = [_FakeSuccessChoice(payload, finish_reason=finish_reason)]
+        self.usage = _FakeUsage(
+            prompt_tokens,
+            completion_tokens,
+            prompt_tokens + completion_tokens,
+            completion_tokens_details=completion_tokens_details,
+            reasoning_tokens=reasoning_tokens,
+        )
 
 
 class _FakeCompletions:
@@ -88,6 +115,12 @@ class _FakeClient:
 
 
 class TestProviderCallBudget(unittest.TestCase):
+    def _read_logged_events(self, env: dict[str, str]) -> list[dict]:
+        log_path = Path(env["PROVIDER_CALL_BUDGET_LOG_PATH"])
+        if not log_path.is_file():
+            return []
+        return [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
     def test_per_role_limits(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             env = _env_for_budget(
@@ -336,6 +369,94 @@ class TestProviderCallBudget(unittest.TestCase):
         self.assertEqual(meta["status"], "error")
         self.assertEqual(meta["error_code"], "budget_exhausted")
         create_client.assert_not_called()
+
+    def test_observation_attempt_logs_finish_reason_and_detailed_usage(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            env = _env_for_budget(
+                temp_dir,
+                PROVIDER_CALL_BUDGET_TOTAL_LIMIT="2",
+                PROVIDER_CALL_BUDGET_OBSERVATION_TEXT_LIMIT="2",
+            )
+            outcomes: list[object] = [
+                _FakeResponse(
+                    '{"summary":"ok","measured_facts":[],"interpretations":[],"hypotheses":[],"supporting_observation_ids":[],"conflicting_evidence":[],"uncertainties":[],"needs_more_observations":false}',
+                    completion_tokens_details={"reasoning_tokens": 321, "audio_tokens": 0},
+                )
+            ]
+
+            with patch.dict(os.environ, env, clear=False):
+                with patch(
+                    "agents.observation.agent_observation._create_openai_client",
+                    side_effect=lambda: _FakeClient(outcomes),
+                ):
+                    payload, meta = agent_observation.call_observation_agent_with_retry(
+                        {"track_id": "track-1"},
+                        model="gpt-oss-120b",
+                        timeout_seconds=0.5,
+                        retry_limit=0,
+                    )
+                events = self._read_logged_events(env)
+
+        self.assertIsNotNone(payload)
+        self.assertEqual(meta["status"], "ok")
+        self.assertEqual(meta["finish_reason"], "stop")
+        self.assertIsInstance(meta.get("usage"), dict)
+        self.assertEqual(meta["usage"].get("reasoning_tokens"), 321)
+        self.assertEqual(meta["usage"].get("completion_tokens_details", {}).get("reasoning_tokens"), 321)
+
+        attempt_events = [event for event in events if event.get("event_type") == "provider_call_attempt"]
+        self.assertEqual(len(attempt_events), 1)
+        event = attempt_events[0]
+        self.assertEqual(event.get("outcome"), "ok")
+        self.assertEqual(event.get("finish_reason"), "stop")
+        self.assertEqual(event.get("usage", {}).get("reasoning_tokens"), 321)
+        self.assertEqual(
+            event.get("usage", {}).get("completion_tokens_details", {}).get("reasoning_tokens"),
+            321,
+        )
+
+    def test_observation_attempt_logs_null_finish_reason_without_usage_details(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            env = _env_for_budget(
+                temp_dir,
+                PROVIDER_CALL_BUDGET_TOTAL_LIMIT="2",
+                PROVIDER_CALL_BUDGET_OBSERVATION_TEXT_LIMIT="2",
+            )
+            outcomes: list[object] = [
+                _FakeResponse(
+                    '{"summary":"ok","measured_facts":[],"interpretations":[],"hypotheses":[],"supporting_observation_ids":[],"conflicting_evidence":[],"uncertainties":[],"needs_more_observations":false}',
+                    finish_reason="stop",
+                )
+            ]
+
+            with patch.dict(os.environ, env, clear=False):
+                with patch(
+                    "agents.observation.agent_observation._create_openai_client",
+                    side_effect=lambda: _FakeClient(outcomes),
+                ):
+                    _, meta = agent_observation.call_observation_agent_with_retry(
+                        {"track_id": "track-1"},
+                        model="gpt-oss-120b",
+                        timeout_seconds=0.5,
+                        retry_limit=0,
+                    )
+                events = self._read_logged_events(env)
+
+        self.assertEqual(meta["status"], "ok")
+        self.assertEqual(meta["finish_reason"], "stop")
+        usage = meta.get("usage")
+        self.assertIsInstance(usage, dict)
+        self.assertIsNone(usage.get("completion_tokens_details"))
+        self.assertIsNone(usage.get("reasoning_tokens"))
+
+        attempt_events = [event for event in events if event.get("event_type") == "provider_call_attempt"]
+        self.assertEqual(len(attempt_events), 1)
+        event = attempt_events[0]
+        self.assertEqual(event.get("finish_reason"), "stop")
+        logged_usage = event.get("usage")
+        self.assertIsInstance(logged_usage, dict)
+        self.assertNotIn("completion_tokens_details", logged_usage)
+        self.assertNotIn("reasoning_tokens", logged_usage)
 
     def test_existing_budget_history_is_not_reset_on_limit_change(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
