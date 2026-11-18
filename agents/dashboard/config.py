@@ -9,6 +9,9 @@ LATEST_TRACKING_FRAME_PATH = CAPTURES_DIR / "latest_tracking_frame.json"
 LATEST_RADAR_STATE_PATH = CAPTURES_DIR / "latest_radar_state.json"
 LATEST_TRACKING_ESTIMATE_DIAGNOSTICS_PATH = CAPTURES_DIR / "latest_tracking_estimate_diagnostics.json"
 LATEST_TRACKING_IDENTITY_SNAPSHOT_PATH = CAPTURES_DIR / "latest_tracking_identity_snapshot.json"
+LATEST_TRACKING_PREDICTION_DETECTION_ADVISORIES_PATH = (
+    CAPTURES_DIR / "latest_tracking_prediction_detection_advisories.json"
+)
 RADAR_DEPTH_COVERAGE_HISTORY_PATH = CAPTURES_DIR / "radar_depth_coverage_history.jsonl"
 GROUND_CALIBRATION_PATH = CAPTURES_DIR / "ground_plane_calibration.json"
 

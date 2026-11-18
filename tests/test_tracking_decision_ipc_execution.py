@@ -1,16 +1,23 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import multiprocessing as mp
 import tempfile
 import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import main
+from agents.contracts import BoundingBox, DetectionCandidate
+from agents.dashboard.state import SharedDashboardState
+from agents.dashboard.tracking_loop import _build_prediction_detection_advisories
+from agents.observation.tools import track_evidence_history as observation_track_evidence_history_tools
 from agents.orchestration.runtime import flow as runtime_flow
 from agents.orchestration.runtime.tracking_decision_ipc import TrackingDecisionIpcTransport
+from agents.tracking.identity_registry import PersistentIdentityRegistry
 
 
 def _decision(
@@ -52,6 +59,169 @@ def _transport(root: Path, *, role: str) -> TrackingDecisionIpcTransport:
         result_index_path=root / "latest_tracking_decision_result_index.json",
         writer_role=role,
     )
+
+
+def _write_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _build_minimal_track_evidence_store(root: Path) -> Path:
+    evidence_root = root / "tracking_evidence"
+    refs_dir = evidence_root / "refs"
+    frames_dir = evidence_root / "frames"
+    envelopes_dir = evidence_root / "envelopes"
+    frames_dir.mkdir(parents=True, exist_ok=True)
+
+    frame_id = "frame-abc"
+    frame_reference = f"evidence://frame/{frame_id}"
+    frame_path = frames_dir / f"{frame_id}.jpg"
+    frame_path.write_bytes(b"fake-jpeg-bytes")
+
+    _write_json(
+        refs_dir / f"{frame_id}.json",
+        {
+            "kind": "frame",
+            "id": frame_id,
+            "reference": frame_reference,
+            "timestamp": 1000.0,
+            "created_at": 1000.0,
+            "expires_at": 9999999999.0,
+            "status": "available",
+            "frame_path": str(frame_path),
+            "width": 32,
+            "height": 24,
+        },
+    )
+
+    det_ref_id = "detref-abc"
+    detection_reference = f"evidence://detection/{det_ref_id}"
+    _write_json(
+        refs_dir / f"{det_ref_id}.json",
+        {
+            "kind": "detection",
+            "id": det_ref_id,
+            "reference": detection_reference,
+            "timestamp": 1000.0,
+            "created_at": 1000.0,
+            "expires_at": 9999999999.0,
+            "track_id": "track-1",
+            "detection_id": "det-1",
+            "frame_reference": frame_reference,
+            "pixel_bbox": {"x1": 10.0, "y1": 20.0, "x2": 30.0, "y2": 40.0},
+        },
+    )
+
+    _write_json(
+        envelopes_dir / "msg-1.json",
+        {
+            "message_id": "msg-1",
+            "stored_at": 1001.0,
+            "validation": {
+                "valid": True,
+                "errors": [],
+                "warnings": [],
+                "message_id": "msg-1",
+                "track_id": "track-1",
+            },
+            "envelope": {
+                "schema_version": "1.0",
+                "message_id": "msg-1",
+                "track_id": "track-1",
+                "timestamp": 1000.0,
+                "frame_id": "frame-1",
+                "detection_id": "det-1",
+                "pixel_bbox": {"x1": 10.0, "y1": 20.0, "x2": 30.0, "y2": 40.0},
+                "pixel_center": {"x": 20.0, "y": 40.0},
+                "relative_depth": 0.3,
+                "ground_position": {"x": 1.0, "z": 2.0, "unit": "meters"},
+                "tracking_confidence": None,
+                "quality_flags": ["position_kind:calibrated_ground_plane"],
+                "track_history": [
+                    {
+                        "observation_id": "obs-1",
+                        "track_id": "track-1",
+                        "timestamp": 1000.0,
+                        "source": "tracking_frame",
+                        "pixel_x": 20.0,
+                        "pixel_y": 40.0,
+                        "ground_point": {"x": 1.0, "z": 2.0, "unit": "meters"},
+                        "confidence": 0.8,
+                        "quality_flags": ["position_kind:calibrated_ground_plane"],
+                    }
+                ],
+                "tracking_claims": {
+                    "claimed_resolved_track_id": "track-1",
+                    "association_status": "accepted",
+                    "possible_id_switch": False,
+                    "visibility_status": "unknown",
+                    "claim_reasons": ["vlm_association_accepted"],
+                    "identity_claim": {"app_identity_id": "identity-1"},
+                },
+                "frame_reference": frame_reference,
+                "source_evidence_refs": [frame_reference, detection_reference],
+                "uncertainty": [],
+            },
+        },
+    )
+
+    return evidence_root
+
+
+def _candidate(*, detection_id: str, yolo_track_id: str, timestamp: float, ground_x: float, ground_z: float) -> DetectionCandidate:
+    return DetectionCandidate(
+        detection_id=detection_id,
+        timestamp=timestamp,
+        yolo_track_id=yolo_track_id,
+        label="person",
+        detection_confidence=0.92,
+        pixel_bbox=BoundingBox(x1=10.0, y1=15.0, x2=60.0, y2=110.0),
+        pixel_center_x=100.0,
+        pixel_center_y=80.0,
+        relative_depth=0.3,
+        ground_x=ground_x,
+        ground_z=ground_z,
+        ground_coordinate_unit="meters",
+        position_kind="calibrated_ground_plane",
+        motion_history=[],
+    )
+
+
+def _seed_temporarily_lost_identity() -> tuple[PersistentIdentityRegistry, str]:
+    registry = PersistentIdentityRegistry()
+    registry.process_detections(
+        now=1000.0,
+        detections=[
+            _candidate(
+                detection_id="seed",
+                yolo_track_id="track-src",
+                timestamp=1000.0,
+                ground_x=2.0,
+                ground_z=3.0,
+            )
+        ],
+    )
+    app_identity_id = registry.get_identity_for_yolo_track("track-src")
+    assert isinstance(app_identity_id, str)
+    registry.process_detections(now=1000.1, detections=[])
+    return registry, app_identity_id
+
+
+class _TrackEvidenceToolSession:
+    def __init__(self, *, evidence_root: Path, advisory_store_path: Path) -> None:
+        self._evidence_root = evidence_root
+        self._advisory_store_path = advisory_store_path
+
+    async def call_tool(self, tool_name: str, arguments: dict) -> SimpleNamespace:
+        if tool_name != "get_track_evidence_history":
+            raise RuntimeError("unsupported_tool")
+
+        with (
+            patch.object(observation_track_evidence_history_tools, "EVIDENCE_ROOT_DIR", self._evidence_root),
+            patch.object(observation_track_evidence_history_tools, "ADVISORY_STORE_PATH", self._advisory_store_path),
+        ):
+            payload = observation_track_evidence_history_tools.get_track_evidence_history(**arguments)
+        return SimpleNamespace(content=[SimpleNamespace(json=payload)])
 
 
 def _dashboard_submit_worker(root_path: str) -> None:
@@ -293,6 +463,233 @@ class TestTrackingDecisionIpcBoundedMcpExecution(unittest.IsolatedAsyncioTestCas
             polled = dashboard_transport.dashboard_poll_results(now_timestamp=now + 0.2)
             self.assertEqual(polled["result_count"], 1)
             self.assertEqual(polled["results"][0]["status"], "ok")
+
+    async def test_tool_response_payload_preserves_advisory_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            dashboard_transport = _transport(root, role="dashboard")
+            orchestration_transport = _transport(root, role="orchestration")
+            session = _FakeSession(
+                payload={
+                    "available": True,
+                    "state": "recorded_observation",
+                    "prediction_detection_advisory_evidence": {
+                        "available": True,
+                        "state": "advisory_matched",
+                        "advisory_count": 1,
+                        "matched_count": 1,
+                        "ambiguous_count": 0,
+                        "advisories": [{"decision": "matched", "app_identity_id": "identity-1"}],
+                        "provenance": {
+                            "identity_verification_authorized": False,
+                            "identity_mutation_authorized": False,
+                        },
+                    },
+                    "mutation_authorized": False,
+                }
+            )
+            now = time.time()
+
+            dashboard_transport.dashboard_submit_decision_request(
+                decision=_decision(investigation_id="inv-advisory", request_id="req-advisory"),
+                now_timestamp=now,
+            )
+
+            await main._run_tracking_decision_ipc_mcp_cycle(
+                session=session,
+                transport=orchestration_transport,
+                max_requests_per_cycle=8,
+                tool_timeout_seconds=0.5,
+            )
+
+            polled = dashboard_transport.dashboard_poll_results(now_timestamp=now + 0.2)
+            self.assertEqual(polled["result_count"], 1)
+            result = polled["results"][0]
+            self.assertEqual(result["status"], "ok")
+            payload = result["result_payload"]
+            advisory = payload["prediction_detection_advisory_evidence"]
+            self.assertTrue(advisory["available"])
+            self.assertEqual(advisory["advisory_count"], 1)
+            self.assertFalse(advisory["provenance"]["identity_verification_authorized"])
+            self.assertFalse(advisory["provenance"]["identity_mutation_authorized"])
+            self.assertFalse(payload["mutation_authorized"])
+
+    async def test_restart_stale_advisory_artifact_is_rejected_in_dispatch_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            evidence_root = _build_minimal_track_evidence_store(root)
+            advisory_store_path = root / "latest_tracking_prediction_detection_advisories.json"
+            _write_json(
+                advisory_store_path,
+                {
+                    "schema_version": "1.0",
+                    "updated_at": 1000.0,
+                    "available": True,
+                    "summary": {"available": True},
+                    "advisories": [
+                        {
+                            "decision": "matched",
+                            "classification": "prediction_detection_advisory",
+                            "reason": None,
+                            "app_identity_id": "identity-1",
+                            "candidate_yolo_track_id": "track-1",
+                            "source_yolo_track_id": "track-src",
+                            "match_metric": "pixel_distance",
+                            "match_distance": 10.0,
+                            "match_threshold": 120.0,
+                            "normalized_score": 0.08,
+                            "predicted_for_timestamp": 1000.0,
+                            "expires_at": 1000.5,
+                            "advisory_created_at": 1000.0,
+                        }
+                    ],
+                },
+            )
+
+            dashboard_transport = _transport(root, role="dashboard")
+            orchestration_transport = _transport(root, role="orchestration")
+            session = _TrackEvidenceToolSession(
+                evidence_root=evidence_root,
+                advisory_store_path=advisory_store_path,
+            )
+            now = time.time()
+
+            dashboard_transport.dashboard_submit_decision_request(
+                decision=_decision(
+                    investigation_id="inv-restart-stale",
+                    request_id="req-restart-stale",
+                    arguments={
+                        "track_id": "track-1",
+                        "now_timestamp": 1002.0,
+                    },
+                ),
+                now_timestamp=now,
+            )
+
+            await main._run_tracking_decision_ipc_mcp_cycle(
+                session=session,
+                transport=orchestration_transport,
+                max_requests_per_cycle=8,
+                tool_timeout_seconds=0.5,
+            )
+
+            polled = dashboard_transport.dashboard_poll_results(now_timestamp=now + 0.2)
+            self.assertEqual(polled["result_count"], 1)
+            result = polled["results"][0]
+            self.assertEqual(result["status"], "ok")
+            payload = result["result_payload"]
+            advisory = payload["prediction_detection_advisory_evidence"]
+            self.assertFalse(advisory["available"])
+            self.assertEqual(advisory["state"], "no_current_advisory")
+            self.assertEqual(advisory["advisory_count"], 0)
+            self.assertGreaterEqual(advisory["rejected_count"], 1)
+            self.assertFalse(payload["mutation_authorized"])
+
+    async def test_occlusion_reappearance_advisory_flows_through_ipc_and_stays_non_authoritative(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            evidence_root = _build_minimal_track_evidence_store(root)
+            advisory_store_path = root / "latest_tracking_prediction_detection_advisories.json"
+
+            registry, app_identity_id = _seed_temporarily_lost_identity()
+            snapshot = registry.snapshot()
+            state = SharedDashboardState()
+            state.tracking_identity_registry_enabled = True
+            state.tracking_identity_registry = registry
+            state.calibration_status = "loaded"
+            state.latest_tracking_prediction_evidence_by_identity = {
+                app_identity_id: {
+                    "app_identity_id": app_identity_id,
+                    "source_yolo_track_id": "track-src",
+                    "estimate_id": "est-1",
+                    "source_generated_at": 1000.2,
+                    "source_identity_registry_generation": int(snapshot["generation"]),
+                    "source_identity_registry_version": int(snapshot["version"]),
+                    "source_estimated_at": 1000.2,
+                    "source_verification_timestamp": 1000.2,
+                    "predicted_for_timestamp": 1000.4,
+                    "expires_at": 1001.2,
+                    "coordinate_system": "calibrated_ground_plane",
+                    "ground_coordinate_mode": "calibrated_metric",
+                    "coordinate_unit": "meters",
+                    "estimated_pixel_position": {"x": 100.0, "y": 80.0},
+                    "estimated_ground_position": {"x": 2.0, "z": 3.0, "unit": "meters"},
+                    "uncertainty": ["brief_occlusion"],
+                    "classification": "occlusion_candidate",
+                    "source_tracking_message_ids": ["msg-1"],
+                    "source_verification_observation_id": "obs-1",
+                    "source_verification_message_id": "verify-1",
+                    "validation": {"valid": True},
+                    "source_feedback_expires_at": 1001.2,
+                    "promoted_at": 1000.2,
+                }
+            }
+
+            with patch(
+                "agents.dashboard.tracking_loop.LATEST_TRACKING_PREDICTION_DETECTION_ADVISORIES_PATH",
+                advisory_store_path,
+            ):
+                _build_prediction_detection_advisories(
+                    state=state,
+                    now=1000.4,
+                    tracking_candidates=[
+                        _candidate(
+                            detection_id="reappear",
+                            yolo_track_id="track-1",
+                            timestamp=1000.4,
+                            ground_x=2.1,
+                            ground_z=3.1,
+                        )
+                    ],
+                )
+
+            dashboard_transport = _transport(root, role="dashboard")
+            orchestration_transport = _transport(root, role="orchestration")
+            session = _TrackEvidenceToolSession(
+                evidence_root=evidence_root,
+                advisory_store_path=advisory_store_path,
+            )
+            now = time.time()
+
+            dashboard_transport.dashboard_submit_decision_request(
+                decision=_decision(
+                    investigation_id="inv-occlusion-e2e",
+                    request_id="req-occlusion-e2e",
+                    arguments={
+                        "track_id": "track-1",
+                        "now_timestamp": 1000.5,
+                    },
+                ),
+                now_timestamp=now,
+            )
+
+            await main._run_tracking_decision_ipc_mcp_cycle(
+                session=session,
+                transport=orchestration_transport,
+                max_requests_per_cycle=8,
+                tool_timeout_seconds=0.5,
+            )
+
+            polled = dashboard_transport.dashboard_poll_results(now_timestamp=now + 0.2)
+            self.assertEqual(polled["result_count"], 1)
+            result = polled["results"][0]
+            self.assertEqual(result["status"], "ok")
+            payload = result["result_payload"]
+            advisory = payload["prediction_detection_advisory_evidence"]
+
+            self.assertTrue(advisory["available"])
+            self.assertEqual(advisory["state"], "advisory_matched")
+            self.assertEqual(advisory["advisory_count"], 1)
+            self.assertEqual(advisory["matched_count"], 1)
+            self.assertEqual(advisory["ambiguous_count"], 0)
+            self.assertEqual(advisory["advisories"][0]["decision"], "matched")
+            self.assertEqual(advisory["advisories"][0]["classification"], "prediction_detection_advisory")
+            self.assertEqual(advisory["advisories"][0]["app_identity_id"], app_identity_id)
+            self.assertEqual(advisory["advisories"][0]["candidate_yolo_track_id"], "track-1")
+
+            self.assertFalse(payload["mutation_authorized"])
+            self.assertFalse(advisory["provenance"]["identity_verification_authorized"])
+            self.assertFalse(advisory["provenance"]["identity_mutation_authorized"])
 
 
 class TestDecisionIpcNonBlockingLoop(unittest.IsolatedAsyncioTestCase):

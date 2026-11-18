@@ -12,15 +12,12 @@
     "Occlusion near lower-left edge creates identity ambiguity.",
     "Depth return missing for two recent observations."
   ],
-  "supporting_observation_ids": [
-    "obs-100",
-    "obs-101"
-  ],
+  "supporting_observation_ids": ["obs-100", "obs-101"],
   "history_records": [
     {
       "observation_id": "obs-100",
       "timestamp": 1734023399.1,
-      "x": 0.20,
+      "x": 0.2,
       "z": -0.02,
       "confidence": 0.71
     },
@@ -93,25 +90,14 @@
       "confidence": 0.62,
       "sample_count": 999,
       "summary": "Need more evidence due to occlusion and sparse depth.",
-      "measured_facts": [
-        "Recent observations have degraded confidence."
-      ],
-      "interpretations": [
-        "Identity swap risk cannot be ruled out."
-      ],
-      "hypotheses": [
-        "Temporary merge/split around occlusion region."
-      ],
+      "measured_facts": ["Recent observations have degraded confidence."],
+      "interpretations": ["Identity swap risk cannot be ruled out."],
+      "hypotheses": ["Temporary merge/split around occlusion region."],
       "conflicting_evidence": [
         "Depth continuity breaks around last two points."
       ],
-      "uncertainties": [
-        "Identity remains ambiguous."
-      ],
-      "supporting_observation_ids": [
-        "obs-100",
-        "obs-101"
-      ],
+      "uncertainties": ["Identity remains ambiguous."],
+      "supporting_observation_ids": ["obs-100", "obs-101"],
       "needs_more_observations": true
     },
     {
@@ -126,21 +112,11 @@
       "measured_facts": [
         "Additional bounded history confirms continuity trend."
       ],
-      "interpretations": [
-        "Occlusion likely caused temporary confidence dip."
-      ],
-      "hypotheses": [
-        "Identity is stable but needs one more clean segment."
-      ],
+      "interpretations": ["Occlusion likely caused temporary confidence dip."],
+      "hypotheses": ["Identity is stable but needs one more clean segment."],
       "conflicting_evidence": [],
-      "uncertainties": [
-        "Residual confidence remains moderate."
-      ],
-      "supporting_observation_ids": [
-        "obs-100",
-        "obs-101",
-        "obs-102"
-      ],
+      "uncertainties": ["Residual confidence remains moderate."],
+      "supporting_observation_ids": ["obs-100", "obs-101", "obs-102"],
       "needs_more_observations": false
     }
   ]

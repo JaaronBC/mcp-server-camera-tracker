@@ -597,7 +597,10 @@ class TestDashboardTrackingLoopInitialization(unittest.TestCase):
         fake_runtime = _FakeTrackingRuntime()
         initialized = (_FakeModel(), fake_camera, None, fake_socket, fake_runtime)
 
-        with patch("agents.dashboard.tracking_loop._initialize_tracking_runtime", return_value=initialized):
+        with (
+            patch("agents.dashboard.tracking_loop._initialize_tracking_runtime", return_value=initialized),
+            patch("agents.dashboard.tracking_loop.write_json_payload") as write_mock,
+        ):
             tracking_loop.run_live_tracking_loop(state)
 
         self.assertTrue(fake_socket.closed)
@@ -605,6 +608,17 @@ class TestDashboardTrackingLoopInitialization(unittest.TestCase):
         self.assertTrue(fake_camera.release_called)
         self.assertEqual(state.camera_status, "stopped")
         self.assertEqual(state.detector_status, "stopped")
+
+        advisory_reset = None
+        for call in write_mock.call_args_list:
+            payload = call.args[1]
+            if isinstance(payload, dict) and payload.get("summary", {}).get("reason") == "tracking_runtime_stopped":
+                advisory_reset = payload
+                break
+        self.assertIsNotNone(advisory_reset)
+        assert isinstance(advisory_reset, dict)
+        self.assertFalse(advisory_reset["available"])
+        self.assertEqual(advisory_reset["advisories"], [])
 
 
 class TestDashboardTrackingLoopTrailSnapshot(unittest.TestCase):

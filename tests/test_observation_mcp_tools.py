@@ -512,6 +512,158 @@ class TestObservationMcpEvidenceTools(unittest.TestCase):
         self.assertLessEqual(limited["work"]["scanned_records"], 3)
         self.assertTrue(limited["work"]["scan_limit_reached"])
 
+    def test_get_track_evidence_history_includes_prediction_detection_advisories(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root_path = Path(temp_dir)
+            evidence_root = self._build_valid_store(root_path, message_id="msg-adv")
+            advisory_store_path = root_path / "latest_tracking_prediction_detection_advisories.json"
+
+            envelope_path = evidence_root / "envelopes" / "msg-adv.json"
+            envelope_payload = json.loads(envelope_path.read_text(encoding="utf-8"))
+            tracking_claims = envelope_payload["envelope"].get("tracking_claims", {})
+            tracking_claims["identity_claim"] = {"app_identity_id": "identity-1"}
+            envelope_payload["envelope"]["tracking_claims"] = tracking_claims
+            _write_json(envelope_path, envelope_payload)
+
+            _write_json(
+                advisory_store_path,
+                {
+                    "schema_version": "1.0",
+                    "updated_at": 1001.0,
+                    "available": True,
+                    "summary": {"available": True, "matched_count": 1, "ambiguous_count": 1},
+                    "advisories": [
+                        {
+                            "decision": "matched",
+                            "classification": "prediction_detection_advisory",
+                            "reason": None,
+                            "app_identity_id": "identity-1",
+                            "candidate_yolo_track_id": "track-1",
+                            "source_yolo_track_id": "track-src",
+                            "match_metric": "pixel_distance",
+                            "match_distance": 10.0,
+                            "match_threshold": 120.0,
+                            "normalized_score": 0.08,
+                            "predicted_for_timestamp": 1001.0,
+                            "expires_at": 1005.0,
+                            "advisory_created_at": 1001.0,
+                            "source_identity_registry_generation": 3,
+                            "source_identity_registry_version": 9,
+                            "source_tracking_message_ids": ["msg-adv"],
+                            "source_verification_observation_id": "obs-1",
+                            "source_verification_message_id": "verify-1",
+                        },
+                        {
+                            "decision": "ambiguous",
+                            "classification": "prediction_detection_advisory",
+                            "reason": "identity_has_competing_candidates",
+                            "app_identity_id": "identity-1",
+                            "candidate_yolo_track_id": "track-other",
+                            "source_yolo_track_id": "track-src-2",
+                            "match_metric": "pixel_distance",
+                            "match_distance": 15.0,
+                            "match_threshold": 120.0,
+                            "normalized_score": 0.12,
+                            "predicted_for_timestamp": 1001.0,
+                            "expires_at": 1005.0,
+                            "advisory_created_at": 1001.0,
+                            "source_identity_registry_generation": 3,
+                            "source_identity_registry_version": 9,
+                            "source_tracking_message_ids": ["msg-adv"],
+                            "source_verification_observation_id": "obs-2",
+                            "source_verification_message_id": "verify-2",
+                        },
+                        {"invalid": True},
+                    ],
+                },
+            )
+
+            with (
+                patch.object(observation_track_evidence_history_tools, "EVIDENCE_ROOT_DIR", evidence_root),
+                patch.object(observation_track_evidence_history_tools, "ADVISORY_STORE_PATH", advisory_store_path),
+            ):
+                result = observation_track_evidence_history_tools.get_track_evidence_history(
+                    "track-1",
+                    now_timestamp=1001.1,
+                )
+
+        advisory = result["prediction_detection_advisory_evidence"]
+        self.assertTrue(result["available"])
+        self.assertFalse(result["mutation_authorized"])
+        self.assertTrue(advisory["available"])
+        self.assertEqual(advisory["advisory_count"], 2)
+        self.assertEqual(advisory["matched_count"], 1)
+        self.assertEqual(advisory["ambiguous_count"], 1)
+        self.assertGreaterEqual(advisory["rejected_count"], 1)
+        decisions = {item["decision"] for item in advisory["advisories"]}
+        self.assertEqual(decisions, {"matched", "ambiguous"})
+        self.assertFalse(advisory["provenance"]["identity_verification_authorized"])
+        self.assertFalse(advisory["provenance"]["identity_mutation_authorized"])
+
+    def test_get_track_evidence_history_rejects_stale_or_mismatched_advisories(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root_path = Path(temp_dir)
+            evidence_root = self._build_valid_store(root_path, message_id="msg-stale")
+            advisory_store_path = root_path / "latest_tracking_prediction_detection_advisories.json"
+
+            _write_json(
+                advisory_store_path,
+                {
+                    "schema_version": "1.0",
+                    "updated_at": 1000.0,
+                    "available": True,
+                    "summary": {"available": True},
+                    "advisories": [
+                        {
+                            "decision": "matched",
+                            "classification": "prediction_detection_advisory",
+                            "reason": None,
+                            "app_identity_id": "identity-1",
+                            "candidate_yolo_track_id": "track-1",
+                            "source_yolo_track_id": "track-src",
+                            "match_metric": "pixel_distance",
+                            "match_distance": 10.0,
+                            "match_threshold": 120.0,
+                            "normalized_score": 0.08,
+                            "predicted_for_timestamp": 1000.0,
+                            "expires_at": 1000.5,
+                            "advisory_created_at": 1000.0,
+                        },
+                        {
+                            "decision": "matched",
+                            "classification": "prediction_detection_advisory",
+                            "reason": None,
+                            "app_identity_id": "identity-other",
+                            "candidate_yolo_track_id": "track-other",
+                            "source_yolo_track_id": "track-other-src",
+                            "match_metric": "pixel_distance",
+                            "match_distance": 9.0,
+                            "match_threshold": 120.0,
+                            "normalized_score": 0.07,
+                            "predicted_for_timestamp": 1001.0,
+                            "expires_at": 1005.0,
+                            "advisory_created_at": 1001.0,
+                        },
+                    ],
+                },
+            )
+
+            with (
+                patch.object(observation_track_evidence_history_tools, "EVIDENCE_ROOT_DIR", evidence_root),
+                patch.object(observation_track_evidence_history_tools, "ADVISORY_STORE_PATH", advisory_store_path),
+            ):
+                result = observation_track_evidence_history_tools.get_track_evidence_history(
+                    "track-1",
+                    now_timestamp=1002.0,
+                )
+
+        advisory = result["prediction_detection_advisory_evidence"]
+        self.assertTrue(result["available"])
+        self.assertFalse(advisory["available"])
+        self.assertEqual(advisory["state"], "no_current_advisory")
+        self.assertEqual(advisory["advisory_count"], 0)
+        self.assertGreaterEqual(advisory["rejected_count"], 2)
+
 
 class TestObservationMcpToolDiscoverability(unittest.IsolatedAsyncioTestCase):
     async def test_observation_tools_discoverable_via_list_tools(self) -> None:

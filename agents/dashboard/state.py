@@ -62,6 +62,16 @@ class SharedDashboardState:
         self.tracking_missing_track_grace_seconds: float = 1.5
         self.latest_tracking_observation_feedback: dict | None = None
         self.latest_tracking_estimate_proposals: dict | None = None
+        self.latest_tracking_prediction_evidence_by_identity: dict[str, dict[str, Any]] = {}
+        self.latest_tracking_prediction_evidence_unresolved: list[dict[str, Any]] = []
+        self.latest_tracking_prediction_evidence_summary: dict[str, Any] | None = None
+        self.tracking_prediction_evidence_max_records: int = 128
+        self.tracking_prediction_unresolved_max_records: int = 128
+        self.tracking_prediction_last_calibration_status: str | None = None
+        self.tracking_prediction_last_mapping_mode: str | None = None
+        self.latest_tracking_prediction_detection_advisories: list[dict[str, Any]] = []
+        self.latest_tracking_prediction_detection_advisory_summary: dict[str, Any] | None = None
+        self.tracking_prediction_detection_advisory_max_records: int = 128
         self.tracking_identity_registry_enabled: bool = False
         self.tracking_identity_registry: PersistentIdentityRegistry | None = None
         self.tracking_identity_registry_generation: int = 0

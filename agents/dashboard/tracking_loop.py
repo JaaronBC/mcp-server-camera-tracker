@@ -45,6 +45,7 @@ from .config import (
     GROUND_CALIBRATION_PATH,
     LATEST_TRACKING_ESTIMATE_DIAGNOSTICS_PATH,
     LATEST_TRACKING_FRAME_PATH,
+    LATEST_TRACKING_PREDICTION_DETECTION_ADVISORIES_PATH,
     LATEST_OPERATOR_TRACKING_FEEDBACK_PATH,
     TRACKING_FEEDBACK_CONSUMER_DECISIONS_PATH,
     TRACKING_DECISION_IPC_ENABLED,
@@ -1001,6 +1002,354 @@ def _update_identity_registry_if_enabled(
                 state.tracking_identity_registry_version = version
 
 
+def _build_prediction_detection_advisories(
+    *,
+    state: SharedDashboardState,
+    now: float,
+    tracking_candidates,
+) -> None:
+    with state.lock:
+        registry_enabled = bool(state.tracking_identity_registry_enabled)
+        registry = state.tracking_identity_registry
+        calibration_status = str(state.calibration_status)
+        prediction_map = dict(state.latest_tracking_prediction_evidence_by_identity)
+        max_advisories = max(1, int(state.tracking_prediction_detection_advisory_max_records))
+
+    if not registry_enabled or registry is None:
+        with state.lock:
+            state.latest_tracking_prediction_detection_advisories = []
+            state.latest_tracking_prediction_detection_advisory_summary = {
+                "updated_at": float(now),
+                "available": False,
+                "reason": "identity_registry_unavailable",
+                "advisory_count": 0,
+            }
+        try:
+            write_json_payload(
+                LATEST_TRACKING_PREDICTION_DETECTION_ADVISORIES_PATH,
+                {
+                    "schema_version": "1.0",
+                    "updated_at": float(now),
+                    "available": False,
+                    "summary": {
+                        "updated_at": float(now),
+                        "available": False,
+                        "reason": "identity_registry_unavailable",
+                        "advisory_count": 0,
+                    },
+                    "advisories": [],
+                },
+            )
+        except OSError:
+            pass
+        return
+
+    snapshot = registry.snapshot()
+    snapshot_generation = snapshot.get("generation") if isinstance(snapshot, dict) else None
+    snapshot_version = snapshot.get("version") if isinstance(snapshot, dict) else None
+
+    max_effective_horizon_seconds = min(
+        10.0,
+        max(0.1, float(TRACKING_MAX_EFFECTIVE_HORIZON_SECONDS)),
+    )
+    pixel_threshold = 120.0
+    ground_threshold = 2.5
+    pixel_ambiguity = 25.0
+    ground_ambiguity = 0.35
+
+    candidate_track_owner: dict[str, str | None] = {}
+    detection_candidates: list[tuple[str, Any]] = []
+    for candidate in tracking_candidates:
+        track_id = _nonempty_str(getattr(candidate, "yolo_track_id", None))
+        if track_id is None:
+            continue
+        detection_candidates.append((track_id, candidate))
+        owner = registry.get_identity_for_yolo_track(track_id)
+        candidate_track_owner[track_id] = owner if isinstance(owner, str) and owner else None
+
+    links: list[dict[str, Any]] = []
+    rejected_count = 0
+    stale_or_invalid_count = 0
+
+    for app_identity_id, record in prediction_map.items():
+        if not isinstance(app_identity_id, str) or not app_identity_id:
+            rejected_count += 1
+            continue
+        if not isinstance(record, dict):
+            rejected_count += 1
+            continue
+
+        identity_record = registry.get_record(app_identity_id)
+        if identity_record is None or identity_record.status != "temporarily_lost":
+            stale_or_invalid_count += 1
+            continue
+
+        source_generation = record.get("source_identity_registry_generation")
+        source_version = record.get("source_identity_registry_version")
+        expires_at = record.get("expires_at")
+        predicted_for = record.get("predicted_for_timestamp")
+        estimated_at = record.get("source_estimated_at")
+        source_track_id = _nonempty_str(record.get("source_yolo_track_id"))
+        coordinate_system = _nonempty_str(record.get("coordinate_system"))
+
+        if (
+            not isinstance(expires_at, (int, float))
+            or not isinstance(predicted_for, (int, float))
+            or not isinstance(estimated_at, (int, float))
+            or source_track_id is None
+            or coordinate_system is None
+        ):
+            stale_or_invalid_count += 1
+            continue
+        if float(expires_at) <= float(now):
+            stale_or_invalid_count += 1
+            continue
+        if abs(float(now) - float(predicted_for)) > max_effective_horizon_seconds:
+            stale_or_invalid_count += 1
+            continue
+        if float(predicted_for) < float(estimated_at):
+            stale_or_invalid_count += 1
+            continue
+        if (
+            isinstance(source_generation, int)
+            and isinstance(snapshot_generation, int)
+            and source_generation > snapshot_generation
+        ):
+            stale_or_invalid_count += 1
+            continue
+        if (
+            isinstance(source_version, int)
+            and isinstance(snapshot_version, int)
+            and source_version > snapshot_version
+        ):
+            stale_or_invalid_count += 1
+            continue
+
+        expected_ground = record.get("estimated_ground_position")
+        expected_pixel = record.get("estimated_pixel_position")
+        expected_unit = _nonempty_str(record.get("coordinate_unit"))
+
+        for candidate_track_id, candidate in detection_candidates:
+            if candidate_track_id == source_track_id:
+                continue
+
+            owner = candidate_track_owner.get(candidate_track_id)
+            if owner == app_identity_id:
+                continue
+
+            match_metric = None
+            match_distance = None
+            match_threshold = None
+
+            if coordinate_system == "calibrated_ground_plane":
+                if calibration_status != "loaded":
+                    continue
+                candidate_kind = _nonempty_str(getattr(candidate, "position_kind", None))
+                candidate_unit = _nonempty_str(getattr(candidate, "ground_coordinate_unit", None))
+                candidate_ground_x = getattr(candidate, "ground_x", None)
+                candidate_ground_z = getattr(candidate, "ground_z", None)
+                if (
+                    candidate_kind != "calibrated_ground_plane"
+                    or candidate_unit is None
+                    or expected_unit is None
+                    or candidate_unit != expected_unit
+                    or not isinstance(expected_ground, dict)
+                    or not isinstance(candidate_ground_x, (int, float))
+                    or not isinstance(candidate_ground_z, (int, float))
+                    or not isinstance(expected_ground.get("x"), (int, float))
+                    or not isinstance(expected_ground.get("z"), (int, float))
+                ):
+                    continue
+                dx = float(candidate_ground_x) - float(expected_ground.get("x"))
+                dz = float(candidate_ground_z) - float(expected_ground.get("z"))
+                match_distance = (dx * dx + dz * dz) ** 0.5
+                match_threshold = ground_threshold
+                match_metric = "ground_distance"
+            else:
+                candidate_pixel_x = getattr(candidate, "pixel_center_x", None)
+                candidate_pixel_y = getattr(candidate, "pixel_center_y", None)
+                if (
+                    not isinstance(expected_pixel, dict)
+                    or not isinstance(candidate_pixel_x, (int, float))
+                    or not isinstance(candidate_pixel_y, (int, float))
+                    or not isinstance(expected_pixel.get("x"), (int, float))
+                    or not isinstance(expected_pixel.get("y"), (int, float))
+                ):
+                    continue
+                dx = float(candidate_pixel_x) - float(expected_pixel.get("x"))
+                dy = float(candidate_pixel_y) - float(expected_pixel.get("y"))
+                match_distance = (dx * dx + dy * dy) ** 0.5
+                match_threshold = pixel_threshold
+                match_metric = "pixel_distance"
+
+            if (
+                match_metric is None
+                or not isinstance(match_distance, float)
+                or not isinstance(match_threshold, float)
+                or match_distance > match_threshold
+            ):
+                continue
+
+            normalized = match_distance / match_threshold if match_threshold > 0 else 1.0
+            links.append(
+                {
+                    "app_identity_id": app_identity_id,
+                    "candidate_yolo_track_id": candidate_track_id,
+                    "source_yolo_track_id": source_track_id,
+                    "estimate_id": record.get("estimate_id"),
+                    "predicted_for_timestamp": float(predicted_for),
+                    "expires_at": float(expires_at),
+                    "source_estimated_at": float(estimated_at),
+                    "source_identity_registry_generation": source_generation,
+                    "source_identity_registry_version": source_version,
+                    "identity_status": identity_record.status,
+                    "match_metric": match_metric,
+                    "match_distance": match_distance,
+                    "match_threshold": match_threshold,
+                    "normalized_score": normalized,
+                    "coordinate_system": coordinate_system,
+                    "ground_coordinate_mode": record.get("ground_coordinate_mode"),
+                    "coordinate_unit": expected_unit,
+                    "classification": "prediction_detection_advisory",
+                    "source_tracking_message_ids": record.get("source_tracking_message_ids", []),
+                    "source_verification_observation_id": record.get("source_verification_observation_id"),
+                    "source_verification_message_id": record.get("source_verification_message_id"),
+                }
+            )
+
+    links_by_identity: dict[str, list[dict[str, Any]]] = {}
+    links_by_track: dict[str, list[dict[str, Any]]] = {}
+    for link in links:
+        links_by_identity.setdefault(link["app_identity_id"], []).append(link)
+        links_by_track.setdefault(link["candidate_yolo_track_id"], []).append(link)
+
+    ambiguous_identity_ids: set[str] = set()
+    ambiguous_track_ids: set[str] = set()
+
+    for identity_id, grouped in links_by_identity.items():
+        grouped.sort(key=lambda item: float(item.get("normalized_score", 1.0)))
+        if len(grouped) >= 2:
+            first = grouped[0]
+            second = grouped[1]
+            margin = (
+                ground_ambiguity
+                if first.get("match_metric") == "ground_distance"
+                else pixel_ambiguity
+            )
+            if (
+                isinstance(first.get("match_distance"), (int, float))
+                and isinstance(second.get("match_distance"), (int, float))
+                and (float(second.get("match_distance")) - float(first.get("match_distance"))) <= margin
+            ):
+                ambiguous_identity_ids.add(identity_id)
+
+    for track_id, grouped in links_by_track.items():
+        grouped.sort(key=lambda item: float(item.get("normalized_score", 1.0)))
+        if len(grouped) >= 2:
+            first = grouped[0]
+            second = grouped[1]
+            margin = (
+                ground_ambiguity
+                if first.get("match_metric") == "ground_distance"
+                else pixel_ambiguity
+            )
+            if (
+                isinstance(first.get("match_distance"), (int, float))
+                and isinstance(second.get("match_distance"), (int, float))
+                and (float(second.get("match_distance")) - float(first.get("match_distance"))) <= margin
+            ):
+                ambiguous_track_ids.add(track_id)
+
+    matched: list[dict[str, Any]] = []
+    ambiguous: list[dict[str, Any]] = []
+    used_identity_ids: set[str] = set()
+    used_track_ids: set[str] = set()
+
+    for link in sorted(links, key=lambda item: float(item.get("normalized_score", 1.0))):
+        identity_id = link["app_identity_id"]
+        track_id = link["candidate_yolo_track_id"]
+
+        if identity_id in ambiguous_identity_ids or track_id in ambiguous_track_ids:
+            ambiguous.append(
+                {
+                    **link,
+                    "decision": "ambiguous",
+                    "reason": (
+                        "identity_has_competing_candidates"
+                        if identity_id in ambiguous_identity_ids
+                        else "track_has_competing_identities"
+                    ),
+                    "advisory_created_at": float(now),
+                }
+            )
+            continue
+
+        if identity_id in used_identity_ids or track_id in used_track_ids:
+            continue
+
+        used_identity_ids.add(identity_id)
+        used_track_ids.add(track_id)
+        matched.append(
+            {
+                **link,
+                "decision": "matched",
+                "reason": None,
+                "advisory_created_at": float(now),
+            }
+        )
+
+    advisories = [*matched, *ambiguous]
+    advisories.sort(
+        key=lambda item: (
+            0 if item.get("decision") == "matched" else 1,
+            float(item.get("normalized_score", 1.0)),
+        )
+    )
+    if len(advisories) > max_advisories:
+        advisories = advisories[:max_advisories]
+
+    with state.lock:
+        state.latest_tracking_prediction_detection_advisories = advisories
+        state.latest_tracking_prediction_detection_advisory_summary = {
+            "updated_at": float(now),
+            "available": True,
+            "candidate_detection_count": len(detection_candidates),
+            "eligible_prediction_count": len(prediction_map),
+            "link_count": len(links),
+            "matched_count": len(matched),
+            "ambiguous_count": len(ambiguous),
+            "rejected_count": rejected_count,
+            "stale_or_invalid_count": stale_or_invalid_count,
+            "max_records": max_advisories,
+            "identity_keying": "app_identity_id",
+        }
+    try:
+        write_json_payload(
+            LATEST_TRACKING_PREDICTION_DETECTION_ADVISORIES_PATH,
+            {
+                "schema_version": "1.0",
+                "updated_at": float(now),
+                "available": True,
+                "summary": {
+                    "updated_at": float(now),
+                    "available": True,
+                    "candidate_detection_count": len(detection_candidates),
+                    "eligible_prediction_count": len(prediction_map),
+                    "link_count": len(links),
+                    "matched_count": len(matched),
+                    "ambiguous_count": len(ambiguous),
+                    "rejected_count": rejected_count,
+                    "stale_or_invalid_count": stale_or_invalid_count,
+                    "max_records": max_advisories,
+                    "identity_keying": "app_identity_id",
+                },
+                "advisories": advisories,
+            },
+        )
+    except OSError:
+        pass
+
+
 def _package_tracking_evidence_if_enabled(
     *,
     state: SharedDashboardState,
@@ -1695,6 +2044,395 @@ def _generate_tracking_estimate_proposals(
         state.latest_tracking_estimate_proposals = proposal_summary
 
 
+def _track_prediction_ordering_key(record: dict[str, Any]) -> tuple[float, float, float]:
+    predicted_for = record.get("predicted_for_timestamp")
+    estimated_at = record.get("source_estimated_at")
+    promoted_at = record.get("promoted_at")
+    predicted_for_value = float(predicted_for) if isinstance(predicted_for, (int, float)) else 0.0
+    estimated_at_value = float(estimated_at) if isinstance(estimated_at, (int, float)) else 0.0
+    promoted_at_value = float(promoted_at) if isinstance(promoted_at, (int, float)) else 0.0
+    return (predicted_for_value, estimated_at_value, promoted_at_value)
+
+
+def _is_valid_estimate_position_payload(proposal: dict[str, Any]) -> bool:
+    estimated_pixel = proposal.get("estimated_pixel_center")
+    if isinstance(estimated_pixel, dict):
+        pixel_x = estimated_pixel.get("x")
+        pixel_y = estimated_pixel.get("y")
+        if isinstance(pixel_x, (int, float)) and isinstance(pixel_y, (int, float)):
+            return True
+
+    estimated_ground = proposal.get("estimated_ground_position")
+    if isinstance(estimated_ground, dict):
+        ground_x = estimated_ground.get("x")
+        ground_z = estimated_ground.get("z")
+        ground_unit = estimated_ground.get("unit")
+        if (
+            isinstance(ground_x, (int, float))
+            and isinstance(ground_z, (int, float))
+            and isinstance(ground_unit, str)
+            and ground_unit.strip()
+        ):
+            return True
+
+    return False
+
+
+def _build_feedback_index_by_observation_id(feedback_summary: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    if not isinstance(feedback_summary, dict):
+        return {}
+    accepted = feedback_summary.get("accepted")
+    if not isinstance(accepted, list):
+        return {}
+
+    index: dict[str, dict[str, Any]] = {}
+    for item in accepted:
+        if not isinstance(item, dict):
+            continue
+        observation_id = item.get("verification_observation_id")
+        if not isinstance(observation_id, str) or not observation_id.strip():
+            continue
+        index[observation_id] = item
+    return index
+
+
+def _promote_and_prune_tracking_prediction_evidence(
+    *,
+    state: SharedDashboardState,
+    now: float,
+    tracks: dict[str, Any],
+) -> None:
+    with state.lock:
+        proposal_summary = state.latest_tracking_estimate_proposals
+        feedback_summary = state.latest_tracking_observation_feedback
+        registry_enabled = bool(state.tracking_identity_registry_enabled)
+        registry = state.tracking_identity_registry
+        registry_generation = state.tracking_identity_registry_generation
+        registry_version = state.tracking_identity_registry_version
+        calibration_status = str(state.calibration_status)
+        mapping_mode = str(state.mapping_mode)
+
+        prediction_map = dict(state.latest_tracking_prediction_evidence_by_identity)
+        unresolved_records = list(state.latest_tracking_prediction_evidence_unresolved)
+        last_calibration_status = state.tracking_prediction_last_calibration_status
+        last_mapping_mode = state.tracking_prediction_last_mapping_mode
+        max_records = max(1, int(state.tracking_prediction_evidence_max_records))
+        max_unresolved = max(1, int(state.tracking_prediction_unresolved_max_records))
+
+    invalidated_by_calibration_change = 0
+    if (
+        last_calibration_status is not None
+        and last_mapping_mode is not None
+        and (last_calibration_status != calibration_status or last_mapping_mode != mapping_mode)
+    ):
+        invalidated_by_calibration_change = len(prediction_map) + len(unresolved_records)
+        prediction_map = {}
+        unresolved_records = []
+
+    pruned_expired = 0
+    for identity_id in list(prediction_map.keys()):
+        record = prediction_map.get(identity_id)
+        if not isinstance(record, dict):
+            prediction_map.pop(identity_id, None)
+            pruned_expired += 1
+            continue
+        expires_at = record.get("expires_at")
+        evidence_expires_at = record.get("source_feedback_expires_at")
+        if (
+            not isinstance(expires_at, (int, float))
+            or float(expires_at) <= float(now)
+            or (isinstance(evidence_expires_at, (int, float)) and float(evidence_expires_at) <= float(now))
+        ):
+            prediction_map.pop(identity_id, None)
+            pruned_expired += 1
+
+    pruned_unresolved_expired = 0
+    bounded_unresolved: list[dict[str, Any]] = []
+    for record in unresolved_records:
+        if not isinstance(record, dict):
+            pruned_unresolved_expired += 1
+            continue
+        expires_at = record.get("expires_at")
+        evidence_expires_at = record.get("source_feedback_expires_at")
+        if (
+            not isinstance(expires_at, (int, float))
+            or float(expires_at) <= float(now)
+            or (isinstance(evidence_expires_at, (int, float)) and float(evidence_expires_at) <= float(now))
+        ):
+            pruned_unresolved_expired += 1
+            continue
+        bounded_unresolved.append(record)
+    unresolved_records = bounded_unresolved
+
+    observed_track_ids = {
+        track_id
+        for track_id in tracks.keys()
+        if isinstance(track_id, str) and track_id.strip()
+    }
+
+    invalidated_on_reappearance = 0
+    if observed_track_ids:
+        for identity_id in list(prediction_map.keys()):
+            record = prediction_map.get(identity_id)
+            if not isinstance(record, dict):
+                continue
+            source_track_id = record.get("source_yolo_track_id")
+            if isinstance(source_track_id, str) and source_track_id in observed_track_ids:
+                prediction_map.pop(identity_id, None)
+                invalidated_on_reappearance += 1
+
+        unresolved_remaining: list[dict[str, Any]] = []
+        for record in unresolved_records:
+            source_track_id = record.get("source_yolo_track_id") if isinstance(record, dict) else None
+            if isinstance(source_track_id, str) and source_track_id in observed_track_ids:
+                invalidated_on_reappearance += 1
+                continue
+            unresolved_remaining.append(record)
+        unresolved_records = unresolved_remaining
+
+    invalidated_identity_state = 0
+    if registry_enabled and registry is not None:
+        observed_identity_ids: set[str] = set()
+        for track_id in observed_track_ids:
+            app_identity_id = registry.get_identity_for_yolo_track(track_id)
+            if isinstance(app_identity_id, str) and app_identity_id:
+                observed_identity_ids.add(app_identity_id)
+
+        for identity_id in list(prediction_map.keys()):
+            record = prediction_map.get(identity_id)
+            if not isinstance(record, dict):
+                continue
+
+            if identity_id in observed_identity_ids:
+                prediction_map.pop(identity_id, None)
+                invalidated_identity_state += 1
+                continue
+
+            record_snapshot = registry.get_record(identity_id)
+            if record_snapshot is None:
+                prediction_map.pop(identity_id, None)
+                invalidated_identity_state += 1
+                continue
+
+            if record_snapshot.status == "retired":
+                prediction_map.pop(identity_id, None)
+                invalidated_identity_state += 1
+                continue
+
+            source_track_id = record.get("source_yolo_track_id")
+            if isinstance(source_track_id, str) and source_track_id:
+                if record_snapshot.yolo_track_id != source_track_id:
+                    prediction_map.pop(identity_id, None)
+                    invalidated_identity_state += 1
+                    continue
+
+    feedback_by_observation_id = _build_feedback_index_by_observation_id(feedback_summary)
+    accepted_items = proposal_summary.get("accepted") if isinstance(proposal_summary, dict) else None
+    promoted_count = 0
+    unresolved_promoted = 0
+    rejected_malformed = 0
+    rejected_stale_or_invalid = 0
+    rejected_out_of_order = 0
+
+    if isinstance(accepted_items, list):
+        for item in accepted_items:
+            if not isinstance(item, dict):
+                rejected_malformed += 1
+                continue
+
+            proposal = item.get("proposal")
+            validation = item.get("validation")
+            if not isinstance(proposal, dict) or not isinstance(validation, dict):
+                rejected_malformed += 1
+                continue
+
+            if not bool(validation.get("valid", False)):
+                rejected_stale_or_invalid += 1
+                continue
+
+            track_id = proposal.get("track_id")
+            estimate_id = proposal.get("estimate_id")
+            expires_at = proposal.get("expires_at")
+            predicted_for = proposal.get("predicted_for_timestamp")
+            estimated_at = proposal.get("estimated_at")
+            coordinate_system = proposal.get("coordinate_system")
+            ground_coordinate_mode = proposal.get("ground_coordinate_mode")
+
+            if (
+                not isinstance(track_id, str)
+                or not track_id
+                or not isinstance(estimate_id, str)
+                or not estimate_id
+                or not isinstance(expires_at, (int, float))
+                or float(expires_at) <= float(now)
+                or not isinstance(predicted_for, (int, float))
+                or not isinstance(estimated_at, (int, float))
+                or not isinstance(coordinate_system, str)
+                or not coordinate_system
+                or not isinstance(ground_coordinate_mode, str)
+                or not ground_coordinate_mode
+                or not _is_valid_estimate_position_payload(proposal)
+            ):
+                rejected_stale_or_invalid += 1
+                continue
+
+            feedback_observation_id = proposal.get("source_verification_observation_id")
+            feedback_record = (
+                feedback_by_observation_id.get(feedback_observation_id)
+                if isinstance(feedback_observation_id, str)
+                else None
+            )
+
+            evidence_expires_at = None
+            verification_timestamp = None
+            visibility_status = None
+            uncertainty = proposal.get("uncertainty")
+            if isinstance(feedback_record, dict):
+                feedback_expires = feedback_record.get("expires_at")
+                if isinstance(feedback_expires, (int, float)):
+                    evidence_expires_at = float(feedback_expires)
+                feedback_verification_timestamp = feedback_record.get("verification_timestamp")
+                if isinstance(feedback_verification_timestamp, (int, float)):
+                    verification_timestamp = float(feedback_verification_timestamp)
+                details = feedback_record.get("details")
+                if isinstance(details, dict):
+                    status_value = details.get("visibility_status")
+                    if isinstance(status_value, str) and status_value:
+                        visibility_status = status_value
+                    feedback_uncertainty = details.get("uncertainty")
+                    if isinstance(feedback_uncertainty, list):
+                        uncertainty = [str(value) for value in feedback_uncertainty if isinstance(value, str)]
+
+            if isinstance(evidence_expires_at, float) and evidence_expires_at <= float(now):
+                rejected_stale_or_invalid += 1
+                continue
+
+            if visibility_status in {"occluded", "partially_occluded", "not_visible"}:
+                classification = "occlusion_candidate"
+            else:
+                classification = "predicted_estimate"
+
+            record_payload = {
+                "app_identity_id": None,
+                "source_yolo_track_id": track_id,
+                "estimate_id": estimate_id,
+                "source_generated_at": proposal_summary.get("generated_at") if isinstance(proposal_summary, dict) else float(now),
+                "source_identity_registry_generation": (
+                    int(registry_generation)
+                    if isinstance(registry_generation, int)
+                    else None
+                ),
+                "source_identity_registry_version": (
+                    int(registry_version)
+                    if isinstance(registry_version, int)
+                    else None
+                ),
+                "source_estimated_at": float(estimated_at),
+                "source_verification_timestamp": verification_timestamp,
+                "predicted_for_timestamp": float(predicted_for),
+                "expires_at": float(expires_at),
+                "coordinate_system": coordinate_system,
+                "ground_coordinate_mode": ground_coordinate_mode,
+                "coordinate_unit": (
+                    proposal.get("estimated_ground_position", {}).get("unit")
+                    if isinstance(proposal.get("estimated_ground_position"), dict)
+                    else None
+                ),
+                "estimated_pixel_position": (
+                    proposal.get("estimated_pixel_center")
+                    if isinstance(proposal.get("estimated_pixel_center"), dict)
+                    else None
+                ),
+                "estimated_ground_position": (
+                    proposal.get("estimated_ground_position")
+                    if isinstance(proposal.get("estimated_ground_position"), dict)
+                    else None
+                ),
+                "uncertainty": uncertainty if isinstance(uncertainty, list) else [],
+                "classification": classification,
+                "source_tracking_message_ids": (
+                    proposal.get("source_tracking_message_ids")
+                    if isinstance(proposal.get("source_tracking_message_ids"), list)
+                    else []
+                ),
+                "source_verification_observation_id": proposal.get("source_verification_observation_id"),
+                "source_verification_message_id": proposal.get("source_verification_message_id"),
+                "validation": {
+                    "valid": True,
+                    "freshness_status": validation.get("freshness_status"),
+                    "plausibility_status": validation.get("plausibility_status"),
+                    "warnings": validation.get("warnings", []),
+                },
+                "source_feedback_expires_at": evidence_expires_at,
+                "promoted_at": float(now),
+            }
+
+            app_identity_id = None
+            if registry_enabled and registry is not None:
+                resolved_identity_id = registry.get_identity_for_yolo_track(track_id)
+                if isinstance(resolved_identity_id, str) and resolved_identity_id:
+                    resolved_record = registry.get_record(resolved_identity_id)
+                    if resolved_record is not None and resolved_record.status != "retired":
+                        app_identity_id = resolved_identity_id
+
+            if app_identity_id is None:
+                unresolved_record = dict(record_payload)
+                unresolved_record["diagnostic_reason"] = (
+                    "identity_registry_unavailable"
+                    if not registry_enabled or registry is None
+                    else "identity_resolution_unavailable"
+                )
+                unresolved_records.append(unresolved_record)
+                unresolved_promoted += 1
+                continue
+
+            record_payload["app_identity_id"] = app_identity_id
+            existing = prediction_map.get(app_identity_id)
+            if isinstance(existing, dict):
+                if _track_prediction_ordering_key(record_payload) <= _track_prediction_ordering_key(existing):
+                    rejected_out_of_order += 1
+                    continue
+
+            prediction_map[app_identity_id] = record_payload
+            promoted_count += 1
+
+    if len(prediction_map) > max_records:
+        sorted_items = sorted(
+            prediction_map.items(),
+            key=lambda item: _track_prediction_ordering_key(item[1]),
+        )
+        overflow = len(sorted_items) - max_records
+        for identity_id, _ in sorted_items[:overflow]:
+            prediction_map.pop(identity_id, None)
+
+    if len(unresolved_records) > max_unresolved:
+        unresolved_records = unresolved_records[-max_unresolved:]
+
+    with state.lock:
+        state.latest_tracking_prediction_evidence_by_identity = prediction_map
+        state.latest_tracking_prediction_evidence_unresolved = unresolved_records
+        state.latest_tracking_prediction_evidence_summary = {
+            "updated_at": float(now),
+            "store_count": len(prediction_map),
+            "unresolved_count": len(unresolved_records),
+            "promoted_count": promoted_count,
+            "unresolved_promoted_count": unresolved_promoted,
+            "rejected_malformed_count": rejected_malformed,
+            "rejected_stale_or_invalid_count": rejected_stale_or_invalid,
+            "rejected_out_of_order_count": rejected_out_of_order,
+            "pruned_expired_count": pruned_expired,
+            "pruned_unresolved_expired_count": pruned_unresolved_expired,
+            "invalidated_on_reappearance_count": invalidated_on_reappearance,
+            "invalidated_identity_state_count": invalidated_identity_state,
+            "invalidated_calibration_change_count": invalidated_by_calibration_change,
+            "max_records": max_records,
+            "max_unresolved_records": max_unresolved,
+            "identity_keying": "app_identity_id",
+        }
+        state.tracking_prediction_last_calibration_status = calibration_status
+        state.tracking_prediction_last_mapping_mode = mapping_mode
+
+
 def _build_tracking_estimate_diagnostic_payload(
     *,
     proposal_summary: dict[str, Any] | None,
@@ -2113,6 +2851,12 @@ def run_live_tracking_loop(
                 max_ground_z=MAX_GROUND_Z,
             )
 
+            _build_prediction_detection_advisories(
+                state=state,
+                now=now,
+                tracking_candidates=tracking_candidates,
+            )
+
             _consume_identity_reassociation_if_enabled(
                 state=state,
                 now=now,
@@ -2168,6 +2912,12 @@ def run_live_tracking_loop(
                 tracks=tracks,
             )
 
+            _promote_and_prune_tracking_prediction_evidence(
+                state=state,
+                now=now,
+                tracks=tracks,
+            )
+
             _publish_tracking_estimate_diagnostics(
                 state=state,
                 now=now,
@@ -2207,6 +2957,13 @@ def run_live_tracking_loop(
             state.latest_tracking_lost_evidence_message_by_track = {}
             state.latest_tracking_lost_track_expires_at_by_track = {}
             state.latest_tracking_estimate_proposals = None
+            state.latest_tracking_prediction_evidence_by_identity = {}
+            state.latest_tracking_prediction_evidence_unresolved = []
+            state.latest_tracking_prediction_evidence_summary = None
+            state.tracking_prediction_last_calibration_status = None
+            state.tracking_prediction_last_mapping_mode = None
+            state.latest_tracking_prediction_detection_advisories = []
+            state.latest_tracking_prediction_detection_advisory_summary = None
             state.tracking_identity_registry_enabled = False
             state.tracking_identity_registry = None
             state.tracking_identity_registry_generation = 0
@@ -2237,6 +2994,21 @@ def run_live_tracking_loop(
                     proposal_summary=None,
                     now=time.time(),
                 ),
+            )
+            write_json_payload(
+                LATEST_TRACKING_PREDICTION_DETECTION_ADVISORIES_PATH,
+                {
+                    "schema_version": "1.0",
+                    "updated_at": float(time.time()),
+                    "available": False,
+                    "summary": {
+                        "updated_at": float(time.time()),
+                        "available": False,
+                        "reason": "tracking_runtime_stopped",
+                        "advisory_count": 0,
+                    },
+                    "advisories": [],
+                },
             )
         except OSError:
             pass
